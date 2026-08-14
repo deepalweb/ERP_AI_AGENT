@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  backend:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+    command: ["bash", "-c", "echo 'Replace with backend start command'"]
+  frontend:
+    build: ./frontend
+    volumes:
+      - ./frontend:/app
+    command: ["bash", "-c", "echo 'Replace with frontend start command'"]
