@@ -11,6 +11,7 @@ __pycache__/
 .vscode/
 
 *.log
+*.db
 
 dist/
 build/
@@ -19,3 +20,7 @@ build/
 node_modules/
 
 .DS_Store
+
+# Installed skill packages (reproducible from skills-lock.json via `npx skills`)
+.agents/skills/
+.claude/skills/
