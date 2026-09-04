@@ -41,6 +41,7 @@ export function formatByUnit(value, unit) {
 }
 
 export function monthLabel(monthKey) {
+  if (!/^\d{4}-\d{2}$/.test(monthKey || "")) return monthKey;
   const [year, month] = monthKey.split("-").map(Number);
   return new Date(year, month - 1, 1).toLocaleDateString(undefined, {
     month: "short",

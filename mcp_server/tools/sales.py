@@ -1,13 +1,46 @@
-from datetime import datetime, date
+import re
+from datetime import date, timedelta
 from calendar import monthrange
 from typing import Optional
 
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS
 
+_DAY_WINDOW_RE = re.compile(r"^(\d{1,3})d$")
+
+
+def _parse_day_window(period: Optional[str]) -> Optional[int]:
+    """If `period` is a rolling-window spec like '7d' or '30d', return the day
+    count; otherwise None (meaning it's a YYYY-MM month, or unset)."""
+    if not period:
+        return None
+    m = _DAY_WINDOW_RE.match(period)
+    return int(m.group(1)) if m else None
+
+
+def _latest_order_date() -> date:
+    """The data's own most recent order date — rolling windows anchor here,
+    not date.today(), since the DB snapshot can lag real time by weeks (same
+    reasoning as the partial-period detection below)."""
+    rows = reporting.run_query(
+        f"SELECT MAX(date_order) AS max_d FROM sale_order WHERE state IN ('sale','done') AND store_id IN {CELESTE_STORE_IDS}"
+    )
+    max_d = rows[0].get("max_d") if rows else None
+    return max_d.date() if max_d else date.today()
+
 
 def _period_bounds(period: Optional[str]):
-    """Return (start_date, end_date) for a YYYY-MM period string or last month if None."""
+    """Return (start_date, end_date) as ISO strings.
+
+    Accepts a YYYY-MM month (or None for last month), or a rolling window like
+    '7d' / '30d' — the last N days ending at the data's own latest order date.
+    """
+    days = _parse_day_window(period)
+    if days:
+        end = _latest_order_date()
+        start = end - timedelta(days=days - 1)
+        return start.isoformat(), end.isoformat()
+
     if period:
         year, month = map(int, period.split("-"))
         start = date(year, month, 1)
@@ -23,6 +56,14 @@ def _period_bounds(period: Optional[str]):
     end = date(start.year, start.month, last_day)  # inclusive
     # use ISO date strings
     return start.isoformat(), (end.replace(day=end.day) ) .isoformat()
+
+
+def _period_label(period: Optional[str], start: str, end: str) -> str:
+    """Human-readable period string for display, independent of internal format."""
+    days = _parse_day_window(period)
+    if days:
+        return f"Last {days} days ({start} to {end})"
+    return period or start[:7]
 
 
 def get_sales_summary(period: Optional[str] = None):
@@ -65,16 +106,6 @@ def get_sales_summary(period: Optional[str] = None):
     orders = int(row.get("orders") or 0)
     avg = float(row.get("average_order_value") or 0)
 
-    # previous period
-    # compute previous month bounds
-    s_year, s_month = map(int, start.split("-")[:2]) if isinstance(start, str) else (start.year, start.month)
-    if s_month == 1:
-        ps, pm = s_year - 1, 12
-    else:
-        ps, pm = s_year, s_month - 1
-    prev_period = f"{ps:04d}-{pm:02d}"
-    pstart, pend = _period_bounds(prev_period)
-
     sql_prev = f"""
     SELECT SUM(amount_total) AS revenue FROM (
       SELECT amount_total FROM sale_order
@@ -84,6 +115,49 @@ def get_sales_summary(period: Optional[str] = None):
       SELECT amount_total FROM account_move WHERE move_type='out_invoice' AND invoice_date >= :start AND invoice_date <= :end AND state='posted'
     ) t
     """
+
+    days = _parse_day_window(period)
+    if days:
+        # Previous period = the equal-length window immediately before this
+        # one. Rolling windows are anchored to the data's own latest order
+        # date (see _latest_order_date), so unlike a calendar month they're
+        # never "partial" by construction — the window IS exactly `days` days
+        # of the most recent available data.
+        start_date = date.fromisoformat(start)
+        pend = (start_date - timedelta(days=1)).isoformat()
+        pstart = (start_date - timedelta(days=days)).isoformat()
+        is_partial_period = False
+        days_elapsed = days_in_period = days
+    else:
+        # compute previous month bounds
+        s_year, s_month = map(int, start.split("-")[:2])
+        if s_month == 1:
+            ps, pm = s_year - 1, 12
+        else:
+            ps, pm = s_year, s_month - 1
+        pstart, pend = _period_bounds(f"{ps:04d}-{pm:02d}")
+
+        # Flag when the requested period isn't fully covered by the data yet,
+        # since a partial period's revenue isn't comparable to a full prior
+        # one. Anchored to the data's own latest order date, not
+        # date.today() — the DB snapshot can lag real time by weeks, which
+        # would otherwise make a fully elapsed month look "partial" or
+        # (worse) a genuinely partial one look done.
+        as_of = _latest_order_date()
+        days_in_period = monthrange(s_year, s_month)[1]
+        period_start = date(s_year, s_month, 1)
+        period_end = date(s_year, s_month, days_in_period)
+
+        if as_of >= period_end:
+            is_partial_period = False
+            days_elapsed = days_in_period
+        elif as_of < period_start:
+            is_partial_period = True
+            days_elapsed = 0
+        else:
+            is_partial_period = True
+            days_elapsed = as_of.day
+
     prow = reporting.run_query(sql_prev, {"start": pstart, "end": pend})
     prev_row = prow[0] if prow else {}
     prev_revenue = float(prev_row.get("revenue") or 0)
@@ -92,31 +166,8 @@ def get_sales_summary(period: Optional[str] = None):
     if prev_revenue:
         growth = (revenue - prev_revenue) / prev_revenue * 100
 
-    # Flag when the requested period isn't fully covered by the data yet, since
-    # a partial period's revenue isn't comparable to a full previous month.
-    # Anchored to the data's own latest order date, not date.today() — the DB
-    # snapshot can lag real time by weeks, which would otherwise make a fully
-    # elapsed month look "partial" or (worse) a genuinely partial one look done.
-    as_of_rows = reporting.run_query(
-        f"SELECT MAX(date_order) AS max_d FROM sale_order WHERE state IN ('sale','done') AND store_id IN {CELESTE_STORE_IDS}"
-    )
-    as_of = as_of_rows[0].get("max_d") if as_of_rows else None
-    days_in_period = monthrange(s_year, s_month)[1]
-    period_start = date(s_year, s_month, 1)
-    period_end = date(s_year, s_month, days_in_period)
-
-    if as_of is None or as_of.date() >= period_end:
-        is_partial_period = False
-        days_elapsed = days_in_period
-    elif as_of.date() < period_start:
-        is_partial_period = True
-        days_elapsed = 0
-    else:
-        is_partial_period = True
-        days_elapsed = as_of.date().day
-
     return {
-        "period": period or f"{start[:7]}",
+        "period": _period_label(period, start, end),
         "revenue": revenue,
         "orders": orders,
         "average_order_value": avg,

@@ -10,9 +10,30 @@ reasoning as customers.py: the DB snapshot lags the system clock by weeks.
 """
 
 from backend.app.db import reporting
+from backend.app.db.store_scope import CELESTE_STORE_IDS
 
 OVERSTOCK_DAYS = 90  # p90 of the days-of-stock distribution across in-stock retail products
 TOP_ITEMS = 8
+
+# Joins via stock_location.warehouse_id -> res_store.warehouse_id, not
+# res_store.name pattern-matching — a warehouse can serve co-located
+# non-Celeste storefronts (SPAR, Budget Kade, etc.), so grouping by store name
+# would fan out one warehouse's stock across multiple label rows. Restricting
+# to CELESTE_STORE_IDS keeps this a clean 1:1 warehouse-to-outlet mapping
+# (verified: each of the 5 real outlets has a distinct warehouse_id).
+INVENTORY_BY_OUTLET_SQL = f"""
+    SELECT rs.name AS outlet, SUM(sq.quantity) AS total_qty,
+           SUM(sq.quantity * COALESCE(pt.celeste_cost_price_ex_vat, 0)) AS estimated_value
+    FROM stock_quant sq
+    JOIN stock_location sl ON sl.id = sq.location_id
+    JOIN res_store rs ON rs.warehouse_id = sl.warehouse_id
+    JOIN product_product pp ON pp.id = sq.product_id
+    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    WHERE sl.usage = 'internal' AND rs.id IN {CELESTE_STORE_IDS}
+      AND sq.quantity > 0 AND pt.celeste_product_type = 'INVENTORY'
+    GROUP BY rs.name
+    ORDER BY estimated_value DESC
+"""
 
 INVENTORY_DEPTH_SQL = """
     WITH bounds AS (SELECT MAX(date_order) AS as_of FROM sale_order WHERE state = 'sale'),
@@ -130,3 +151,15 @@ async def get_inventory_depth():
         "dead_stock_items": dead_stock_candidates[:TOP_ITEMS],
         "overstock_items": overstock_candidates[:TOP_ITEMS],
     }
+
+
+async def get_inventory_by_outlet():
+    rows = await reporting.fetch_report(INVENTORY_BY_OUTLET_SQL)
+    return [
+        {
+            "name": r["outlet"],
+            "units": round(float(r["total_qty"] or 0), 2),
+            "estimated_value": round(float(r["estimated_value"] or 0), 2),
+        }
+        for r in rows
+    ]

@@ -12,6 +12,17 @@ import InventoryDepth from "./InventoryDepth";
 import ForwardLook from "./ForwardLook";
 import OperationsSummaryCard from "./chat/OperationsSummaryCard";
 import InvestigateMetricCard from "./chat/InvestigateMetricCard";
+import TopProductsCard from "./chat/TopProductsCard";
+import CancelledProductsCard from "./chat/CancelledProductsCard";
+import MarginCard from "./chat/MarginCard";
+import ChannelBreakdownCard from "./chat/ChannelBreakdownCard";
+import UberLostSalesCard from "./chat/UberLostSalesCard";
+import InventoryByOutletCard from "./chat/InventoryByOutletCard";
+import ProductLookupCard from "./chat/ProductLookupCard";
+import StockAlertsCard from "./chat/StockAlertsCard";
+import ProductListingCard from "./chat/ProductListingCard";
+import ChatSidebar from "./chat/ChatSidebar";
+import { loadConversations, saveConversations, newConversation, titleFromMessage } from "./chat/storage";
 
 function SalesSummaryCard({ result }) {
   if (!result || result.error) {
@@ -44,7 +55,7 @@ function SalesSummaryCard({ result }) {
           </span>
         </div>
         <div>
-          <span className="tool-card-label">Growth vs. Prev. Month</span>
+          <span className="tool-card-label">Growth vs. Prev. Period</span>
           <span className="tool-card-value">
             {result.growth_vs_previous_month_pct === null
               ? "n/a"
@@ -76,6 +87,24 @@ function ToolCalls({ toolCalls }) {
             return <OperationsSummaryCard key={i} result={call.result} />;
           case "investigate_metric":
             return <InvestigateMetricCard key={i} result={call.result} />;
+          case "get_top_products":
+            return <TopProductsCard key={i} result={call.result} />;
+          case "get_top_cancelled_products":
+            return <CancelledProductsCard key={i} result={call.result} />;
+          case "get_gross_margin":
+            return <MarginCard key={i} result={call.result} />;
+          case "get_channel_breakdown":
+            return <ChannelBreakdownCard key={i} result={call.result} />;
+          case "get_uber_lost_sales":
+            return <UberLostSalesCard key={i} result={call.result} />;
+          case "get_inventory_by_outlet":
+            return <InventoryByOutletCard key={i} result={call.result} />;
+          case "get_product_lookup":
+            return <ProductLookupCard key={i} result={call.result} />;
+          case "get_stock_alerts":
+            return <StockAlertsCard key={i} result={call.result} />;
+          case "get_product_listing":
+            return <ProductListingCard key={i} result={call.result} />;
           default:
             return null;
         }
@@ -105,12 +134,17 @@ export default function App() {
   const [dashboardData, setDashboardData] = useState(null);
   const [health, setHealth] = useState(null);
   const [storeScope, setStoreScope] = useState(null);
-  const [messages, setMessages] = useState([]);
+  const [{ conversations, activeId }, setChatState] = useState(loadConversations);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    saveConversations({ conversations, activeId });
+  }, [conversations, activeId]);
 
   useEffect(() => {
     document.body.classList.toggle(
       "view-dashboard",
-      view === "overview" || view === "operations" || view === "investigation",
+      view === "overview" || view === "operations" || view === "investigation" || view === "chat",
     );
   }, [view]);
 
@@ -170,13 +204,53 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  const activeConversation = conversations.find((c) => c.id === activeId) ?? conversations[0];
+  const activeMessages = activeConversation?.messages ?? [];
+
+  function updateActiveConversation(updater) {
+    setChatState((prev) => ({
+      ...prev,
+      conversations: prev.conversations.map((c) => (c.id === prev.activeId ? updater(c) : c)),
+    }));
+  }
+
+  function handleNewChat() {
+    const fresh = newConversation();
+    setChatState((prev) => ({ conversations: [fresh, ...prev.conversations], activeId: fresh.id }));
+    setError(null);
+  }
+
+  function handleSelectConversation(id) {
+    setChatState((prev) => ({ ...prev, activeId: id }));
+    setError(null);
+  }
+
+  function handleDeleteConversation(id) {
+    setChatState((prev) => {
+      const remaining = prev.conversations.filter((c) => c.id !== id);
+      if (remaining.length === 0) {
+        const fresh = newConversation();
+        return { conversations: [fresh], activeId: fresh.id };
+      }
+      const activeId = prev.activeId === id
+        ? [...remaining].sort((a, b) => b.updatedAt - a.updatedAt)[0].id
+        : prev.activeId;
+      return { conversations: remaining, activeId };
+    });
+  }
+
   async function handleSend(e) {
     e.preventDefault();
     const text = input.trim();
     if (!text || loading) return;
 
-    const nextMessages = [...messages, { role: "user", content: text }];
-    setMessages(nextMessages);
+    const nextMessages = [...activeMessages, { role: "user", content: text }];
+    updateActiveConversation((c) => ({
+      ...c,
+      messages: nextMessages,
+      title: c.title === "New chat" ? titleFromMessage(text) : c.title,
+      updatedAt: Date.now(),
+    }));
     setInput("");
     setLoading(true);
     setError(null);
@@ -191,10 +265,11 @@ export default function App() {
         return;
       }
 
-      setMessages([
-        ...nextMessages,
-        { role: "assistant", content: data.reply, toolCalls: data.tool_calls },
-      ]);
+      updateActiveConversation((c) => ({
+        ...c,
+        messages: [...nextMessages, { role: "assistant", content: data.reply, toolCalls: data.tool_calls }],
+        updatedAt: Date.now(),
+      }));
     } catch {
       setError("Could not reach the agent backend. Is it running on port 8000?");
     } finally {
@@ -226,35 +301,46 @@ export default function App() {
         />
       )}
       {view === "chat" && (
-        <>
-          <main className="chat-window">
-            {messages.length === 0 && (
-              <p className="empty-state">
-                Ask something like &ldquo;How were sales last month?&rdquo;
-              </p>
-            )}
-            {messages.map((m, i) => (
-              <Message key={i} message={m} />
-            ))}
-            {loading && <div className="message message-assistant">
-              <div className="message-bubble message-loading">Thinking&hellip;</div>
-            </div>}
-            {error && <div className="error-banner">{error}</div>}
-          </main>
+        <div className="chat-layout">
+          <ChatSidebar
+            conversations={conversations}
+            activeId={activeId}
+            collapsed={sidebarCollapsed}
+            onNewChat={handleNewChat}
+            onSelect={handleSelectConversation}
+            onDelete={handleDeleteConversation}
+            onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+          />
+          <div className="chat-main">
+            <main className="chat-window">
+              {activeMessages.length === 0 && (
+                <p className="empty-state">
+                  Ask something like &ldquo;How were sales last month?&rdquo;
+                </p>
+              )}
+              {activeMessages.map((m, i) => (
+                <Message key={i} message={m} />
+              ))}
+              {loading && <div className="message message-assistant">
+                <div className="message-bubble message-loading">Thinking&hellip;</div>
+              </div>}
+              {error && <div className="error-banner">{error}</div>}
+            </main>
 
-          <form className="chat-input" onSubmit={handleSend}>
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Ask about your ERP data&hellip;"
-              disabled={loading}
-            />
-            <button type="submit" disabled={loading || !input.trim()}>
-              Send
-            </button>
-          </form>
-        </>
+            <form className="chat-input" onSubmit={handleSend}>
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="Ask about your ERP data&hellip;"
+                disabled={loading}
+              />
+              <button type="submit" disabled={loading || !input.trim()}>
+                Send
+              </button>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

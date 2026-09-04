@@ -4,6 +4,7 @@ import anyio
 
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS
+from mcp_server.tools.sales import _period_bounds, _period_label
 
 LOW_STOCK_THRESHOLD = 10
 
@@ -24,6 +25,31 @@ JOIN product_template pt ON pt.id = pp.product_tmpl_id
 WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
 GROUP BY pt.name
 ORDER BY revenue DESC
+LIMIT 8
+"""
+
+TOP_PRODUCTS_BY_PERIOD_SQL = f"""
+SELECT pt.name->>'en_US' AS name, SUM(sol.price_subtotal) AS revenue, SUM(sol.product_uom_qty) AS qty
+FROM sale_order_line sol
+JOIN sale_order so ON so.id = sol.order_id
+JOIN product_product pp ON pp.id = sol.product_id
+JOIN product_template pt ON pt.id = pp.product_tmpl_id
+WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+  AND so.date_order >= :start AND so.date_order <= :end
+GROUP BY pt.name
+ORDER BY revenue DESC
+LIMIT 8
+"""
+
+TOP_CANCELLED_PRODUCTS_SQL = f"""
+SELECT pt.name->>'en_US' AS name, COUNT(*) AS times_cancelled
+FROM sale_order_line sol
+JOIN sale_order so ON so.id = sol.order_id
+JOIN product_product pp ON pp.id = sol.product_id
+JOIN product_template pt ON pt.id = pp.product_tmpl_id
+WHERE so.state = 'cancel' AND so.store_id IN {CELESTE_STORE_IDS}
+GROUP BY pt.name
+ORDER BY times_cancelled DESC
 LIMIT 8
 """
 
@@ -128,10 +154,28 @@ async def get_sales_and_orders():
     }
 
 
-async def get_top_products():
-    rows = await reporting.fetch_report(TOP_PRODUCTS_SQL)
+async def get_top_products(period: str | None = None):
+    if period is None:
+        rows = await reporting.fetch_report(TOP_PRODUCTS_SQL)
+        resolved_period = None
+    else:
+        start, end = _period_bounds(period)
+        rows = await reporting.fetch_report(TOP_PRODUCTS_BY_PERIOD_SQL, {"start": start, "end": end})
+        resolved_period = _period_label(period, start, end)
+
+    return {
+        "period": resolved_period,
+        "products": [
+            {"name": r["name"] or "Unknown", "revenue": float(r["revenue"] or 0), "qty": float(r["qty"] or 0)}
+            for r in rows
+        ],
+    }
+
+
+async def get_top_cancelled_products():
+    rows = await reporting.fetch_report(TOP_CANCELLED_PRODUCTS_SQL)
     return [
-        {"name": r["name"] or "Unknown", "revenue": float(r["revenue"] or 0), "qty": float(r["qty"] or 0)}
+        {"name": r["name"] or "Unknown", "times_cancelled": int(r["times_cancelled"] or 0)}
         for r in rows
     ]
 
@@ -184,7 +228,7 @@ async def get_summary():
     return {
         "generated_at": date.today().isoformat(),
         "sales": results["sales"],
-        "top_products": results["top_products"],
+        "top_products": results["top_products"]["products"],
         "top_customers": results["top_customers"],
         "inventory": results["inventory"],
     }

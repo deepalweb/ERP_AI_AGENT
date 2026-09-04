@@ -118,6 +118,21 @@ METRICS: dict[str, MetricDef] = {
                     GROUP BY COALESCE(cancel_reason, 'Not recorded')
                 """,
             ),
+            Dimension(
+                id="product",
+                label="Product",
+                mode="contribution",
+                sql=f"""
+                    SELECT pt.name->>'en_US' AS name, COUNT(*) AS value
+                    FROM sale_order_line sol
+                    JOIN sale_order so ON so.id = sol.order_id
+                    JOIN product_product pp ON pp.id = sol.product_id
+                    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                    WHERE so.state = 'cancel' AND so.store_id IN {CELESTE_STORE_IDS}
+                      AND so.date_order >= :start AND so.date_order < :end
+                    GROUP BY pt.name
+                """,
+            ),
         ],
     ),
     "revenue": MetricDef(
