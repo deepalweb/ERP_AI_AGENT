@@ -81,7 +81,9 @@ def _resolve(query: str):
     return None, rows
 
 
-def get_product_lookup(query: str, period: str | None = None):
+def get_product_lookup(
+    query: str, period: str | None = None, start_date: str | None = None, end_date: str | None = None
+):
     chosen, candidates = _resolve(query)
 
     if chosen is None:
@@ -93,8 +95,8 @@ def get_product_lookup(query: str, period: str | None = None):
             "matches": [{"name": r["name"], "sku": r["default_code"]} for r in candidates],
         }
 
-    start, end = _period_bounds(period)
-    summary = get_sales_summary(period)  # reused only for period label + partial-period detection
+    start, end = _period_bounds(period, start_date, end_date)
+    summary = get_sales_summary(period, start_date, end_date)  # reused only for period label + partial-period detection
     params = {"tmpl_id": chosen["id"], "start": start, "end": end}
 
     row = reporting.run_query(SALES_MARGIN_SQL, params)[0]

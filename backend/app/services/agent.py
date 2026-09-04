@@ -9,6 +9,7 @@ from openai import OpenAI
 from mcp_server.tools import intelligence, sales
 from . import (
     channels,
+    concentration,
     customers,
     dashboard,
     forecast,
@@ -39,9 +40,13 @@ def _system_prompt() -> str:
         "should pass period as 'Nd' (e.g. '7d' for last 7 days, '30d' for "
         "last 30) — don't approximate it as a calendar month. A rolling "
         "window like this is anchored to the data's own latest order date, so "
-        "it's never partial the way a still-in-progress month is. If a "
+        "it's never partial the way a still-in-progress month is. For a "
+        "specific custom range ('August 5 to August 20', 'from the 10th to "
+        "yesterday'), pass start_date and end_date (YYYY-MM-DD, inclusive) "
+        "instead of period — resolve relative dates against today's date "
+        "given above before calling the tool. start_date/end_date take "
+        "priority over period when both would apply. If a "
         "question needs data you don't have a tool for, say so plainly rather than "
-        "needs data you don't have a tool for, say so plainly rather than "
         "making up an answer — but be precise about *why*: if the underlying data "
         "genuinely doesn't exist or isn't trustworthy, say that; if the data "
         "likely exists but there's just no tool built for that specific cut of "
@@ -62,6 +67,15 @@ def _system_prompt() -> str:
         "days have happened) — explicitly say the figures are partial and that "
         "any growth/comparison number isn't a fair comparison against a full "
         "prior period, rather than stating it as a plain fact.\n\n"
+        "For broad, undirected questions — 'what needs my attention', 'give me "
+        "an executive summary', 'biggest problems/opportunities right now', "
+        "'what changed this month', 'today's business situation' — call "
+        "scan_attention first rather than investigate_metric on each metric "
+        "yourself; it does exactly that scan in one call. If it returns "
+        "nothing flagged, say plainly that nothing crossed the anomaly "
+        "threshold this month rather than manufacturing concerns. If the user "
+        "then wants depth on one flagged item, follow up with "
+        "investigate_metric on its metric_id.\n\n"
         "For any question about *why* a metric moved, or whenever you'd otherwise "
         "just report a number that changed, don't stop at the number — call "
         f"investigate_metric with one of these ids: {metric_ids} (call list_metrics "
@@ -113,6 +127,10 @@ def _system_prompt() -> str:
         "or SKU — sales, margin, stock, or how it's doing — call "
         "get_product_lookup rather than searching for it inside a Top-N tool's "
         "results; those only cover the top 5-8 items and will miss it. For "
+        "'% of revenue from top products/customers' or 'are we too dependent "
+        "on a few customers' questions, call get_revenue_concentration — "
+        "don't approximate this from get_top_products, which isn't scoped to "
+        "total revenue. For "
         "'what's out of stock' or restocking-priority questions, call "
         "get_stock_alerts. For whether a specific product is listed/enabled on "
         "Uber or PickMe at a given outlet, call get_product_listing — don't "
@@ -127,12 +145,29 @@ def _system_prompt() -> str:
         "get_forward_look, get_top_products, get_top_cancelled_products, "
         "get_gross_margin, get_channel_breakdown, get_uber_lost_sales, "
         "get_inventory_by_outlet, get_product_lookup, get_stock_alerts, "
-        "get_product_listing, and investigate_metric results right below your reply "
+        "get_product_listing, scan_attention, get_revenue_concentration, and "
+        "investigate_metric results right below your reply "
         "— so don't re-type their numbers into a markdown table yourself. Lead "
         "with the narrative: what changed, why, and what to do about it. Still "
         "use a markdown table for any ad-hoc numbers that don't come from one of "
         "those tools."
     )
+
+_DATE_RANGE_PROPS = {
+    "start_date": {
+        "type": "string",
+        "description": (
+            "Explicit range start, YYYY-MM-DD. Use together with end_date for a "
+            "specific date range that isn't a calendar month or a 'last N days' "
+            "window (e.g. 'August 5 to August 20', 'since the 3rd'). Takes "
+            "priority over period when both are given."
+        ),
+    },
+    "end_date": {
+        "type": "string",
+        "description": "Explicit range end, YYYY-MM-DD, inclusive. Must be given together with start_date.",
+    },
+}
 
 TOOLS = [
     {
@@ -140,8 +175,9 @@ TOOLS = [
         "function": {
             "name": "get_sales_summary",
             "description": (
-                "Get revenue, order count, average order value, and month-over-month "
-                "growth for a given month."
+                "Get revenue, order count, average order value, and growth vs. "
+                "the prior equal-length period for a given month, rolling "
+                "window, or explicit date range."
             ),
             "parameters": {
                 "type": "object",
@@ -149,10 +185,32 @@ TOOLS = [
                     "period": {
                         "type": "string",
                         "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month if omitted.",
-                    }
+                    },
+                    **_DATE_RANGE_PROPS,
                 },
                 "required": [],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_attention",
+            "description": (
+                "Scan every registered metric (revenue, order volume, "
+                "cancellation rate, delayed-delivery rate, customer retention) "
+                "for the latest complete month and return only the ones that "
+                "are a critical decline or a notable opportunity, each with "
+                "its single strongest driver. Call this FIRST for broad "
+                "questions like 'what needs my attention', 'give me an "
+                "executive summary', 'what are the biggest problems/"
+                "opportunities right now', or 'what changed this month' — "
+                "it's much cheaper than calling investigate_metric once per "
+                "metric. Follow up with investigate_metric on a specific "
+                "flagged metric_id only if the user wants more depth than "
+                "the single top_driver this gives."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
     {
@@ -254,7 +312,8 @@ TOOLS = [
                     "period": {
                         "type": "string",
                         "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Omit for all-time.",
-                    }
+                    },
+                    **_DATE_RANGE_PROPS,
                 },
                 "required": [],
             },
@@ -281,11 +340,11 @@ TOOLS = [
         "function": {
             "name": "get_gross_margin",
             "description": (
-                "Get gross margin (revenue minus cost of goods sold) for a month: "
-                "amount, percent, and what share of that month's revenue actually "
-                "had cost data (cost_data_coverage_pct) — always mention that "
-                "coverage figure when quoting margin, since it's not quite 100%. "
-                "Defaults to last month if period is omitted."
+                "Get gross margin (revenue minus cost of goods sold) for a month, "
+                "rolling window, or explicit date range: amount, percent, and what "
+                "share of revenue actually had cost data (cost_data_coverage_pct) "
+                "— always mention that coverage figure when quoting margin, since "
+                "it's not quite 100%. Defaults to last month if period is omitted."
             ),
             "parameters": {
                 "type": "object",
@@ -293,7 +352,8 @@ TOOLS = [
                     "period": {
                         "type": "string",
                         "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
-                    }
+                    },
+                    **_DATE_RANGE_PROPS,
                 },
                 "required": [],
             },
@@ -305,9 +365,9 @@ TOOLS = [
             "name": "get_channel_breakdown",
             "description": (
                 "Get revenue and order count split by sales channel — PickMe, "
-                "Uber, or Direct — for a month. Use for 'how much comes through "
-                "PickMe vs Uber' style questions. Defaults to last month if "
-                "period is omitted."
+                "Uber, or Direct — for a month, rolling window, or explicit date "
+                "range. Use for 'how much comes through PickMe vs Uber' style "
+                "questions. Defaults to last month if period is omitted."
             ),
             "parameters": {
                 "type": "object",
@@ -315,7 +375,8 @@ TOOLS = [
                     "period": {
                         "type": "string",
                         "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
-                    }
+                    },
+                    **_DATE_RANGE_PROPS,
                 },
                 "required": [],
             },
@@ -326,12 +387,13 @@ TOOLS = [
         "function": {
             "name": "get_uber_lost_sales",
             "description": (
-                "Get Uber's item-removed count for a month — items Uber removed "
-                "from an order after it was placed (mostly out-of-stock at pick "
-                "time), with the top reasons and most-affected products. "
-                "estimated_lost_revenue is a lower-bound estimate (assumes 1 unit "
-                "per removed line) — always repeat its caveat when quoting it. "
-                "Defaults to last month if period is omitted."
+                "Get Uber's item-removed count for a month, rolling window, or "
+                "explicit date range — items Uber removed from an order after it "
+                "was placed (mostly out-of-stock at pick time), with the top "
+                "reasons and most-affected products. estimated_lost_revenue is a "
+                "lower-bound estimate (assumes 1 unit per removed line) — always "
+                "repeat its caveat when quoting it. Defaults to last month if "
+                "period is omitted."
             ),
             "parameters": {
                 "type": "object",
@@ -339,7 +401,8 @@ TOOLS = [
                     "period": {
                         "type": "string",
                         "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
-                    }
+                    },
+                    **_DATE_RANGE_PROPS,
                 },
                 "required": [],
             },
@@ -383,6 +446,7 @@ TOOLS = [
                         "type": "string",
                         "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Omit for all-time.",
                     },
+                    **_DATE_RANGE_PROPS,
                 },
                 "required": ["query"],
             },
@@ -429,6 +493,32 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_revenue_concentration",
+            "description": (
+                "Get what share of revenue comes from the top 10 products and "
+                "top 10 customers, for a month, rolling window, or explicit "
+                "date range — a dependency-risk read ('are we too reliant on a "
+                "handful of SKUs or customers'), not a ranking (use "
+                "get_top_products for that). Use for '% of revenue from our "
+                "top products/customers' or 'are we too dependent on a small "
+                "number of customers' questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
+                    },
+                    **_DATE_RANGE_PROPS,
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 TOOL_FUNCTIONS = {
@@ -448,6 +538,8 @@ TOOL_FUNCTIONS = {
     "get_product_lookup": product_lookup.get_product_lookup,
     "get_stock_alerts": stock_alerts.get_stock_alerts,
     "get_product_listing": listings.get_product_listing,
+    "scan_attention": lambda: intelligence.scan_attention(),
+    "get_revenue_concentration": concentration.get_revenue_concentration,
 }
 
 

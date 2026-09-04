@@ -154,14 +154,14 @@ async def get_sales_and_orders():
     }
 
 
-async def get_top_products(period: str | None = None):
-    if period is None:
+async def get_top_products(period: str | None = None, start_date: str | None = None, end_date: str | None = None):
+    if period is None and not (start_date and end_date):
         rows = await reporting.fetch_report(TOP_PRODUCTS_SQL)
         resolved_period = None
     else:
-        start, end = _period_bounds(period)
+        start, end = _period_bounds(period, start_date, end_date)
         rows = await reporting.fetch_report(TOP_PRODUCTS_BY_PERIOD_SQL, {"start": start, "end": end})
-        resolved_period = _period_label(period, start, end)
+        resolved_period = _period_label(period, start, end, start_date, end_date)
 
     return {
         "period": resolved_period,

@@ -26,9 +26,9 @@ ORDER BY revenue DESC
 """
 
 
-def get_channel_breakdown(period: str | None = None):
-    start, end = _period_bounds(period)
-    summary = get_sales_summary(period)  # reused only for its partial-period detection
+def get_channel_breakdown(period: str | None = None, start_date: str | None = None, end_date: str | None = None):
+    start, end = _period_bounds(period, start_date, end_date)
+    summary = get_sales_summary(period, start_date, end_date)  # reused only for its partial-period detection
     rows = reporting.run_query(CHANNEL_SQL, {"start": start, "end": end})
     total_revenue = sum(float(r["revenue"] or 0) for r in rows)
     return {

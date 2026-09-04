@@ -29,12 +29,33 @@ def _latest_order_date() -> date:
     return max_d.date() if max_d else date.today()
 
 
-def _period_bounds(period: Optional[str]):
+def _parse_custom_range(start_date: Optional[str], end_date: Optional[str]):
+    """Parse an explicit YYYY-MM-DD/YYYY-MM-DD range. Returns (date, date) with
+    start<=end, or None if either is missing or malformed — callers fall back
+    to `period`-based resolution in that case rather than erroring, since a
+    tool-calling model occasionally sends a partial or malformed pair."""
+    if not start_date or not end_date:
+        return None
+    try:
+        s = date.fromisoformat(start_date)
+        e = date.fromisoformat(end_date)
+    except ValueError:
+        return None
+    return (s, e) if s <= e else (e, s)
+
+
+def _period_bounds(period: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None):
     """Return (start_date, end_date) as ISO strings.
 
-    Accepts a YYYY-MM month (or None for last month), or a rolling window like
-    '7d' / '30d' — the last N days ending at the data's own latest order date.
+    Priority: an explicit start_date/end_date range, then `period` — a
+    YYYY-MM month (or None for last month), or a rolling window like '7d' /
+    '30d' (the last N days ending at the data's own latest order date).
     """
+    custom = _parse_custom_range(start_date, end_date)
+    if custom:
+        s, e = custom
+        return s.isoformat(), e.isoformat()
+
     days = _parse_day_window(period)
     if days:
         end = _latest_order_date()
@@ -58,20 +79,30 @@ def _period_bounds(period: Optional[str]):
     return start.isoformat(), (end.replace(day=end.day) ) .isoformat()
 
 
-def _period_label(period: Optional[str], start: str, end: str) -> str:
+def _period_label(
+    period: Optional[str],
+    start: str,
+    end: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> str:
     """Human-readable period string for display, independent of internal format."""
+    if _parse_custom_range(start_date, end_date):
+        return f"{start} to {end}"
     days = _parse_day_window(period)
     if days:
         return f"Last {days} days ({start} to {end})"
     return period or start[:7]
 
 
-def get_sales_summary(period: Optional[str] = None):
-    """Return a structured sales summary for `period` (YYYY-MM). Defaults to last month.
+def get_sales_summary(period: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """Return a structured sales summary for `period` (YYYY-MM, or a rolling
+    'Nd' window), or an explicit start_date/end_date range. Defaults to last
+    month if none of these are given.
 
     Tries `sale_order` first; falls back to `account_move` if necessary.
     """
-    start, end = _period_bounds(period)
+    start, end = _period_bounds(period, start_date, end_date)
 
     # Try sale_order table (scoped to Celeste's own outlets — see store_scope.py)
     sql_so = f"""
@@ -116,18 +147,20 @@ def get_sales_summary(period: Optional[str] = None):
     ) t
     """
 
+    custom = _parse_custom_range(start_date, end_date)
     days = _parse_day_window(period)
-    if days:
+    span = days or ((date.fromisoformat(end) - date.fromisoformat(start)).days + 1 if custom else None)
+    if span:
         # Previous period = the equal-length window immediately before this
-        # one. Rolling windows are anchored to the data's own latest order
-        # date (see _latest_order_date), so unlike a calendar month they're
-        # never "partial" by construction — the window IS exactly `days` days
-        # of the most recent available data.
-        start_date = date.fromisoformat(start)
-        pend = (start_date - timedelta(days=1)).isoformat()
-        pstart = (start_date - timedelta(days=days)).isoformat()
+        # one. A rolling window is anchored to the data's own latest order
+        # date (see _latest_order_date), and a custom range is exactly what
+        # was asked for — either way there's no "still in progress" concept
+        # the way a calendar month has, so this is never partial.
+        start_d = date.fromisoformat(start)
+        pend = (start_d - timedelta(days=1)).isoformat()
+        pstart = (start_d - timedelta(days=span)).isoformat()
         is_partial_period = False
-        days_elapsed = days_in_period = days
+        days_elapsed = days_in_period = span
     else:
         # compute previous month bounds
         s_year, s_month = map(int, start.split("-")[:2])
@@ -167,7 +200,7 @@ def get_sales_summary(period: Optional[str] = None):
         growth = (revenue - prev_revenue) / prev_revenue * 100
 
     return {
-        "period": _period_label(period, start, end),
+        "period": _period_label(period, start, end, start_date, end_date),
         "revenue": revenue,
         "orders": orders,
         "average_order_value": avg,

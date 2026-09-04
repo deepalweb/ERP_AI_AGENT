@@ -463,3 +463,49 @@ def investigate(metric_id: str):
         "breakdowns": breakdowns,
         "notes": metric.notes,
     }
+
+
+def scan_attention():
+    """Run every registered metric's anomaly check in one pass and return only
+    the ones flagged critical or opportunity, each with its single strongest
+    driver. This is the load-bearing piece behind "what needs my attention" /
+    "executive summary" style questions — without it, answering those means
+    the model calling investigate_metric once per registered metric, which
+    both costs several tool-call rounds and returns far more detail (full
+    trend + every dimension's full breakdown) than a scan needs.
+    """
+    flagged = []
+    for metric in METRICS.values():
+        trend = get_trend(metric)
+        anomaly = detect_anomaly(trend, metric.direction)
+        if anomaly["category"] not in ("critical", "opportunity"):
+            continue
+
+        top_driver = None
+        for dim in metric.dimensions:
+            breakdown = get_breakdown(dim, anomaly["latest_month"], anomaly["moved_up"])
+            if breakdown["top_contributors"]:
+                top = breakdown["top_contributors"][0]
+                top_driver = {"dimension": breakdown["label"], "name": top["name"], "delta": top["delta"]}
+                break
+
+        flagged.append(
+            {
+                "metric_id": metric.id,
+                "label": metric.label,
+                "unit": metric.unit,
+                "category": anomaly["category"],
+                "latest_month": anomaly["latest_month"],
+                "latest_value": anomaly["latest_value"],
+                "pct_change_vs_baseline": anomaly["pct_change_vs_baseline"],
+                "top_driver": top_driver,
+            }
+        )
+
+    flagged.sort(key=lambda r: (r["category"] != "critical", -abs(r["pct_change_vs_baseline"] or 0)))
+
+    return {
+        "flagged": flagged,
+        "metrics_checked": len(METRICS),
+        "metrics_normal": len(METRICS) - len(flagged),
+    }

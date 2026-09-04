@@ -21,6 +21,8 @@ import InventoryByOutletCard from "./chat/InventoryByOutletCard";
 import ProductLookupCard from "./chat/ProductLookupCard";
 import StockAlertsCard from "./chat/StockAlertsCard";
 import ProductListingCard from "./chat/ProductListingCard";
+import AttentionScanCard from "./chat/AttentionScanCard";
+import ConcentrationCard from "./chat/ConcentrationCard";
 import ChatSidebar from "./chat/ChatSidebar";
 import { loadConversations, saveConversations, newConversation, titleFromMessage } from "./chat/storage";
 
@@ -105,6 +107,10 @@ function ToolCalls({ toolCalls }) {
             return <StockAlertsCard key={i} result={call.result} />;
           case "get_product_listing":
             return <ProductListingCard key={i} result={call.result} />;
+          case "scan_attention":
+            return <AttentionScanCard key={i} result={call.result} />;
+          case "get_revenue_concentration":
+            return <ConcentrationCard key={i} result={call.result} />;
           default:
             return null;
         }

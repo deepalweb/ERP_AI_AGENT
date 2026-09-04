@@ -27,9 +27,9 @@ WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
 """
 
 
-def get_gross_margin(period: str | None = None):
-    start, end = _period_bounds(period)
-    summary = get_sales_summary(period)
+def get_gross_margin(period: str | None = None, start_date: str | None = None, end_date: str | None = None):
+    start, end = _period_bounds(period, start_date, end_date)
+    summary = get_sales_summary(period, start_date, end_date)
 
     rows = reporting.run_query(GROSS_MARGIN_SQL, {"start": start, "end": end})
     row = rows[0] if rows else {}

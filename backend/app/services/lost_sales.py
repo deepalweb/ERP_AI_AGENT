@@ -45,10 +45,10 @@ GROUP BY pt.name ORDER BY times_removed DESC LIMIT {TOP_N}
 """
 
 
-def get_uber_lost_sales(period: str | None = None):
-    start, end = _period_bounds(period)
+def get_uber_lost_sales(period: str | None = None, start_date: str | None = None, end_date: str | None = None):
+    start, end = _period_bounds(period, start_date, end_date)
     params = {"start": start, "end": end}
-    summary = get_sales_summary(period)  # reused only for its partial-period detection
+    summary = get_sales_summary(period, start_date, end_date)  # reused only for its partial-period detection
 
     summary_row = reporting.run_query(SUMMARY_SQL, params)[0]
     removed_lines = int(summary_row.get("removed_lines") or 0)
