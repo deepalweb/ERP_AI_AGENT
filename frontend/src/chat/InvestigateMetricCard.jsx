@@ -1,50 +1,72 @@
 import { CATEGORY_META } from "../InvestigationCard";
 import LineChart from "../charts/LineChart";
+import DivergingBarList from "../charts/DivergingBarList";
 import { formatByUnit, monthLabel } from "../format";
 
-function BreakdownTable({ breakdown, unit }) {
+const PERSISTENCE_META = {
+  consistent_declining: (p) => ({ emoji: "📉", label: `${p.consecutive_periods}-month decline` }),
+  consistent_improving: (p) => ({ emoji: "📈", label: `${p.consecutive_periods}-month improvement` }),
+  recovering: () => ({ emoji: "🔄", label: "Recovering" }),
+  single_period_move: () => ({ emoji: "•", label: "Isolated move" }),
+};
+
+function PersistenceBadge({ persistence }) {
+  const build = persistence && PERSISTENCE_META[persistence.pattern];
+  if (!build) return null;
+  const meta = build(persistence);
+  return (
+    <span className="anomalies-table-badge persistence-badge" title={persistence.period_range}>
+      {meta.emoji} {meta.label}
+    </span>
+  );
+}
+
+function BreakdownChart({ breakdown, unit, direction }) {
   const rows = breakdown.top_contributors || [];
   if (rows.length === 0) {
     return <div className="chart-empty">No segments with enough volume to break this down.</div>;
   }
 
-  const isComposition = breakdown.mode === "composition";
+  if (breakdown.mode === "composition") {
+    return (
+      <div className="chart-card">
+        <div className="chart-card-title">By {breakdown.label} (share of mix)</div>
+        <table className="anomalies-table">
+          <thead>
+            <tr>
+              <th>{breakdown.label}</th>
+              <th>Current share</th>
+              <th>Baseline share</th>
+              <th>Change</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.name}>
+                <td>{r.name}</td>
+                <td>{r.current_share_pct}%</td>
+                <td>{r.baseline_share_pct}%</td>
+                <td className="anomalies-table-change">
+                  {r.delta > 0 ? "+" : ""}
+                  {r.delta}pp
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
 
   return (
     <div className="chart-card">
-      <div className="chart-card-title">By {breakdown.label}</div>
-      <table className="anomalies-table">
-        <thead>
-          <tr>
-            <th>{breakdown.label}</th>
-            <th>Current</th>
-            <th>Baseline</th>
-            <th>Change</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.name}>
-              <td>{r.name}</td>
-              <td>
-                {isComposition
-                  ? `${r.current_share_pct}% share`
-                  : formatByUnit(r.current, unit)}
-              </td>
-              <td>
-                {isComposition
-                  ? `${r.baseline_share_pct}% share`
-                  : formatByUnit(r.baseline, unit)}
-              </td>
-              <td className="anomalies-table-change">
-                {isComposition
-                  ? `${r.delta > 0 ? "+" : ""}${r.delta}pp`
-                  : `${r.delta > 0 ? "+" : ""}${formatByUnit(r.delta, unit)}`}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className="chart-card-title">By {breakdown.label} &mdash; change vs. baseline</div>
+      <DivergingBarList
+        data={rows}
+        formatValue={(v) => formatByUnit(v, unit)}
+        deltaGoodWhenPositive={direction === "higher_is_good"}
+        ariaLabel={`Change in ${breakdown.label} vs baseline`}
+      />
     </div>
   );
 }
@@ -52,7 +74,7 @@ function BreakdownTable({ breakdown, unit }) {
 export default function InvestigateMetricCard({ result }) {
   if (!result || result.error) return null;
 
-  const { metric, trend, anomaly, breakdowns } = result;
+  const { metric, trend, anomaly, persistence, breakdowns } = result;
   const meta =
     CATEGORY_META[anomaly.category] ?? {
       emoji: "ℹ️",
@@ -68,6 +90,7 @@ export default function InvestigateMetricCard({ result }) {
             {meta.emoji} {meta.label} &middot; {monthLabel(anomaly.latest_month)}
           </span>
         )}
+        <PersistenceBadge persistence={persistence} />
       </div>
 
       <div className="chart-card">
@@ -83,7 +106,7 @@ export default function InvestigateMetricCard({ result }) {
       {(breakdowns || [])
         .filter((b) => (b.top_contributors || []).length > 0)
         .map((b) => (
-          <BreakdownTable key={b.dimension} breakdown={b} unit={metric.unit} />
+          <BreakdownChart key={b.dimension} breakdown={b} unit={metric.unit} direction={metric.direction} />
         ))}
     </div>
   );

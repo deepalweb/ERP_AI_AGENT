@@ -120,6 +120,33 @@ STAGE_LABELS = [
     ("Waiting for dispatch", "median_dispatch_wait_min"),
 ]
 
+# Same query state_findings._outlet_activity_finding() uses to build its
+# finding — extracted here so evidence_engine.py's cross-metric dark-outlet
+# check can call it without importing state_findings.py (which itself
+# imports evidence_engine.py for its own-breakdown checks; importing each
+# other back would be circular).
+DARK_OUTLET_SQL = f"""
+    WITH bounds AS (
+        SELECT MAX(date_order) AS as_of FROM sale_order
+        WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+    )
+    SELECT rs.id, rs.name,
+           COUNT(so.id) FILTER (WHERE so.date_order >= b.as_of - INTERVAL '30 days') AS orders_30d
+    FROM res_store rs
+    CROSS JOIN bounds b
+    LEFT JOIN sale_order so ON so.store_id = rs.id AND so.state = 'sale'
+    WHERE rs.id IN {CELESTE_STORE_IDS}
+    GROUP BY rs.id, rs.name
+"""
+
+
+def get_dark_outlets() -> list[str]:
+    """Names of Celeste's own outlets with zero orders in the trailing 30
+    days, right now. Sync (see get_stage_timing_by_store's docstring for
+    why that's fine here too)."""
+    rows = reporting.run_query(DARK_OUTLET_SQL)
+    return [r["name"] for r in rows if int(r["orders_30d"] or 0) == 0]
+
 
 def get_stage_timing_by_store(flagged_stores: list[str], month_key: str):
     """Sync (not async) — called from investigation.py's build_investigation(),

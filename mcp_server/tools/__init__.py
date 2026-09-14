@@ -1,3 +1,3 @@
-from . import sales, inventory, purchasing, finance, customers
+from . import sales, inventory, customers
 
-__all__ = ["sales", "inventory", "purchasing", "finance", "customers"]
+__all__ = ["sales", "inventory", "customers"]

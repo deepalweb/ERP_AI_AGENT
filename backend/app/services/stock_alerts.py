@@ -98,3 +98,100 @@ def get_stock_alerts():
         "top_low_stock": low_stock_items[:TOP_N],
         "low_stock_threshold_days": LOW_STOCK_DAYS,
     }
+
+
+# ---------------------------------------------------------------------------
+# Top-product stock coverage: does a company-wide stock total ever answer
+# "will we run out"? No — it pools thousands of SKUs together, so a
+# fast-mover running low is invisible inside a warehouse full of slow-moving
+# stock (the same reason get_stock_alerts above and get_inventory_depth are
+# both per-product, never a single combined number). This narrows to the
+# products that actually matter for that question — the top sellers by
+# volume — and checks each one's own stock against its own projected need.
+TOP_PRODUCTS_TOP_N = 15
+COVERAGE_HORIZON_DAYS = 10  # matches the Order forecast chart's window
+
+TOP_PRODUCTS_STOCK_SQL = f"""
+    WITH bounds AS (
+        SELECT MAX(date_order) AS as_of FROM sale_order
+        WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+    ),
+    recent_sales AS (
+        SELECT sol.product_id, SUM(sol.product_uom_qty) AS qty_sold_30d
+        FROM sale_order_line sol
+        JOIN sale_order so ON so.id = sol.order_id
+        CROSS JOIN bounds b
+        WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+          AND so.date_order >= b.as_of - INTERVAL '30 days'
+        GROUP BY sol.product_id
+    ),
+    on_hand AS (
+        SELECT sq.product_id, SUM(sq.quantity) AS qty
+        FROM stock_quant sq
+        JOIN stock_location sl ON sl.id = sq.location_id
+        JOIN res_store rs ON rs.warehouse_id = sl.warehouse_id
+        WHERE sl.usage = 'internal' AND rs.id IN {CELESTE_STORE_IDS}
+        GROUP BY sq.product_id
+    )
+    SELECT pt.name->>'en_US' AS product_name, pt.default_code AS sku,
+           r.qty_sold_30d, COALESCE(oh.qty, 0) AS current_stock, b.as_of
+    FROM recent_sales r
+    JOIN product_product pp ON pp.id = r.product_id
+    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    LEFT JOIN on_hand oh ON oh.product_id = r.product_id
+    CROSS JOIN bounds b
+    WHERE pt.celeste_product_type = 'INVENTORY' AND r.qty_sold_30d > 0
+    ORDER BY r.qty_sold_30d DESC
+    LIMIT :top_n
+"""
+
+
+def get_top_product_stock_coverage(top_n: int = TOP_PRODUCTS_TOP_N, horizon_days: int = COVERAGE_HORIZON_DAYS):
+    """Top-selling products (by units sold, trailing 30 days), each with its
+    own stock checked against its own sales rate.
+
+    "short" reuses LOW_STOCK_DAYS (the same 3-day threshold get_stock_alerts
+    already uses), not a flat horizon_days requirement — checked against
+    the live data before picking this: the top 15 sellers by volume here
+    are entirely fresh produce/dairy (onions, tomatoes, eggs, milk...), and
+    the #1 item is restocked nearly every day (400-800+ units/day, verified
+    against stock_move). Requiring horizon_days (10) of cover on hand for a
+    product replenished daily would flag every single one as "short" when
+    that's normal, deliberately-thin stock for a quick-commerce grocer, not
+    a shortage. projected_demand over horizon_days is still returned as
+    context (how much will sell in that window), it just isn't what
+    decides the flag.
+
+    negative_stock is reported separately from short — current_stock < 0
+    isn't a low-stock situation, it's a data-integrity issue (sold past
+    what was recorded on hand), and conflating the two would bury a real
+    data problem inside an ordinary restocking signal."""
+    rows = reporting.run_query(TOP_PRODUCTS_STOCK_SQL, {"top_n": top_n})
+    if not rows:
+        return {"as_of_date": None, "horizon_days": horizon_days, "low_stock_threshold_days": LOW_STOCK_DAYS, "products": []}
+
+    as_of_date = rows[0]["as_of"]
+    products = []
+    for r in rows:
+        qty_sold_30d = float(r["qty_sold_30d"] or 0)
+        current_stock = float(r["current_stock"] or 0)
+        avg_daily_sales = qty_sold_30d / 30.0
+        projected_demand = round(avg_daily_sales * horizon_days, 1)
+        days_of_cover = round(current_stock / avg_daily_sales, 1) if avg_daily_sales > 0 else None
+        products.append({
+            "name": r["product_name"] or "Unknown",
+            "sku": r["sku"],
+            "qty_sold_30d": round(qty_sold_30d, 1),
+            "current_stock": round(current_stock, 1),
+            "projected_demand": projected_demand,
+            "days_of_cover": days_of_cover,
+            "short": days_of_cover is not None and days_of_cover < LOW_STOCK_DAYS,
+            "negative_stock": current_stock < 0,
+        })
+
+    return {
+        "as_of_date": as_of_date.date().isoformat(),
+        "horizon_days": horizon_days,
+        "low_stock_threshold_days": LOW_STOCK_DAYS,
+        "products": products,
+    }

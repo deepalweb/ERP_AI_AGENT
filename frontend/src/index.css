@@ -1,3 +1,37 @@
+@import "tailwindcss";
+
+/* Tailwind theme tokens, mapped onto the semantic CSS variables defined
+   below rather than given their own values — keeps Tailwind utilities
+   (bg-background, text-accent, bg-critical, ...) resolving through the same
+   variables the pre-rebuild pages still use, so both light/dark palettes
+   and any old, not-yet-migrated CSS stay visually consistent with the new
+   Tailwind-based pages during the section-by-section rebuild. */
+@theme {
+  --color-background: var(--bg);
+  --color-foreground: var(--text);
+  --color-foreground-strong: var(--text-h);
+  --color-border: var(--border);
+  --color-code-bg: var(--code-bg);
+
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-bg);
+  --color-accent-border: var(--accent-border);
+
+  --color-good: var(--status-good);
+  --color-warning: var(--status-warning);
+  --color-serious: var(--status-serious);
+  --color-critical: var(--status-critical);
+
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-chart-surface: var(--chart-surface);
+  --color-chart-gridline: var(--chart-gridline);
+
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+}
+
 :root {
   --text: #59636e;
   --text-h: #17212b;
@@ -78,66 +112,25 @@ body {
   margin: 0;
 }
 
+/* This whole app is the dashboard now (no separate centered landing view),
+   so #root is always full width — the old fixed 1126px/centered/
+   border-inline box (toggled off only via a body.view-dashboard class the
+   pre-rebuild App.jsx used to set) no longer applies to anything. */
 #root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
+  width: 100%;
   min-height: 100svh;
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
 }
 
-body.view-dashboard #root {
-  width: 100%;
-  max-width: 100%;
-  border-inline: none;
-  height: 100svh;
-  min-height: 100svh;
-}
-
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: 0;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: 0;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
-}
-
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
-}
-
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
-}
+/* The old landing-page's h1/h2/p/code element-selector overrides (56px
+   headings, zeroed paragraph margins, etc.) lived here and were unlayered
+   CSS — which always beats Tailwind's @layer-wrapped utilities regardless
+   of source order, so every <h1>/<h2> in the new Tailwind-based components
+   was silently rendering at the old landing page's giant font size no
+   matter what text-* utility class was applied. Removed: nothing in the
+   current app (grepped, no <code>/.counter usage either) relies on them,
+   and every new component sets its own typography via Tailwind classes.
+   Tailwind's own base reset (from @import "tailwindcss" above) now governs
+   default heading/paragraph styling instead. */

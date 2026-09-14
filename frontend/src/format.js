@@ -40,6 +40,15 @@ export function formatByUnit(value, unit) {
   return formatNumber(value);
 }
 
+export function formatDate(dateStr) {
+  if (!dateStr) return "n/a";
+  const [year, month, day] = dateStr.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export function monthLabel(monthKey) {
   if (!/^\d{4}-\d{2}$/.test(monthKey || "")) return monthKey;
   const [year, month] = monthKey.split("-").map(Number);

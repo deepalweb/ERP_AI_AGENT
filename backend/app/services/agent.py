@@ -1,6 +1,7 @@
 import inspect
 import json
 import os
+import re
 from datetime import date
 
 import anyio
@@ -8,6 +9,8 @@ from openai import OpenAI
 
 from mcp_server.tools import intelligence, sales
 from . import (
+    basket,
+    brand_mix,
     channels,
     concentration,
     customers,
@@ -15,7 +18,9 @@ from . import (
     forecast,
     inventory,
     listings,
+    loss_and_damage,
     lost_sales,
+    loyalty,
     margin,
     operations,
     product_lookup,
@@ -29,7 +34,10 @@ MAX_TOOL_ROUNDS = 6
 def _system_prompt() -> str:
     metric_ids = ", ".join(f"'{m['id']}'" for m in intelligence.list_metrics())
     return (
-        "You are an ERP business-intelligence assistant. "
+        "You are an ERP business-intelligence assistant for a Sri Lankan retail "
+        "business — all currency figures are Sri Lankan Rupees. Write them as "
+        "'Rs' (e.g. 'Rs 197.2M'), never '$' or the '₨' glyph, and never say "
+        "'dollars'. "
         f"Today's date is {date.today().isoformat()}. "
         "Use the available tools to answer questions with real data instead of "
         "guessing. When a tool has a default for something like 'last month', "
@@ -53,10 +61,12 @@ def _system_prompt() -> str:
         "it yet, say that instead (e.g. 'I don't have a tool that breaks that "
         "down that way yet') rather than implying the data itself is missing. "
         "Don't guess which case you're in — if you're not sure, say you're not "
-        "sure rather than asserting either one. Two specific, verified cases: "
+        "sure rather than asserting either one. One specific, verified case: "
         "workforce/headcount cost has no reliable data (payroll records exist "
-        "but are almost entirely unfinalized drafts) and cash position isn't "
-        "tracked by any tool — these are genuine data gaps, say so plainly. "
+        "but are almost entirely unfinalized drafts) — that's a genuine data "
+        "gap, say so plainly. Cash position is NOT a data gap — real, mostly-"
+        "finalized payment records exist (account_payment) — there's just no "
+        "tool built for it yet, so say that instead if asked. "
         "Delivery speed measured against a promised time is also unmeasurable — "
         "the commitment_date field exists but is unpopulated. Gross margin *is* "
         "available now — call get_gross_margin rather than declining. "
@@ -89,16 +99,33 @@ def _system_prompt() -> str:
         "it. In breakdowns, prefer segments with meaningful volume over ones with "
         "a big percentage but tiny sample size. When anomaly.category is "
         "'critical' or 'opportunity', or a breakdown surfaces one specific named "
-        "driver worth digging into, end your reply by explicitly offering to "
-        "continue — a direct question naming that driver, e.g. 'Want me to look "
-        "into why Colombo 6 orders dropped?', not a vague 'let me know if you want "
-        "more detail'. Don't add this offer to a plain lookup that found nothing "
-        "anomalous — only offer to continue when there's a specific, named thread "
-        "worth pulling on. "
+        "driver worth digging into, that's exactly what belongs in the FOLLOW_UPS "
+        "trailer described near the end of these instructions — never write a "
+        "continuation offer ('Want me to look into X?', 'let me know if you want "
+        "more detail') as part of the narrative text itself; keep the narrative "
+        "focused on what changed, why, and what to do, and put every next-question "
+        "offer only in that trailer. "
         "investigate_metric's trend array includes the current, still-in-progress "
         "month — never quote that partial month's value as if it were a completed "
         "period; the anomaly/comparison is always about anomaly.latest_month and "
         "anomaly.latest_value, which is the most recent *complete* month.\n\n"
+        "Both investigate_metric (in .persistence) and each item flagged by "
+        "scan_attention carry a persistence read — use it, don't just report "
+        "the latest month's number in isolation: 'single_period_move' means "
+        "this looks like an isolated month, say so rather than implying a "
+        "trend; 'consistent_declining'/'consistent_improving' with "
+        "consecutive_periods >= 2 means say explicitly how many periods "
+        "running (e.g. 'this is the third consecutive month of decline, not "
+        "a one-off') — this is more informative than the anomaly number "
+        "alone and is exactly the kind of context that turns a number into "
+        "an insight; 'recovering' means the metric moved the right direction "
+        "this month right after moving the wrong way before that — say it "
+        "looks like a recovery, not a fresh problem, and don't call it "
+        "critical/opportunity-worthy on its own if the anomaly category is "
+        "'normal'. 'insufficient_data' or 'flat' need no comment. This "
+        "business only has ~6 months of history (data starts Feb 2026) — "
+        "never frame a pattern as seasonal or compare it with 'last year', "
+        "there isn't one yet; say so plainly if asked.\n\n"
         "For customer loyalty/churn/at-risk questions, call "
         "get_customer_intelligence. For stock/dead-stock/overstock questions, "
         "call get_inventory_depth. For branch performance or fulfillment-"
@@ -115,9 +142,19 @@ def _system_prompt() -> str:
         "next month' or projection questions, call get_forward_look — its result "
         "is a simple trend projection, not a statistical forecast, so always "
         "repeat its 'note' caveat when you quote it rather than stating the "
-        "projection as a plain fact. For gross margin / profitability questions, "
-        "call get_gross_margin — always repeat its cost_data_coverage_pct caveat "
-        "when quoting the figure. For 'how much comes through PickMe vs Uber' or "
+        "projection as a plain fact. For 'what is margin' / 'what is AOV' "
+        "questions about one period, call get_gross_margin / get_sales_summary "
+        "— always repeat get_gross_margin's cost_data_coverage_pct caveat when "
+        "quoting the figure. For 'why did margin change', 'is margin trending', "
+        "or 'is revenue growth volume-driven or price-driven', call "
+        "investigate_metric with 'gross_margin' or 'average_order_value' — "
+        "reading average_order_value next to order_volume is exactly how to "
+        "answer the volume-vs-price question. gross_margin's breakdown is "
+        "store-only (no per-product margin breakdown exists yet — say so if "
+        "asked which product drove a margin change) and average_order_value "
+        "has no breakdown at all (say so if asked which segment drove an AOV "
+        "change) — both should be stated as a tool limitation, not implied to "
+        "not exist as data. For 'how much comes through PickMe vs Uber' or "
         "sales-channel questions, call get_channel_breakdown. For Uber "
         "out-of-stock/item-removed/lost-sale questions, call get_uber_lost_sales "
         "and repeat its estimate_note caveat when quoting the revenue figure. For "
@@ -130,7 +167,17 @@ def _system_prompt() -> str:
         "'% of revenue from top products/customers' or 'are we too dependent "
         "on a few customers' questions, call get_revenue_concentration — "
         "don't approximate this from get_top_products, which isn't scoped to "
-        "total revenue. For "
+        "total revenue. For 'what gets bought together', cross-sell/bundle "
+        "ideas, or basket-composition questions, call get_basket_analysis — "
+        "prefer top_pairs_by_affinity (lift) for a genuinely surprising "
+        "combination worth acting on (lift far above 1 means far more likely "
+        "together than chance), and top_pairs_by_frequency for the most "
+        "common combinations regardless of surprise. Both are already floored "
+        "at min_pair_orders so a rare coincidence can't surface as a top "
+        "result — don't add your own extra caveat about sample size on top of "
+        "that. This tool is slower than the others (several seconds) — only "
+        "call it when the question is actually about co-purchase patterns. "
+        "For "
         "'what's out of stock' or restocking-priority questions, call "
         "get_stock_alerts. For whether a specific product is listed/enabled on "
         "Uber or PickMe at a given outlet, call get_product_listing — don't "
@@ -139,18 +186,57 @@ def _system_prompt() -> str:
         "expiry/freshness risk has no data behind it at all — on-hand stock "
         "isn't tracked by lot/batch (stock_quant.lot_id is unused), and "
         "shelf_life_days is 0% populated — say this is a genuine data gap, not "
-        "a missing tool, if asked.\n\n"
+        "a missing tool, if asked; a narrow forward-dated expiry field does "
+        "exist for a few short-shelf-life SKUs (bread, produce, eggs) but "
+        "isn't systematic enough to support a general expiry-risk question. "
+        "For 'what are we losing/wasting', shrinkage, damaged-goods, or "
+        "picking-shortage questions, call get_loss_and_damage — its "
+        "shortage_by_reason and damaged_top_products/damaged_by_store are "
+        "real operational data that didn't exist as a queryable signal "
+        "before this tool.\n\n"
         "The UI already renders a chart/table for get_sales_summary, "
         "get_customer_intelligence, get_inventory_depth, get_operations_summary, "
         "get_forward_look, get_top_products, get_top_cancelled_products, "
         "get_gross_margin, get_channel_breakdown, get_uber_lost_sales, "
         "get_inventory_by_outlet, get_product_lookup, get_stock_alerts, "
-        "get_product_listing, scan_attention, get_revenue_concentration, and "
+        "get_product_listing, scan_attention, get_revenue_concentration, "
+        "get_basket_analysis, get_loss_and_damage, "
+        "get_loyalty_and_promotions, get_brand_and_department_mix, and "
         "investigate_metric results right below your reply "
         "— so don't re-type their numbers into a markdown table yourself. Lead "
         "with the narrative: what changed, why, and what to do about it. Still "
         "use a markdown table for any ad-hoc numbers that don't come from one of "
-        "those tools."
+        "those tools.\n\n"
+        "This is a hard rule, every single turn, no matter how long the "
+        "conversation has gotten: after your narrative answer, add one final "
+        "trailer line, on its own, with nothing after it, in exactly this "
+        "form: 'FOLLOW_UPS: question one? | question two? | question three?' "
+        "— 2 to 3 follow-up questions the user could click to dig deeper, each "
+        "one a complete question naming the actual product, store, customer, "
+        "metric, or month you just discussed (never a generic 'want to know "
+        "more?'). The FOLLOW_UPS trailer is the ONLY place this content may "
+        "appear — never also write a visible section in the narrative itself "
+        "for this (no 'Follow-up questions you could explore:', 'Next steps', "
+        "'What to ask next', or similar heading with its own bullet list); the "
+        "UI renders the trailer as clickable chips right under your reply, so "
+        "a matching prose section is pure duplication the user will see twice. "
+        "A 'what to do about it' recommendations section (act on the finding) "
+        "is fine and different from this — it's advice, not a list of "
+        "questions to ask. Each follow-up must be answerable by one of your "
+        "existing tools — "
+        "don't suggest a drill-down you don't actually have data for. Favor "
+        "the specific named driver from a breakdown's top_driver/"
+        "top_contributors over the metric itself (e.g. if Colombo 6 drove a "
+        "revenue drop, suggest asking about Colombo 6, not just 'why did "
+        "revenue change again'), and a related metric that would confirm or "
+        "explain the same story (e.g. average_order_value next to "
+        "order_volume, or delayed_delivery_rate next to cancellation_rate). "
+        "Omit the trailer entirely only when there's truly no real next "
+        "question — a plain data-gap refusal, or a lookup that surfaced "
+        "nothing anomalous — never because the narrative already mentioned a "
+        "next step in passing; the trailer is the only place that offer may "
+        "appear, so if there's a next question worth asking, the trailer is "
+        "mandatory."
     )
 
 _DATE_RANGE_PROPS = {
@@ -496,6 +582,130 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_basket_analysis",
+            "description": (
+                "Get market-basket analysis for a month, rolling window, or "
+                "explicit date range: which real inventory products (packaging "
+                "and service-fee lines are excluded) get bought together most "
+                "often (top_pairs_by_frequency) and which pairs have the "
+                "strongest affinity — far more likely to co-occur than chance "
+                "alone, via 'lift' — regardless of overall volume "
+                "(top_pairs_by_affinity). Use for 'what gets bought together', "
+                "'cross-sell' / 'bundle' suggestions, or basket-composition "
+                "questions. This query is heavier than most (several seconds) "
+                "— only call it when the question is actually about co-"
+                "purchase patterns, not as a speculative extra call. Defaults "
+                "to last month if period is omitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
+                    },
+                    **_DATE_RANGE_PROPS,
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_loss_and_damage",
+            "description": (
+                "Get wastage/shrinkage signal for a month, rolling window, or "
+                "explicit date range: picking-shortage lines by reason "
+                "(missing item, item declined, product damage, extra "
+                "quantity) with top affected products and stores, physically "
+                "damaged-goods lines with top affected products and stores, "
+                "and stock-return counts/quantity. Use for 'what are we "
+                "losing/wasting', 'shrinkage', 'damaged goods', or "
+                "'shortage' questions. returns_orders/returns_qty are "
+                "internal stock returns (store back to warehouse), not "
+                "customer or supplier returns — say so if asked, don't "
+                "imply a refund or supplier-credit process. Defaults to "
+                "last month if period is omitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
+                    },
+                    **_DATE_RANGE_PROPS,
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_loyalty_and_promotions",
+            "description": (
+                "Get loyalty-points activity (issued/used/outstanding, top "
+                "customers by points, note that issued and used are equal on "
+                "~99% of activity since redemption here is near-instant, not "
+                "a save-and-spend program) and store promotions active "
+                "during a month, rolling window, or explicit date range "
+                "(product count, total discount value, average discount %). "
+                "Use for 'loyalty points', 'how many points did customers "
+                "earn/redeem', or 'what promotions ran and how much did they "
+                "discount' questions. Defaults to last month if period is "
+                "omitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
+                    },
+                    **_DATE_RANGE_PROPS,
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_brand_and_department_mix",
+            "description": (
+                "Get revenue split by brand (top 12) and by department "
+                "(Grocery, Beverage, Fresh, Household, Frozen, Liquor/"
+                "Tobacco, Chilled, Bakery, Pharmacy, ...) for a month, "
+                "rolling window, or explicit date range. Use for 'brand "
+                "performance', 'which brands sell best', or 'category/"
+                "department mix' questions. Celeste's private labels (e.g. "
+                "Island Tide, Sterilex, Puracel) are real products in the "
+                "catalog, but filed as product NAMES under the CELESTE brand "
+                "tag, not as their own separate brand entries — this "
+                "breakdown's brand list won't show them by name, they show "
+                "under CELESTE. For a specific private-label product by "
+                "name, use get_product_lookup instead, which searches "
+                "product names directly. Defaults to last month if period "
+                "is omitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
+                    },
+                    **_DATE_RANGE_PROPS,
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_revenue_concentration",
             "description": (
                 "Get what share of revenue comes from the top 10 products and "
@@ -540,7 +750,34 @@ TOOL_FUNCTIONS = {
     "get_product_listing": listings.get_product_listing,
     "scan_attention": lambda: intelligence.scan_attention(),
     "get_revenue_concentration": concentration.get_revenue_concentration,
+    "get_basket_analysis": basket.get_basket_analysis,
+    "get_loss_and_damage": loss_and_damage.get_loss_and_damage,
+    "get_loyalty_and_promotions": loyalty.get_loyalty_and_promotions,
+    "get_brand_and_department_mix": brand_mix.get_brand_and_department_mix,
 }
+
+
+_FOLLOW_UPS_RE = re.compile(r"\n?\**FOLLOW_UPS:\**\s*(.+)", re.IGNORECASE | re.DOTALL)
+
+
+def _extract_follow_ups(text: str | None) -> tuple[str | None, list[str]]:
+    """Split the model's optional trailing 'FOLLOW_UPS: q1? | q2?' line off the
+    reply. Tolerant of stray whitespace/newlines and markdown emphasis (the
+    model sometimes bolds the marker as '**FOLLOW_UPS:**') inside the trailer —
+    if the marker isn't present at all, the reply passes through unchanged."""
+    if not text:
+        return text, []
+    stripped = text.strip()
+    match = _FOLLOW_UPS_RE.search(stripped)
+    if not match:
+        return text, []
+    questions = []
+    for q in match.group(1).split("|"):
+        q = " ".join(q.split()).strip("* ")
+        if q:
+            questions.append(q)
+    clean = stripped[: match.start()].rstrip()
+    return clean, questions[:3]
 
 
 def _get_client() -> OpenAI:
@@ -575,7 +812,8 @@ async def run_agent_turn(messages: list[dict]) -> dict:
         choice_message = response.choices[0].message
 
         if not choice_message.tool_calls:
-            return {"reply": choice_message.content, "tool_calls": executed_calls}
+            reply, follow_ups = _extract_follow_ups(choice_message.content)
+            return {"reply": reply, "tool_calls": executed_calls, "follow_ups": follow_ups}
 
         full_messages.append(choice_message)
 
@@ -605,7 +843,9 @@ async def run_agent_turn(messages: list[dict]) -> dict:
     final_response = await anyio.to_thread.run_sync(
         lambda: client.chat.completions.create(model=model, messages=full_messages)
     )
+    reply, follow_ups = _extract_follow_ups(final_response.choices[0].message.content)
     return {
-        "reply": final_response.choices[0].message.content,
+        "reply": reply,
         "tool_calls": executed_calls,
+        "follow_ups": follow_ups,
     }

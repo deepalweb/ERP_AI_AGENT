@@ -79,6 +79,13 @@ FROM (
 ) t
 """
 
+ORDERS_BY_HOUR_SQL = f"""
+SELECT EXTRACT(HOUR FROM date_order)::int AS hour, COUNT(*) AS orders
+FROM sale_order
+WHERE state IN ('sale', 'cancel') AND store_id IN {CELESTE_STORE_IDS}
+GROUP BY 1 ORDER BY 1
+"""
+
 PO_SPEND_SQL = """
 SELECT date_trunc('month', date_order) AS month, SUM(amount_total) AS spend, COUNT(*) AS orders
 FROM purchase_order
@@ -210,6 +217,15 @@ async def get_inventory():
         "low_stock_threshold": LOW_STOCK_THRESHOLD,
         "po_spend_by_month": months,
     }
+
+
+async def get_orders_by_hour():
+    """All-time hour-of-day distribution (not scoped to one day — this
+    business's data only spans a few months, so a single day's hourly
+    counts would be too sparse to read as a pattern)."""
+    rows = await reporting.fetch_report(ORDERS_BY_HOUR_SQL)
+    by_hour = {int(r["hour"]): int(r["orders"]) for r in rows}
+    return {"hours": [{"hour": h, "orders": by_hour.get(h, 0)} for h in range(24)]}
 
 
 async def get_summary():

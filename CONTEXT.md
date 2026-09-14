@@ -1,6 +1,6 @@
 # Celeste Intelligence
 
-An AI business-intelligence layer over Celeste's live Odoo Postgres database — a Sri Lankan quick-commerce grocery retailer. It answers questions and surfaces investigations about Celeste's own retail business, not the partner brands and channels that share its infrastructure.
+An AI business-intelligence layer over Celeste's live Odoo Postgres database — a Sri Lankan quick-commerce grocery retailer trading as **Celeste Daily**. It answers questions and surfaces investigations about Celeste's own retail business, not the partner brands and channels that share its infrastructure.
 
 ## Language
 

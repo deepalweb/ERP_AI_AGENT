@@ -114,6 +114,13 @@ async def _customers_domain():
 
 
 async def get_business_health():
+    """Tried running these 5 independent domain computations concurrently
+    (anyio.create_task_group, the same pattern dashboard.py's get_summary()
+    uses) and measured it — 71s, slower than the 35s sequential baseline.
+    The bottleneck here is Postgres itself doing several heavy analytical
+    aggregation queries at once, not idle threads waiting on network I/O, so
+    the concurrency pattern that helps elsewhere backfires here. Verified via
+    direct timing before reverting — don't reapply this without re-measuring."""
     sales_score, sales_drivers = await anyio.to_thread.run_sync(_anomaly_domain, SALES_METRICS)
     ops_score, ops_drivers = await anyio.to_thread.run_sync(_anomaly_domain, OPERATIONS_METRICS)
     inventory_score, inventory_drivers = await _inventory_domain()

@@ -9,14 +9,34 @@ metric to intelligence.METRICS and it gets investigated the same way.
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from openai import OpenAI
 
-from mcp_server.tools import intelligence
+from mcp_server.tools import evidence_engine, impact_engine, intelligence
 
 CATEGORY_ORDER = {"critical": 0, "opportunity": 1}
 SEVERITY_BY_CATEGORY = {"critical": "high", "opportunity": "positive"}
+
+# How each metric is presented in the Explore feed's domain grouping. Lives
+# here (not in intelligence.py) since domain is about presentation, not
+# detection — mirrors the existing split where intelligence.py stays
+# metric-agnostic and investigation.py does all the narration.
+METRIC_DOMAIN = {
+    "cancellation_rate": "order_customer",
+    "order_volume": "order_customer",
+    "average_order_value": "order_customer",
+    "customer_retention_rate": "order_customer",
+    "revenue": "financial",
+    "gross_margin": "financial",
+    "delayed_delivery_rate": "delivery",
+    "uber_failure_rate": "delivery",
+    "pickme_cancellation_rate": "delivery",
+    "supplier_fill_rate": "supplier",
+    "purchase_price_variance": "supplier",
+    "supplier_concentration": "supplier",
+}
 
 # Metrics with a verified fulfillment-stage mechanism behind their store
 # breakdown (see backend/app/services/operations.py's
@@ -24,9 +44,41 @@ SEVERITY_BY_CATEGORY = {"critical": "high", "opportunity": "positive"}
 # never guessed for a metric with no confirmed mechanism.
 HOW_CAPABLE_METRICS = {"delayed_delivery_rate"}
 
+# Metrics with a short_term_trend_sql defined in intelligence.py — the two
+# operationally-urgent ones (cancellation spikes, delivery delays) where a
+# monthly comparison catches a problem too late to act on. Deliberately not
+# every metric: proving the trailing-window pattern here first before
+# extending it (e.g. to supplier_fill_rate) is a separate step.
+SHORT_TERM_METRICS = ["cancellation_rate", "delayed_delivery_rate"]
 
-def _estimate_how(metric_id: str, anomaly: dict, breakdowns: list):
-    if metric_id not in HOW_CAPABLE_METRICS:
+
+def _priority_for(anomaly: dict) -> str:
+    """Deterministic priority tier from the anomaly's own magnitude — not an
+    LLM judgment call, so it's always traceable back to a stated rule (same
+    posture as health.py's _status_for). Three real bands for a critical
+    finding, all off the same pct_change_vs_baseline/z_score magnitude
+    already computed by detect_anomaly() — nothing below ANOMALY_PCT_THRESHOLD
+    (15%) ever reaches here at all, so 'medium' is genuinely the floor, not a
+    padded-in fourth tier. An opportunity is never urgent in the same sense,
+    so it gets its own label rather than borrowing the bad-news scale."""
+    category = anomaly.get("category")
+    if category == "opportunity":
+        return "worth_pursuing"
+    pct = anomaly.get("pct_change_vs_baseline")
+    z = anomaly.get("z_score")
+    if (pct is not None and abs(pct) >= 40) or (pct is None and z is not None and abs(z) >= 3):
+        return "critical"
+    if (pct is not None and abs(pct) >= 25) or (pct is None and z is not None and abs(z) >= 2):
+        return "high"
+    return "medium"
+
+
+def _estimate_how(metric_id: str, anomaly: dict, breakdowns: list, horizon: str = "monthly"):
+    # get_stage_timing_by_store expects a "YYYY-MM" key (backend/app/services/
+    # operations.py's _month_bounds splits on "-" expecting exactly year-month)
+    # — it has no trailing-window equivalent yet, so this is monthly-only for
+    # now rather than crashing on a trailing period's date-range label.
+    if metric_id not in HOW_CAPABLE_METRICS or horizon != "monthly":
         return None
 
     store_breakdown = next((b for b in breakdowns if b["dimension"] == "store"), None)
@@ -61,61 +113,87 @@ def _headline(metric: dict, anomaly: dict) -> str:
     return f"{metric['label']}{pct_str} {direction_word} vs its usual range"
 
 
-def _estimate_impact(metric_id: str, trend: list[dict], anomaly: dict):
-    """Only defined for rate metrics tagged impact_kind='lost_orders' — translates
-    the excess/recovered rate into an order count and a rough revenue figure, priced
-    using that same month's revenue/order_volume metrics. Returns None otherwise;
-    callers must not fabricate an impact number when this returns None."""
-    metric = intelligence.METRICS[metric_id]
-    if metric.impact_kind != "lost_orders":
-        return None
-
-    latest_month = anomaly.get("latest_month")
-    latest_row = next((m for m in trend if m["month"] == latest_month), None)
-    if not latest_row or "denominator" not in latest_row:
-        return None
-
-    excess_rate_pts = anomaly["latest_value"] - anomaly["baseline_mean"]
-    excess_orders = round(excess_rate_pts / 100 * latest_row["denominator"])
-    if excess_orders == 0:
-        return None
-
-    rev_trend = {m["month"]: m["value"] for m in intelligence.get_trend(intelligence.METRICS["revenue"])}
-    vol_trend = {m["month"]: m["value"] for m in intelligence.get_trend(intelligence.METRICS["order_volume"])}
-    volume = vol_trend.get(latest_month)
-    avg_order_value = (rev_trend.get(latest_month, 0) / volume) if volume else 0
-
-    return {
-        "kind": "lost_orders" if excess_orders > 0 else "orders_recovered",
-        "orders": abs(excess_orders),
-        "estimated_revenue_impact": round(abs(excess_orders) * avg_order_value, 2),
-        "avg_order_value_used": round(avg_order_value, 2),
-        "month": latest_month,
-    }
-
-
-def _generate_recommendations(metric: dict, anomaly: dict, breakdowns: list, impact):
+def _generate_recommendations(metric: dict, anomaly: dict, breakdowns: list, impact, evidence_pkg=None):
     """One grounded, non-agentic LLM call: reason over the evidence already gathered
     and propose actions. The model is explicitly told not to introduce facts beyond
     the evidence payload, since these recommendations are shown as trustworthy,
-    evidence-backed guidance, not free chat."""
-    evidence = {"metric": metric, "anomaly": anomaly, "breakdowns": breakdowns, "impact": impact}
+    evidence-backed guidance, not free chat.
+
+    evidence_pkg (when present) is the OUTPUT of evidence_engine.build_trend_evidence/
+    build_snapshot_evidence — a deterministic evidence package, never something
+    the LLM is asked to determine itself. The prompt below is explicit about
+    which verdicts can be stated as fact vs. hedged vs. not mentioned at all,
+    so a 'possible_contributor' can't get upgraded into a stated cause just
+    because the model is writing fluent prose."""
+    evidence = {
+        "metric": metric,
+        "anomaly": anomaly,
+        "breakdowns": breakdowns,
+        "impact": impact,
+        "root_cause": evidence_pkg["checks"] if evidence_pkg else None,
+        "historical_context": evidence_pkg.get("historical_context") if evidence_pkg else None,
+        "data_quality": evidence_pkg.get("data_quality") if evidence_pkg else None,
+        "memory": evidence_pkg.get("memory") if evidence_pkg else None,
+    }
     prompt = (
         "You are a business analyst writing recommendations from evidence only. "
         "Given this investigation evidence as JSON, return a JSON array of 2-4 "
         "recommended actions, most important first. Each item must be exactly: "
-        '{"action": string, "owner": string, "priority": "high"|"medium"|"low"}. '
+        '{"action": string, "owner": string, "priority": "high"|"medium"|"low", '
+        '"expected_benefit": string}. '
         "'owner' is a plausible responsible team or role (e.g. 'Logistics team', "
         "'Inventory team', 'Operations manager') inferred from which dimension "
         "(store/product/reason/customer) the evidence points at. Name the specific "
         "segments that appear in the breakdowns rather than speaking generically. "
+        "'expected_benefit' is a short, grounded statement of the likely outcome if "
+        "the action is taken — if `impact` is present in the evidence, base it on "
+        "that figure (e.g. 'could recover roughly N orders / Rs. X per month'); if "
+        "`impact` is null, give a qualitative outcome tied only to the evidence "
+        "already provided (e.g. 'should reduce cancellations concentrated at "
+        "<store>'). Never invent a number that isn't derivable from the evidence. "
         "IMPORTANT: each entry in `breakdowns` is an INDEPENDENT aggregate over the "
         "whole business — the top store and the top reason were computed separately "
         "and do not mean that reason is what happened at that store. Never combine "
         "a segment from one breakdown with a segment from another (e.g. never say "
         "'address <reason> at <store>') unless the evidence explicitly ties them "
         "together. Write a recommendation about a breakdown's top segment using "
-        "only that breakdown's own dimension. Do not invent facts not present in "
+        "only that breakdown's own dimension. "
+        "If `root_cause` is present, it lists specific checks Celeste already ran "
+        "against real data, each with a verdict: 'confirmed' (state this as "
+        "established fact — you may say it caused or drove the move), "
+        "'possible_contributor' (mention only with hedged language like 'may also "
+        "be a factor' — never state it as the cause), 'no_evidence_found' or "
+        "'unknown' (do not mention as a cause at all; these mean it was checked and "
+        "NOT supported, or couldn't be checked). Do not propose any cause that isn't "
+        "listed in `root_cause`, and do not claim causation where the evidence only "
+        "shows correlation. "
+        "If `historical_context` is present, it describes whether this finding is a "
+        "one-off ('single_period_move'), part of a longer run in the same direction "
+        "('consistent_declining'/'consistent_improving', with `consecutive_periods` "
+        "showing how many), or a rebound right after one ('recovering'). If "
+        "`consecutive_periods` is 2 or more, reflect the persistence explicitly (e.g. "
+        "'third consecutive month of decline') rather than writing as if this were the "
+        "first time it's happened — a repeated problem calls for more urgency than a "
+        "one-off. If the pattern is 'recovering', say so as a rebound, not a new problem. "
+        "If `data_quality` has verdict 'low_confidence', say so plainly (e.g. 'based on "
+        "limited history so far') rather than presenting the finding with full confidence. "
+        "If `memory` is present, it describes the most recent PRIOR time this exact "
+        "metric was flagged: what was recommended then (`prior_recommendations`), "
+        "what a team recorded actually doing about it (`action_taken_by_team`, only "
+        "present if someone logged it), and what happened as a result "
+        "(`outcome_verdict`: 'improved' means the deviation shrank, 'worsened' means "
+        "it grew, 'unchanged' means neither, 'pending' means it's too soon to know). "
+        "If `outcome_verdict` is 'worsened' or 'unchanged', do not simply repeat a "
+        "`prior_recommendations` action that already failed to work — either propose "
+        "something genuinely different, or if the evidence still points at the same "
+        "fix, explicitly say why it's worth trying again (e.g. new evidence, or it "
+        "was never actually acted on per `action_taken_by_team`). If `outcome_verdict` "
+        "is 'improved', you may suggest reinforcing what already worked rather than "
+        "replacing it. Never claim credit for an outcome — describe it neutrally as "
+        "something that was observed. If `memory` is null, this is the first time "
+        "this metric has been flagged (or there's no prior period yet) — do not "
+        "reference history that wasn't provided. "
+        "Do not invent facts not present in "
         "the evidence. Return ONLY the JSON array, no prose, no markdown fences.\n\n"
         f"Evidence:\n{json.dumps(evidence, default=str)}"
     )
@@ -146,17 +224,54 @@ def build_investigation(metric_id: str):
 
     metric, anomaly, trend = result["metric"], result["anomaly"], result["trend"]
 
-    if anomaly["category"] not in ("critical", "opportunity"):
-        return {"metric_id": metric_id, "category": anomaly["category"], "status": "no_finding"}
+    # anomaly has no "category" key at all when detect_anomaly() short-circuits
+    # on insufficient_data (fewer than 2 complete months) — caught live when a
+    # newly-added or sparsely-populated metric (e.g. supplier_fill_rate, whose
+    # source is a narrow rolling-window view) hadn't accumulated enough
+    # history yet. .get() instead of [...] so this degrades to "no_finding"
+    # like any other non-actionable verdict, rather than crashing scan_all()
+    # for every metric via the shared ThreadPoolExecutor.
+    category = anomaly.get("category")
+    if category not in ("critical", "opportunity"):
+        return {"metric_id": metric_id, "category": category, "status": "no_finding"}
 
     breakdowns = result["breakdowns"]
-    impact = _estimate_impact(metric_id, trend, anomaly)
-    recommendations = _generate_recommendations(metric, anomaly, breakdowns, impact)
-    how = _estimate_how(metric_id, anomaly, breakdowns)
+    impact = impact_engine.compute_impact(metric_id, intelligence.METRICS[metric_id], anomaly, trend, horizon="monthly")
+    how = _estimate_how(metric_id, anomaly, breakdowns, horizon="monthly")
+    # Evidence gathered BEFORE recommendations, not after — so the model
+    # always has whatever evidence exists before it writes anything, never
+    # the other way around.
+    evidence = evidence_engine.build_trend_evidence(
+        metric_id, anomaly, breakdowns, trend, result["persistence"], category
+    )
+    recommendations = _generate_recommendations(metric, anomaly, breakdowns, impact, evidence)
+    priority = _priority_for(anomaly)
+    impact_score = impact_engine.business_impact_score(priority, result["persistence"], impact, evidence["data_quality"])
 
     return {
         "id": f"{metric_id}-{anomaly['latest_month']}",
         "metric_id": metric_id,
+        "domain": METRIC_DOMAIN.get(metric_id, "order_customer"),
+        "priority": priority,
+        "business_impact_score": impact_score,
+        "root_cause": {"checks": evidence["checks"], "summary": evidence["summary"]},
+        "data_quality": evidence["data_quality"],
+        "memory": evidence["memory"],
+        "horizon": "monthly",
+        # Already computed above for the anomaly/impact checks — exposed here
+        # too so a Situation Card can render a real multi-month trend line
+        # without an extra live intelligence.investigate() call (that path is
+        # 3-14s per metric; this is free since scan_all() already paid for it).
+        "trend": trend,
+        # Same free-exposure reasoning as trend — used by the frontend's
+        # business-impact ranking (consecutive_periods as a persistence
+        # multiplier) instead of re-deriving it.
+        "persistence": result["persistence"],
+        # Exposed for the same reason as trend above — a breakdown chart needs
+        # to know whether a positive delta is good or bad for THIS metric
+        # (independent of whether this particular finding is critical/
+        # opportunity), which only metric.direction carries.
+        "metric": metric,
         "title": _headline(metric, anomaly),
         "category": anomaly["category"],
         "severity": SEVERITY_BY_CATEGORY[anomaly["category"]],
@@ -177,10 +292,98 @@ def build_investigation(metric_id: str):
 
 
 def scan_all():
-    investigations = []
-    for metric_id in intelligence.METRICS:
-        inv = build_investigation(metric_id)
-        if inv.get("status") == "completed":
-            investigations.append(inv)
+    """Each metric's investigation is independent (its own DB queries, and its
+    own LLM recommendation call if it's flagged) — run them concurrently rather
+    than one after another. Verified sequentially this took ~100s dominated by
+    per-flagged-metric LLM calls stacking up; threads give real concurrency
+    here since both the DB driver and the OpenAI HTTP client release the GIL
+    while waiting on I/O."""
+    with ThreadPoolExecutor(max_workers=len(intelligence.METRICS)) as executor:
+        results = list(executor.map(build_investigation, intelligence.METRICS))
+
+    investigations = [inv for inv in results if inv.get("status") == "completed"]
     investigations.sort(key=lambda i: CATEGORY_ORDER.get(i["category"], 2))
     return investigations
+
+
+def build_trailing_investigation(metric_id: str):
+    """Trailing 7-day-window counterpart to build_investigation() — same
+    narration (title, breakdowns, recommendations), computed over the
+    trailing window instead of a calendar month. Reuses every helper below
+    unchanged except where a helper's underlying data source is genuinely
+    monthly-only (impact pricing, delivery-stage timing) — those are passed
+    horizon="weekly" and honestly return None rather than fabricate a
+    monthly-shaped answer from a non-monthly period."""
+    result = intelligence.investigate_trailing(metric_id)
+    if "error" in result:
+        return result
+
+    metric, anomaly, trend = result["metric"], result["anomaly"], result["trend"]
+
+    # Same insufficient_data guard as build_investigation() above.
+    category = anomaly.get("category")
+    if category not in ("critical", "opportunity"):
+        return {"metric_id": metric_id, "category": category, "status": "no_finding"}
+
+    breakdowns = result["breakdowns"]
+    impact = impact_engine.compute_impact(metric_id, intelligence.METRICS[metric_id], anomaly, trend, horizon="weekly")
+    how = _estimate_how(metric_id, anomaly, breakdowns, horizon="weekly")
+    # Same evidence-before-recommendations ordering as build_investigation().
+    # No memory here — tracked_findings has no rows for trailing/weekly
+    # periods (see brain.py), so build_trend_evidence's own memory lookup
+    # would just return None; passing persistence is still worthwhile since
+    # classify_persistence() works on a trailing trend the same way.
+    evidence = evidence_engine.build_trend_evidence(
+        metric_id, anomaly, breakdowns, trend, result["persistence"], category, include_memory=False
+    )
+    recommendations = _generate_recommendations(metric, anomaly, breakdowns, impact, evidence)
+    priority = _priority_for(anomaly)
+    impact_score = impact_engine.business_impact_score(priority, result["persistence"], impact, evidence["data_quality"])
+
+    as_of_date = result["as_of"].date().isoformat() if result.get("as_of") else date.today().isoformat()
+
+    return {
+        "id": f"{metric_id}-trailing-{as_of_date}",
+        "metric_id": metric_id,
+        "domain": METRIC_DOMAIN.get(metric_id, "order_customer"),
+        "priority": priority,
+        "business_impact_score": impact_score,
+        "root_cause": {"checks": evidence["checks"], "summary": evidence["summary"]},
+        "data_quality": evidence["data_quality"],
+        "horizon": "weekly",
+        # The data's own latest date, not wall-clock today — exposed so
+        # weekly_streaks.py can count consecutive *scanned* days a metric
+        # stayed flagged without re-deriving it from the id string.
+        "as_of_date": as_of_date,
+        "trend": trend,
+        "persistence": result["persistence"],
+        "metric": metric,
+        "title": _headline(metric, anomaly),
+        "category": anomaly["category"],
+        "severity": SEVERITY_BY_CATEGORY[anomaly["category"]],
+        "detected": date.today().isoformat(),
+        "confirm": {
+            "period": anomaly["latest_month"],
+            "current": anomaly["latest_value"],
+            "baseline": anomaly["baseline_mean"],
+            "pct_change": anomaly["pct_change_vs_baseline"],
+            "unit": metric["unit"],
+        },
+        "breakdowns": breakdowns,
+        "impact": impact,
+        "how": how,
+        "recommendations": recommendations,
+        "status": "completed",
+    }
+
+
+def scan_short_term():
+    """Weekly counterpart to scan_all() — only runs the metrics registered
+    in SHORT_TERM_METRICS (those with a short_term_trend_sql defined), not
+    every metric in intelligence.METRICS."""
+    with ThreadPoolExecutor(max_workers=max(len(SHORT_TERM_METRICS), 1)) as executor:
+        results = list(executor.map(build_trailing_investigation, SHORT_TERM_METRICS))
+
+    findings = [inv for inv in results if inv.get("status") == "completed"]
+    findings.sort(key=lambda i: CATEGORY_ORDER.get(i["category"], 2))
+    return findings

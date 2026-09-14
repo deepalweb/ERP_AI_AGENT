@@ -1,201 +1,18 @@
-.app {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  text-align: left;
-}
+/* Styling for the pre-rebuild chat components (Message/ToolCalls dispatcher,
+   the 15 specialized tool-result cards, ChatSidebar) — extracted verbatim
+   from App.css/shared.css, NOT the whole file. Those files also carry old
+   #root width-lock and unlayered h1/h2 element-selector overrides that
+   broke full-width layout and Tailwind heading sizes app-wide when they
+   were active (fixed earlier by removing them from index.css) — importing
+   App.css/shared.css wholesale here would reintroduce exactly that bug.
+   This file is imported ONLY by AskCelesteOverlay.jsx, never globally.
 
-.app-header {
-  padding: 14px clamp(20px, 4vw, 56px) 0;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.app-header-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.app-header-kpis {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding-bottom: 10px;
-  font-size: 12.5px;
-  color: var(--text);
-  min-height: 18px;
-}
-
-.app-header-kpi {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.app-header-kpi-label {
-  opacity: 0.7;
-}
-
-.app-header-kpi-value {
-  font-weight: 650;
-  color: var(--text-h);
-  font-variant-numeric: tabular-nums;
-}
-
-.app-header-kpi-muted {
-  opacity: 0.65;
-}
-
-.app-header-kpi-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: 0 0 auto;
-}
-
-.app-header-kpi-dot-good { background: var(--status-good); }
-.app-header-kpi-dot-warning { background: var(--status-warning); }
-.app-header-kpi-dot-critical { background: var(--status-critical); }
-
-.app-header-divider {
-  width: 1px;
-  height: 12px;
-  background: var(--border);
-}
-
-.app-header-scope {
-  position: relative;
-}
-
-.app-header-scope-chip {
-  border: 1px solid var(--border);
-  background: var(--code-bg);
-  color: var(--text-h);
-  font-size: 11.5px;
-  font-weight: 600;
-  padding: 3px 9px;
-  border-radius: 999px;
-  cursor: pointer;
-}
-
-.app-header-scope-chip:hover {
-  border-color: var(--accent-border);
-}
-
-.app-header-scope-list {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 5;
-  min-width: 220px;
-  border: 1px solid var(--border);
-  background: var(--chart-surface);
-  border-radius: 8px;
-  padding: 10px 12px;
-  box-shadow: 0 4px 16px var(--shadow);
-}
-
-.app-header-scope-list-title {
-  font-size: 10.5px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text);
-  opacity: 0.7;
-  margin-bottom: 6px;
-}
-
-.app-header-scope-list ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.app-header-scope-list li {
-  font-size: 12.5px;
-  color: var(--text-h);
-}
-
-@media (max-width: 640px) {
-  .app-header-kpis { overflow-x: auto; }
-}
-
-.brand-lockup {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.brand-mark {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--accent);
-  color: white;
-  font-weight: 700;
-}
-
-.brand-lockup h1 {
-  font-size: 16px;
-  margin: 0;
-  line-height: 1.2;
-}
-
-.brand-lockup div > span {
-  display: block;
-  font-size: 10px;
-  color: var(--text);
-  margin-top: 1px;
-}
-
-.app-nav {
-  display: flex;
-  gap: 4px;
-}
-
-.app-nav button {
-  padding: 8px 14px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text);
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.app-nav button:hover {
-  background: var(--code-bg);
-}
-
-.app-nav button.app-nav-active {
-  background: var(--accent-bg);
-  border-color: var(--accent-border);
-  color: var(--text-h);
-  font-weight: 600;
-}
-
-@media (max-width: 640px) {
-  .app-header { align-items: flex-start; flex-direction: column; }
-  .app-nav { width: 100%; overflow-x: auto; }
-  .app-nav button { white-space: nowrap; flex: 1; }
-}
-
-.chat-layout {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-}
+   Every var(--...) reference below resolves against the same CSS custom
+   properties index.css still defines (--text, --text-h, --bg, --border,
+   --code-bg, --accent, --accent-bg, --accent-border, --chart-surface,
+   --status-critical, --status-good) — Tailwind's tokens are mapped onto
+   these same variables, not a replacement for them, so dark mode and the
+   rest of the app's palette stay consistent automatically. */
 
 .chat-sidebar {
   width: 260px;
@@ -340,27 +157,6 @@
   color: var(--text-h);
 }
 
-.chat-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.chat-window {
-  flex: 1;
-  overflow-y: auto;
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.empty-state {
-  color: var(--text);
-  opacity: 0.7;
-}
-
 .message {
   display: flex;
   flex-direction: column;
@@ -452,12 +248,6 @@
   opacity: 0.6;
 }
 
-.error-banner {
-  align-self: center;
-  color: #c0392b;
-  font-size: 14px;
-}
-
 .tool-calls {
   margin-top: 8px;
   width: 100%;
@@ -475,6 +265,15 @@
   color: var(--text-h);
   margin-bottom: 8px;
   font-size: 14px;
+}
+
+.tool-card-title .anomalies-table-badge {
+  margin-left: 8px;
+}
+
+.persistence-badge {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
 }
 
 .tool-card-notice {
@@ -506,34 +305,90 @@
   color: var(--text-h);
 }
 
-.chat-input {
-  display: flex;
-  gap: 8px;
-  padding: 16px 24px;
-  border-top: 1px solid var(--border);
-}
-
-.chat-input input {
-  flex: 1;
-  padding: 10px 14px;
-  border-radius: 8px;
+.chart-card {
   border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text-h);
-  font-size: 15px;
+  border-radius: 10px;
+  background: var(--chart-surface);
+  padding: 10px 14px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  min-height: 220px;
+  overflow: hidden;
 }
 
-.chat-input button {
-  padding: 10px 20px;
-  border-radius: 8px;
-  border: none;
-  background: var(--accent);
-  color: white;
-  font-size: 15px;
+.chart-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-h);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chart-empty {
+  margin: auto;
+  color: var(--text);
+  opacity: 0.6;
+  font-size: 13px;
+}
+
+.anomalies-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.anomalies-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  opacity: 0.7;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.anomalies-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-h);
+}
+
+.anomalies-table tr:last-child td {
+  border-bottom: none;
+}
+
+.anomalies-table tbody tr {
   cursor: pointer;
 }
 
-.chat-input button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.anomalies-table tbody tr:hover {
+  background: var(--code-bg);
+}
+
+.anomalies-table-change {
+  font-variant-numeric: proportional-nums;
+}
+
+.anomalies-table-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.anomalies-table-badge-critical {
+  background: color-mix(in srgb, var(--status-critical) 15%, transparent);
+  color: var(--status-critical);
+}
+
+.anomalies-table-badge-opportunity {
+  background: color-mix(in srgb, var(--status-good) 15%, transparent);
+  color: var(--status-good);
 }

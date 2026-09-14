@@ -136,6 +136,31 @@ def check_outcomes():
         )
 
 
+def get_most_recent_prior(metric_id: str, before_period: str):
+    """The most recent tracked_findings row for this metric with a period
+    strictly before `before_period` — resolved or still open. Mirrors
+    Home.jsx's findPriorFinding() exactly (same "period < current" pick),
+    so the Context+Memory fed to the LLM (see evidence_engine.py's
+    get_finding_memory) matches what a manager already sees printed next
+    to the recommendation on the card — never a different "last time" than
+    the one on screen. Returns None when there's no prior period at all,
+    the common case for a metric that's only ever been flagged once."""
+    _ensure_schema()
+    rows = appdb.run_query(
+        """
+        SELECT * FROM tracked_findings
+        WHERE metric_id = :metric_id AND period < :before_period
+        ORDER BY period DESC LIMIT 1
+        """,
+        {"metric_id": metric_id, "before_period": before_period},
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    row["recommendations"] = json.loads(row["recommendations"] or "[]")
+    return row
+
+
 def get_tracking_history(limit: int = 20):
     _ensure_schema()
     rows = appdb.run_query(

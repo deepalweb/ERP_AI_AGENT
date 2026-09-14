@@ -1,10 +1,11 @@
 import { useState } from "react";
+import { NavLink } from "react-router-dom";
 import { formatCurrency, formatNumber, monthLabel } from "./format";
 
 const NAV_ITEMS = [
-  { id: "overview", label: "Executive" },
-  { id: "operations", label: "Operations" },
-  { id: "chat", label: "Ask intelligence" },
+  { to: "/", label: "Home", end: true },
+  { to: "/dashboard", label: "Dashboard" },
+  { to: "/customers/predictions", label: "Next Order" },
 ];
 
 function ScopeChip({ stores }) {
@@ -13,19 +14,19 @@ function ScopeChip({ stores }) {
   if (!stores) return null;
 
   return (
-    <span className="app-header-scope">
+    <span className="relative">
       <button
         type="button"
-        className="app-header-scope-chip"
+        className="rounded-full border border-border px-2 py-0.5 text-xs text-foreground/70 hover:text-foreground"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
       >
         {stores.length} Celeste outlets
       </button>
       {expanded && (
-        <div className="app-header-scope-list">
-          <div className="app-header-scope-list-title">Every number here is scoped to:</div>
-          <ul>
+        <div className="absolute left-0 top-full z-10 mt-2 w-56 rounded-lg border border-border bg-chart-surface p-3 text-left shadow-sm">
+          <div className="text-xs font-medium text-foreground/70">Every number here is scoped to:</div>
+          <ul className="mt-2 space-y-1 text-sm">
             {stores.map((name) => (
               <li key={name}>{name}</li>
             ))}
@@ -36,59 +37,80 @@ function ScopeChip({ stores }) {
   );
 }
 
-export default function Header({ view, onNavigate, kpis, storeScope }) {
+export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCount = 0 }) {
   return (
-    <header className="app-header">
-      <div className="app-header-top">
-        <div className="brand-lockup">
-          <span className="brand-mark">C</span>
-          <div>
-            <h1>Celeste Intelligence</h1>
-            <span>Enterprise briefing</span>
+    <header className="border-b border-border bg-background">
+      <div className="flex items-center justify-between px-6 py-3">
+        <div className="flex items-center gap-2">
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-accent text-sm font-bold text-white">C</span>
+          <div className="leading-tight">
+            <h1 className="text-base font-semibold text-foreground-strong">Celeste</h1>
+            <span className="text-xs text-foreground/60">Business Briefing</span>
           </div>
         </div>
-        <nav className="app-nav">
+
+        <nav className="flex items-center gap-1">
           {NAV_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={view === item.id ? "app-nav-active" : ""}
-              onClick={() => onNavigate(item.id)}
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) =>
+                `relative rounded-full px-3 py-1.5 text-sm font-medium ${
+                  isActive ? "bg-accent-soft text-accent" : "text-foreground/70 hover:text-foreground"
+                }`
+              }
             >
               {item.label}
-            </button>
+              {/* New-critical-finding badge lives on Home specifically (not a
+                  separate bell icon) — that's where acknowledging happens,
+                  so the badge and the place that clears it are the same
+                  link. See notifications.py for what counts as "new." */}
+              {item.to === "/" && newCriticalCount > 0 && (
+                <span
+                  className="absolute -right-1.5 -top-1.5 grid h-4 min-w-4 place-items-center rounded-full bg-critical px-1 text-[10px] font-bold leading-none text-white"
+                  title={`${newCriticalCount} new critical finding${newCriticalCount === 1 ? "" : "s"}`}
+                >
+                  {newCriticalCount > 9 ? "9+" : newCriticalCount}
+                </span>
+              )}
+            </NavLink>
           ))}
         </nav>
+
+        <button
+          type="button"
+          onClick={onAskCeleste}
+          className="rounded-full border border-accent-border bg-accent-soft px-3 py-1.5 text-sm font-medium text-accent"
+        >
+          Ask Celeste
+        </button>
       </div>
 
-      <div className="app-header-kpis">
+      <div className="flex items-center gap-3 px-6 pb-2 text-sm">
         <ScopeChip stores={storeScope} />
-        {storeScope && <span className="app-header-divider" aria-hidden="true" />}
         {kpis ? (
           <>
-            <span className="app-header-kpi">
-              <span className="app-header-kpi-label">Revenue</span>
-              <span className="app-header-kpi-value">{formatCurrency(kpis.revenue)}</span>
-            </span>
-            <span className="app-header-divider" aria-hidden="true" />
-            <span className="app-header-kpi">
-              <span className="app-header-kpi-label">Orders</span>
-              <span className="app-header-kpi-value">{formatNumber(kpis.orders)}</span>
-            </span>
-            <span className="app-header-divider" aria-hidden="true" />
-            <span className="app-header-kpi">
-              <span className={`app-header-kpi-dot app-header-kpi-dot-${kpis.healthStatus}`} aria-hidden="true" />
-              <span className="app-header-kpi-label">Health</span>
-              <span className="app-header-kpi-value">{kpis.healthScore}</span>
+            <span className="h-4 w-px bg-border" aria-hidden="true" />
+            <span className="text-foreground/60">Revenue <strong className="text-foreground-strong">{formatCurrency(kpis.revenue)}</strong></span>
+            <span className="h-4 w-px bg-border" aria-hidden="true" />
+            <span className="text-foreground/60">Orders <strong className="text-foreground-strong">{formatNumber(kpis.orders)}</strong></span>
+            <span className="h-4 w-px bg-border" aria-hidden="true" />
+            <span className="flex items-center gap-1 text-foreground/60">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  kpis.healthStatus === "critical" ? "bg-critical" : kpis.healthStatus === "warning" ? "bg-warning" : "bg-good"
+                }`}
+                aria-hidden="true"
+              />
+              Health <strong className="text-foreground-strong">{kpis.healthScore}</strong>
             </span>
             {kpis.dataThroughMonth && (
-              <span className="app-header-kpi app-header-kpi-muted">
-                Data through {monthLabel(kpis.dataThroughMonth)}
-              </span>
+              <span className="text-foreground/40">Data through {monthLabel(kpis.dataThroughMonth)}</span>
             )}
           </>
         ) : (
-          <span className="app-header-kpi app-header-kpi-muted">Loading&hellip;</span>
+          <span className="text-foreground/40">Loading&hellip;</span>
         )}
       </div>
     </header>

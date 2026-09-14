@@ -1,5 +1,14 @@
 import { formatCurrency } from "../format";
 
+function AvailabilityDot({ ok }) {
+  return (
+    <span className="listing-availability">
+      <span className={`signal-tile-dot signal-tile-dot-${ok ? "good" : "critical"} attention-scan-dot`} />
+      {ok ? "Listed" : "Not listed"}
+    </span>
+  );
+}
+
 export default function ProductListingCard({ result }) {
   if (!result || result.error) return null;
 
@@ -53,8 +62,8 @@ export default function ProductListingCard({ result }) {
           {result.listings.map((l) => (
             <tr key={l.outlet}>
               <td>{l.outlet}</td>
-              <td>{l.available_in_uber ? "Yes" : "No"}</td>
-              <td>{l.available_in_pickme ? "Yes" : "No"}</td>
+              <td><AvailabilityDot ok={l.available_in_uber} /></td>
+              <td><AvailabilityDot ok={l.available_in_pickme} /></td>
               <td className="anomalies-table-change">{l.price === null ? "—" : formatCurrency(l.price)}</td>
             </tr>
           ))}
