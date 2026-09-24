@@ -1,14 +1,18 @@
 import { useRef, useState } from "react";
 import { Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { fetchBusinessHealth, fetchDashboardSummary, fetchNotificationsSummary, fetchStoreScope } from "./api";
+import { fetchStoreScope } from "./api";
 import Header from "./Header";
 import Home from "./routes/Home";
+import Actions from "./routes/Actions";
 import Dashboard from "./routes/Dashboard";
 import CustomerPredictions from "./routes/CustomerPredictions";
+import Investigate from "./routes/Investigate";
+import CaseDetail from "./routes/CaseDetail";
+import Outcomes from "./routes/Outcomes";
 import AskCelesteOverlay from "./chat/AskCelesteOverlay";
 
-export default function App() {
+export default function App({ onSignOut }) {
   const [overlayOpen, setOverlayOpen] = useState(false);
   // {text, key} — key increments on every "Ask Celeste about this" click so
   // asking the identical question twice in a row still triggers a fresh
@@ -22,41 +26,40 @@ export default function App() {
     setOverlayOpen(true);
   }
 
-  const { data: storeScope } = useQuery({ queryKey: ["storeScope"], queryFn: fetchStoreScope, select: (r) => r.stores });
-  const { data: dashboardData } = useQuery({ queryKey: ["dashboardSummary"], queryFn: fetchDashboardSummary });
-  const { data: health } = useQuery({ queryKey: ["businessHealth"], queryFn: fetchBusinessHealth });
-  const { data: notifications } = useQuery({ queryKey: ["notificationsSummary"], queryFn: fetchNotificationsSummary });
-
-  // /intelligence/health's payload has its own `status` field (the health
-  // verdict) that overwrites the route wrapper's `"status": "ok"` — `overall`
-  // being a number is the real success signal, not `health.status === "ok"`.
-  const headerKpis =
-    dashboardData?.status === "ok" && typeof health?.overall === "number"
-      ? {
-          revenue: dashboardData.sales.headline_revenue,
-          orders: dashboardData.sales.headline_orders,
-          healthScore: health.overall,
-          healthStatus: health.status,
-          dataThroughMonth: dashboardData.sales.months?.[dashboardData.sales.months.length - 1]?.month ?? null,
-        }
-      : null;
+  const { data: storeScope } = useQuery({
+    queryKey: ["storeScope"],
+    queryFn: fetchStoreScope,
+    select: (r) => r.stores,
+  });
 
   return (
     <div className="min-h-screen bg-background">
       <Header
-        kpis={headerKpis}
         storeScope={storeScope}
         onAskCeleste={() => setOverlayOpen(true)}
-        newCriticalCount={notifications?.status === "ok" ? notifications.new_critical_count : 0}
+        onSignOut={onSignOut}
       />
 
-      <Routes>
-        <Route path="/" element={<Home onAskCeleste={askCeleste} />} />
-        <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/customers/predictions" element={<CustomerPredictions />} />
-      </Routes>
+      <main id="main-content" tabIndex={-1} className="workspace-main">
+        <Routes>
+          <Route path="/" element={<Home onAskCeleste={askCeleste} />} />
+          <Route path="/actions" element={<Actions />} />
+          <Route path="/investigate" element={<Investigate />} />
+          <Route path="/investigate/:caseId" element={<CaseDetail />} />
+          <Route path="/outcomes" element={<Outcomes />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route
+            path="/customers/predictions"
+            element={<CustomerPredictions />}
+          />
+        </Routes>
+      </main>
 
-      <AskCelesteOverlay open={overlayOpen} question={pendingQuestion} onClose={() => setOverlayOpen(false)} />
+      <AskCelesteOverlay
+        open={overlayOpen}
+        question={pendingQuestion}
+        onClose={() => setOverlayOpen(false)}
+      />
     </div>
   );
 }

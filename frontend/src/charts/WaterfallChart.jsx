@@ -27,7 +27,11 @@ function prepareWaterfallData(steps) {
   });
 }
 
-export default function WaterfallChart({ steps, formatValue = String }) {
+/** `deltaGoodWhenPositive` colors each delta step by whether it helped or
+ * hurt the metric (same convention as DrivenBarChart), not by sign alone --
+ * a "total"-type step is always neutral (it's an anchor point, not a
+ * direction). */
+export default function WaterfallChart({ steps, formatValue = String, deltaGoodWhenPositive = true }) {
   const data = prepareWaterfallData(steps);
 
   return (
@@ -39,9 +43,11 @@ export default function WaterfallChart({ steps, formatValue = String }) {
         <Tooltip formatter={(_, __, item) => formatValue(item.payload.raw)} />
         <Bar dataKey="base" stackId="a" fill="transparent" />
         <Bar dataKey="visible" stackId="a" radius={4}>
-          {data.map((d) => (
-            <Cell key={d.name} fill={d.isTotal ? "var(--series-1)" : "var(--status-critical)"} />
-          ))}
+          {data.map((d) => {
+            const isGood = !d.isTotal && (deltaGoodWhenPositive ? d.raw >= 0 : d.raw <= 0);
+            const fill = d.isTotal ? "var(--text-h)" : isGood ? "var(--status-good)" : "var(--status-critical)";
+            return <Cell key={d.name} fill={fill} />;
+          })}
           <LabelList dataKey="raw" position="top" formatter={formatValue} fontSize={12} fill="var(--text)" />
         </Bar>
       </BarChart>

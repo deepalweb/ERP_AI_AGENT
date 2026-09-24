@@ -51,12 +51,12 @@ export default function ProductLookupCard({ result }) {
         <StatTile label="Revenue" value={formatCurrency(result.sales.revenue)} note={`${formatNumber(result.sales.orders)} orders`} />
         <StatTile label="Units sold" value={formatNumber(result.sales.qty_sold)} />
         <StatTile
-          label="Gross margin"
+          label="Est. gross margin (current-cost basis)"
           value={result.margin.gross_margin_pct === null ? "n/a" : `${result.margin.gross_margin_pct}%`}
           note={
             result.margin.cost_data_coverage_pct === null
-              ? undefined
-              : `${result.margin.cost_data_coverage_pct}% of revenue has cost data`
+              ? "current catalog cost, not a historical cost-of-goods-sold record"
+              : `${result.margin.cost_data_coverage_pct}% of revenue had a cost value (coverage only) -- cost itself is current catalog price, not historical`
           }
         />
         <StatTile

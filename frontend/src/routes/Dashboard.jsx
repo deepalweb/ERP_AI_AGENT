@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchBrandMix,
@@ -154,6 +155,17 @@ export default function Dashboard() {
         <h1 className="text-xl font-semibold text-foreground-strong">Business dashboard</h1>
         <span className="text-xs text-foreground/60">Data through {monthLabel(sales.headline_month)}</span>
       </div>
+
+      {/* Customer Purchase Intelligence dropped out of the primary nav (see
+          Header.jsx) once the nav was trimmed to Home/Actions/Explore/Ask —
+          this keeps it one click away instead of removing access to it. */}
+      <Link
+        to="/customers/predictions"
+        className="mt-3 flex items-center justify-between rounded-xl border border-accent-border bg-accent-soft px-4 py-3 text-sm font-medium text-accent hover:bg-accent-soft/80"
+      >
+        Customer Purchase Intelligence — when customers are likely to order again
+        <span aria-hidden="true">&rarr;</span>
+      </Link>
 
       {/* Business health */}
       {healthOk && (

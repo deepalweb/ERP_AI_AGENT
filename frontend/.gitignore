@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Playwright output (e2e/, playwright.config.js are real deliverables --
+# these are just generated run artifacts, same posture as dist/).
+test-results/
+test-results-real/
+playwright-report/
+blob-report/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

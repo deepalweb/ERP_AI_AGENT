@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./legacy-cards.css";
@@ -25,6 +25,7 @@ import BasketAnalysisCard from "./BasketAnalysisCard";
 import BrandMixCard from "./BrandMixCard";
 import LossAndDamageCard from "./LossAndDamageCard";
 import LoyaltyPromotionsCard from "./LoyaltyPromotionsCard";
+import StockCountVarianceCard from "./StockCountVarianceCard";
 import DataControlsCard from "./DataControlsCard";
 
 /** Ported from git history's pre-rebuild App.jsx (not a new design) — was
@@ -121,6 +122,8 @@ function ToolCalls({ toolCalls }) {
             return <LossAndDamageCard key={i} result={call.result} />;
           case "get_loyalty_and_promotions":
             return <LoyaltyPromotionsCard key={i} result={call.result} />;
+          case "get_stock_count_variance":
+            return <StockCountVarianceCard key={i} result={call.result} />;
           case "get_data_controls":
             return <DataControlsCard key={i} result={call.result} />;
           default:
@@ -151,12 +154,23 @@ function Message({ message }) {
  * new `key` (not just new text, since two clicks can carry identical text)
  * starts a fresh conversation and sends it immediately. */
 export default function AskCelesteOverlay({ open, question, onClose }) {
+  const dialogRef = useRef(null);
   const [{ conversations, activeId }, setChatState] = useState(loadConversations);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 640);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [handledKey, setHandledKey] = useState(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const trigger = document.activeElement;
+    if (open && dialog && !dialog.open) dialog.showModal();
+    return () => {
+      if (dialog?.open) dialog.close();
+      if (open && trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
+    };
+  }, [open]);
 
   useEffect(() => {
     saveConversations({ conversations, activeId });
@@ -246,8 +260,8 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-20 flex justify-end bg-black/20" onClick={onClose}>
-      <div className="flex h-full w-full max-w-4xl bg-background shadow-xl" onClick={(e) => e.stopPropagation()}>
+    <dialog ref={dialogRef} aria-labelledby="ask-celeste-title" className="ask-dialog" onCancel={(e) => { e.preventDefault(); onClose(); }} onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="ask-dialog-panel flex h-full w-full max-w-4xl bg-background shadow-xl">
         <ChatSidebar
           conversations={conversations}
           activeId={activeId}
@@ -260,7 +274,7 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
 
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
-            <h2 className="text-base font-semibold text-foreground-strong">Ask Celeste</h2>
+            <div><p className="eyebrow">Conversational intelligence</p><h2 id="ask-celeste-title" className="mt-1 font-display text-lg font-semibold text-foreground-strong">Ask Celeste</h2></div>
             <button type="button" onClick={onClose} className="text-foreground/60 hover:text-foreground">
               Close
             </button>
@@ -268,7 +282,7 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
 
           <main className="flex-1 space-y-4 overflow-y-auto p-6">
             {activeMessages.length === 0 && (
-              <p className="text-sm text-foreground/60">Ask something like &ldquo;How were sales last month?&rdquo;</p>
+              <div className="chat-welcome"><p className="eyebrow">Start with a question</p><h3>A closer look at<br />your business.</h3><p>Ask about sales, products, inventory, or customer patterns.</p><p className="mt-3 text-xs text-foreground-subtle">Saved case evidence and decisions are available in Investigate.</p><button type="button" onClick={() => setInput("How were sales last month?")}>How were sales last month? →</button></div>
             )}
             {activeMessages.map((m, i) => (
               <Message key={i} message={m} />
@@ -284,6 +298,7 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
           <form className="flex gap-2 border-t border-border p-4" onSubmit={handleSend}>
             <input
               type="text"
+              aria-label="Message to Celeste"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Ask about your ERP data…"
@@ -300,6 +315,6 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
           </form>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }

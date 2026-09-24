@@ -1,9 +1,13 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
+import NotificationsBell from "./design/NotificationsBell";
 import { formatCurrency, formatNumber, monthLabel } from "./format";
 
 const NAV_ITEMS = [
   { to: "/", label: "Home", end: true },
+  { to: "/investigate", label: "Investigate" },
+  { to: "/actions", label: "Actions" },
+  { to: "/outcomes", label: "Outcomes" },
   { to: "/dashboard", label: "Dashboard" },
   { to: "/customers/predictions", label: "Next Order" },
 ];
@@ -25,7 +29,7 @@ function ScopeChip({ stores }) {
       </button>
       {expanded && (
         <div className="absolute left-0 top-full z-10 mt-2 w-56 rounded-lg border border-border bg-chart-surface p-3 text-left shadow-sm">
-          <div className="text-xs font-medium text-foreground/70">Every number here is scoped to:</div>
+          <div className="text-xs font-medium text-foreground/70">Configured outlets; individual reports show their scope:</div>
           <ul className="mt-2 space-y-1 text-sm">
             {stores.map((name) => (
               <li key={name}>{name}</li>
@@ -37,19 +41,19 @@ function ScopeChip({ stores }) {
   );
 }
 
-export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCount = 0 }) {
+export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCount = 0, onSignOut }) {
   return (
-    <header className="border-b border-border bg-background">
+    <header className="original-header border-b border-border bg-background">
       <div className="flex items-center justify-between px-6 py-3">
         <div className="flex items-center gap-2">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-accent text-sm font-bold text-white">C</span>
           <div className="leading-tight">
-            <h1 className="text-base font-semibold text-foreground-strong">Celeste</h1>
+            <div className="text-base font-semibold text-foreground-strong">Celeste</div>
             <span className="text-xs text-foreground/60">Business Briefing</span>
           </div>
         </div>
 
-        <nav className="flex items-center gap-1">
+        <nav aria-label="Main navigation" className="flex flex-wrap items-center gap-1">
           {NAV_ITEMS.map((item) => (
             <NavLink
               key={item.to}
@@ -78,6 +82,7 @@ export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCoun
           ))}
         </nav>
 
+        <div className="flex items-center gap-2"><NotificationsBell />
         <button
           type="button"
           onClick={onAskCeleste}
@@ -85,6 +90,8 @@ export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCoun
         >
           Ask Celeste
         </button>
+        {onSignOut && <button type="button" onClick={onSignOut} className="text-xs text-foreground">Sign out</button>}
+        </div>
       </div>
 
       <div className="flex items-center gap-3 px-6 pb-2 text-sm">
@@ -110,7 +117,7 @@ export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCoun
             )}
           </>
         ) : (
-          <span className="text-foreground/40">Loading&hellip;</span>
+          null
         )}
       </div>
     </header>
