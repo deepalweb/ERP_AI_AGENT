@@ -151,7 +151,7 @@ def run_daily_scan():
     # into tracking.py: outcome tracking needs a baseline/pct_change concept
     # a point-in-time snapshot doesn't have, so these stay untracked rather
     # than faking a baseline.
-    state = state_findings.build_inventory_findings() + state_findings.build_operational_findings()
+    state = state_findings.build_inventory_findings() + state_findings.build_operational_findings() + state_findings.build_controls_findings()
     # Trailing 7-day findings (cancellation_rate, delayed_delivery_rate) —
     # same non-tracking exclusion as state findings: tracking.py's
     # check_outcomes() assumes a "YYYY-MM" period key, which a trailing

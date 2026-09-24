@@ -20,6 +20,7 @@ from . import (
     listings,
     loss_and_damage,
     lost_sales,
+    data_controls,
     loyalty,
     margin,
     operations,
@@ -557,6 +558,27 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_data_controls",
+            "description": (
+                "Get two data-reliability signals, company-wide, right now: "
+                "(1) active products currently recorded at negative stock "
+                "-- a data-integrity condition (sold past what the system "
+                "recorded), never confirmed loss or theft, cause unknown "
+                "unless separately investigated; (2) catalog cost coverage "
+                "-- how many active inventory products have no recorded "
+                "cost anywhere. Coverage is normally near-complete; state "
+                "the coverage percentage and say plainly that any gap only "
+                "affects the specific products listed, never imply other "
+                "products' margin or inventory-value figures are wrong. "
+                "Use for 'negative stock', 'data quality', 'missing cost', "
+                "or 'what needs cleanup in the catalog' questions."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_product_listing",
             "description": (
                 "Look up whether a specific product (by name or SKU) is listed "
@@ -747,6 +769,7 @@ TOOL_FUNCTIONS = {
     "get_inventory_by_outlet": inventory.get_inventory_by_outlet,
     "get_product_lookup": product_lookup.get_product_lookup,
     "get_stock_alerts": stock_alerts.get_stock_alerts,
+    "get_data_controls": data_controls.get_data_controls,
     "get_product_listing": listings.get_product_listing,
     "scan_attention": lambda: intelligence.scan_attention(),
     "get_revenue_concentration": concentration.get_revenue_concentration,

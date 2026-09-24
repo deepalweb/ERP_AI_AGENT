@@ -37,12 +37,23 @@ from datetime import date
 
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.services import data_controls
 from backend.app.services import inventory as inventory_service
 from backend.app.services.stock_alerts import get_stock_alerts, get_top_product_stock_coverage
 from mcp_server.tools import evidence_engine, impact_engine
 
 DEAD_STOCK_VALUE_SHARE_THRESHOLD_PCT = 5
 OVERSTOCK_VALUE_SHARE_THRESHOLD_PCT = 25
+
+# Business Data Controls, Wave 1 Step 1: tiers set from the real observed
+# count (54 real INVENTORY products, company-wide, on 2026-09-22) -- a
+# process-control finding like this is primarily about HOW WIDESPREAD the
+# condition is, not its Rs value (real total value is only ~Rs 26.5k,
+# small relative to other findings), so priority keys off count. Raw data
+# comes from backend.app.services.data_controls -- shared unchanged with
+# the get_data_controls Ask Celeste tool, never a second copy of the SQL.
+NEGATIVE_STOCK_CRITICAL_COUNT = 100
+NEGATIVE_STOCK_HIGH_COUNT = 20
 
 
 def _priority_for_share(share_pct: float, threshold_pct: float) -> str:
@@ -283,6 +294,168 @@ def build_inventory_findings():
     a finding when the underlying data is empty (both helpers return None in
     that case) — same "don't fabricate" posture as the trend engine."""
     findings = [_stock_availability_finding(), _dead_overstock_finding()]
+    return [f for f in findings if f is not None]
+
+
+# ---------------------------------------------------------------------------
+# Business Data Controls, Wave 1 Step 1: the raw negative-stock and
+# uncosted-product signals already existed as CAVEATS embedded inside other
+# findings (top_seller_stock's negative_stock flag; stock_counts.py's
+# valuation-basis classification) -- never their own company-wide detector.
+# These two promote them to first-class findings using the exact same
+# underlying data, not new methodology.
+
+def _negative_stock_control_finding():
+    """Company-wide: every real, active INVENTORY product currently
+    recorded below zero on-hand. Fires whenever count > 0 -- same binary
+    process-failure posture as _stuck_stock_count_finding (a product either
+    has non-negative recorded stock or it doesn't, not a fuzzy magnitude
+    call), with priority scaling by how widespread it is."""
+    result = data_controls.get_negative_stock()
+    products = result["products"]
+    if not products:
+        return None
+    total_value = result["total_value_rs"]
+
+    priority = (
+        "critical" if len(products) >= NEGATIVE_STOCK_CRITICAL_COUNT
+        else "high" if len(products) >= NEGATIVE_STOCK_HIGH_COUNT
+        else "medium"
+    )
+    plural = len(products) != 1
+    breakdowns = [{
+        "dimension": "product", "label": "Products with negative recorded stock",
+        "mode": "contribution", "baseline_month": None,
+        "total": round(total_value, 2),
+        "top_contributors": [
+            {"name": p["name"], "current": p["value_rs"] or 0, "delta": p["value_rs"] or 0} for p in products[:15]
+        ],
+    }]
+    evidence = evidence_engine.build_snapshot_evidence(breakdowns, date.today().isoformat())
+    impact = {
+        "kind": "negative_stock_control",
+        "financial_impact_rs": round(total_value, 2) if total_value else None,
+        "count": len(products),
+        "avg_order_value_used": None,
+        "confidence": "measured",
+        "month": date.today().isoformat(),
+        # Deliberately does not say "loss" or "shrinkage" -- negative
+        # recorded stock is a data-integrity condition (sold past what the
+        # system thought was there); the cause (a late goods receipt, a
+        # sync lag, a genuine unrecorded loss) has not been established.
+        "detail": f"{len(products)} active product{'s' if plural else ''} currently show negative recorded "
+        f"stock company-wide -- a data-integrity condition, not confirmed loss.",
+    }
+    return {
+        "id": f"negative_stock_control-{date.today().isoformat()}",
+        "metric_id": "negative_stock_control",
+        "domain": "controls",
+        "title": f"{len(products)} product{'s' if plural else ''} recorded at negative stock company-wide",
+        "category": "critical",
+        "severity": "high",
+        "priority": priority,
+        "business_impact_score": impact_engine.business_impact_score(priority, None, impact, evidence["data_quality"]),
+        "detected": date.today().isoformat(),
+        "confirm": {"period": date.today().isoformat(), "current": len(products), "baseline": None, "pct_change": None, "unit": "count"},
+        "breakdowns": breakdowns,
+        "impact": impact,
+        "how": None,
+        "root_cause": {"checks": evidence["checks"], "summary": evidence["summary"]},
+        "data_quality": evidence["data_quality"],
+        "recommendations": [
+            {
+                "action": f"Reconcile recorded stock for the {min(len(products), 15)} highest-value negative-stock "
+                f"products — negative on-hand quantity requires investigation, not an assumed cause",
+                "owner": "Inventory team",
+                "priority": priority,
+                "expected_benefit": "Determines the actual cause (a physical count, an unrecorded receipt, a "
+                "POS/sync timing issue, or a genuine loss) for each affected product by reconciling physical "
+                "stock, recorded inventory, and relevant transactions.",
+            }
+        ],
+        # Detail-only, same pattern as sessions on the stock-count findings
+        # -- the frontend can render a real per-product table.
+        "products": products,
+        "status": "completed",
+    }
+
+
+def _cost_coverage_control_finding():
+    """Company-wide catalog cost-coverage: how many active INVENTORY
+    products have no usable cost anywhere. Fires only when the gap is
+    real (count > 0) -- verified live that coverage is otherwise near-
+    complete (7,065 of 7,218 have a direct cost, 146 more a usable
+    catalog fallback), so the wording must never imply this affects
+    products outside the specific uncosted list."""
+    result = data_controls.get_cost_coverage()
+    total = result["total_products"]
+    no_cost = result["no_cost_at_all"]
+    if not total or not no_cost:
+        return None
+    coverage_pct = result["coverage_pct"]
+    products = result["uncosted_products"]
+    plural = no_cost != 1
+    priority = "high" if no_cost >= NEGATIVE_STOCK_HIGH_COUNT else "medium"
+
+    breakdowns = [{
+        "dimension": "product", "label": "Products with no recorded cost",
+        "mode": "contribution", "baseline_month": None,
+        "total": no_cost,
+        "top_contributors": [{"name": p["name"] or "Unknown", "current": 1, "delta": 1} for p in products[:15]],
+    }]
+    evidence = evidence_engine.build_snapshot_evidence(breakdowns, date.today().isoformat())
+    impact = {
+        "kind": "cost_coverage_control",
+        "financial_impact_rs": None,  # a count of affected products, not a priced Rs impact
+        "count": no_cost,
+        "avg_order_value_used": None,
+        "confidence": "measured",
+        "month": date.today().isoformat(),
+        # Explicit, deliberate scoping: says what's incomplete and, just as
+        # deliberately, says what ISN'T affected -- the whole point of this
+        # finding is that coverage is otherwise near-complete.
+        "detail": f"{no_cost} of {total} active inventory products ({coverage_pct}% overall coverage) have no "
+        f"recorded cost anywhere in the catalog -- any margin or inventory-value calculation involving "
+        f"specifically these {no_cost} product{'s' if plural else ''} is incomplete. This does not affect the "
+        f"other {total - no_cost} products' valuations.",
+    }
+    return {
+        "id": f"cost_coverage_control-{date.today().isoformat()}",
+        "metric_id": "cost_coverage_control",
+        "domain": "controls",
+        "title": f"{no_cost} inventory product{'s' if plural else ''} have no recorded cost anywhere",
+        "category": "critical",
+        "severity": "medium",
+        "priority": priority,
+        "business_impact_score": impact_engine.business_impact_score(priority, None, impact, evidence["data_quality"]),
+        "detected": date.today().isoformat(),
+        "confirm": {"period": date.today().isoformat(), "current": no_cost, "baseline": None, "pct_change": None, "unit": "count"},
+        "breakdowns": breakdowns,
+        "impact": impact,
+        "how": None,
+        "root_cause": {"checks": evidence["checks"], "summary": evidence["summary"]},
+        "data_quality": evidence["data_quality"],
+        "recommendations": [
+            {
+                "action": f"Add a recorded cost (or a usable catalog list price) for the {no_cost} product"
+                f"{'s' if plural else ''} listed — {', '.join(p['name'] or 'Unknown' for p in products[:5])}"
+                f"{', and others' if len(products) > 5 else ''}",
+                "owner": "Inventory team",
+                "priority": priority,
+                "expected_benefit": f"Closes the last gap in cost coverage ({coverage_pct}% today) so margin "
+                f"and inventory-value figures involving these specific products stop excluding them.",
+            }
+        ],
+        "products": [{"name": p["name"], "sku": p["sku"]} for p in products],
+        "status": "completed",
+    }
+
+
+def build_controls_findings():
+    """Business Data Controls, Wave 1 Step 1 -- a new, first-class domain
+    alongside inventory/operational, for findings about the RELIABILITY of
+    the data other findings depend on, not a business outcome itself."""
+    findings = [_negative_stock_control_finding(), _cost_coverage_control_finding()]
     return [f for f in findings if f is not None]
 
 

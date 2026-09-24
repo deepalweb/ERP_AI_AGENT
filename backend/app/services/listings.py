@@ -20,14 +20,17 @@ LISTING_SQL = f"""
 
 
 def get_product_listing(query: str):
-    chosen, candidates = _resolve(query)
+    chosen, candidates, reason = _resolve(query)
 
     if chosen is None:
-        if not candidates:
+        if reason == "not_found":
             return {"query": query, "status": "not_found"}
+        # "archived_only" / "duplicate_sku" / "ambiguous" -- see
+        # product_lookup._resolve's own docstring for what each means.
+        # Never arbitrarily picked between them here either.
         return {
             "query": query,
-            "status": "ambiguous",
+            "status": reason,
             "matches": [{"name": r["name"], "sku": r["default_code"]} for r in candidates],
         }
 

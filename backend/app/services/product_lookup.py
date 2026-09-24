@@ -15,7 +15,7 @@ from backend.app.db.store_scope import CELESTE_STORE_IDS
 MAX_MATCHES = 10
 
 MATCH_SQL = """
-    SELECT id, name->>'en_US' AS name, default_code
+    SELECT id, name->>'en_US' AS name, default_code, active
     FROM product_template
     WHERE default_code = :exact OR name->>'en_US' ILIKE :pattern
     ORDER BY (default_code = :exact) DESC, name
@@ -71,27 +71,70 @@ STOCK_BY_OUTLET_SQL = f"""
 
 
 def _resolve(query: str):
+    """Resolves a search string to exactly one product, or explains
+    precisely why it can't -- never an arbitrary pick between duplicate
+    records. `product_template` has no unique constraint on default_code:
+    verified live that real duplicate SKUs exist in this database (e.g.
+    004716, 004713, 007357), and every one found is exactly one `active`
+    row plus one archived (`active=False`) row -- never two active rows
+    for the same SKU. Preferring the active row is a principled tie-break
+    (Odoo's own explicit lifecycle flag, the same distinction every Odoo-
+    integrated system already relies on to mean "in current use"), not a
+    guess between look-alikes -- so it's applied first, uniformly, before
+    any ambiguity is reported.
+
+    Returns (chosen_row_or_None, all_candidate_rows, reason):
+      reason="found" -- chosen_row is the one usable match.
+      reason="not_found" -- no candidate rows at all.
+      reason="archived_only" -- every candidate is archived; a real
+        historical product, not a current one, so it's never silently
+        resolved as if it were live.
+      reason="duplicate_sku" -- more than one ACTIVE record shares the
+        exact same SKU even after the active-only filter -- a genuine
+        data-quality duplicate, not a normal multi-product search.
+      reason="ambiguous" -- a name search plausibly matched several
+        different real (active) products; not a data-quality issue."""
     query = query.strip()
     rows = reporting.run_query(MATCH_SQL, {"exact": query, "pattern": f"%{query}%", "limit": MAX_MATCHES})
+    if not rows:
+        return None, [], "not_found"
+
     exact = [r for r in rows if r["default_code"] == query]
-    if len(exact) == 1:
-        return exact[0], rows
-    if len(rows) == 1:
-        return rows[0], rows
-    return None, rows
+    pool = exact if exact else rows
+    active_pool = [r for r in pool if r["active"]]
+
+    if len(active_pool) == 1:
+        return active_pool[0], rows, "found"
+    if not active_pool:
+        return None, rows, "archived_only"
+    return None, rows, ("duplicate_sku" if exact else "ambiguous")
 
 
 def get_product_lookup(
     query: str, period: str | None = None, start_date: str | None = None, end_date: str | None = None
 ):
-    chosen, candidates = _resolve(query)
+    chosen, candidates, reason = _resolve(query)
 
     if chosen is None:
-        if not candidates:
+        if reason == "not_found":
             return {"query": query, "status": "not_found"}
+        if reason == "archived_only":
+            # A real product, just not a current one -- distinct from
+            # "not_found" (never existed) and from "ambiguous" (multiple
+            # live candidates to choose between).
+            return {
+                "query": query,
+                "status": "archived_only",
+                "matches": [{"name": r["name"], "sku": r["default_code"]} for r in candidates],
+            }
+        # "duplicate_sku" (a real data-quality issue -- the same SKU on
+        # more than one active record) and "ambiguous" (several different
+        # active products plausibly matched) both need the manager to pick,
+        # but the status names the actual cause instead of collapsing both
+        # into one generic label.
         return {
             "query": query,
-            "status": "ambiguous",
+            "status": reason,
             "matches": [{"name": r["name"], "sku": r["default_code"]} for r in candidates],
         }
 
