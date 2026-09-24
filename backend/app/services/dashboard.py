@@ -3,7 +3,7 @@ from datetime import date
 import anyio
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from mcp_server.tools.sales import _period_bounds, _period_label
 
 LOW_STOCK_THRESHOLD = 10
@@ -11,7 +11,7 @@ LOW_STOCK_THRESHOLD = 10
 SALES_BY_MONTH_SQL = f"""
 SELECT date_trunc('month', date_order) AS month, state, COUNT(*) AS c, SUM(amount_total) AS rev
 FROM sale_order
-WHERE state IN ('sale', 'cancel') AND store_id IN {CELESTE_STORE_IDS}
+WHERE state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND store_id IN {CELESTE_STORE_IDS}
 GROUP BY 1, 2
 ORDER BY 1
 """
@@ -22,7 +22,7 @@ FROM sale_order_line sol
 JOIN sale_order so ON so.id = sol.order_id
 JOIN product_product pp ON pp.id = sol.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
-WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
 GROUP BY pt.name
 ORDER BY revenue DESC
 LIMIT 8
@@ -34,7 +34,7 @@ FROM sale_order_line sol
 JOIN sale_order so ON so.id = sol.order_id
 JOIN product_product pp ON pp.id = sol.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
-WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
   AND so.date_order >= :start AND so.date_order <= :end
 GROUP BY pt.name
 ORDER BY revenue DESC
@@ -57,7 +57,7 @@ TOP_CUSTOMERS_SQL = f"""
 SELECT rp.name AS name, SUM(so.amount_total) AS revenue, COUNT(*) AS orders
 FROM sale_order so
 JOIN res_partner rp ON rp.id = so.partner_id
-WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
 GROUP BY rp.name
 ORDER BY revenue DESC
 LIMIT 8
@@ -82,7 +82,7 @@ FROM (
 ORDERS_BY_HOUR_SQL = f"""
 SELECT EXTRACT(HOUR FROM date_order)::int AS hour, COUNT(*) AS orders
 FROM sale_order
-WHERE state IN ('sale', 'cancel') AND store_id IN {CELESTE_STORE_IDS}
+WHERE state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND store_id IN {CELESTE_STORE_IDS}
 GROUP BY 1 ORDER BY 1
 """
 
@@ -123,9 +123,13 @@ async def get_sales_and_orders():
     for row in rows:
         key = _month_key(row["month"])
         entry = by_month.setdefault(key, {"month": key, "sale_orders": 0, "revenue": 0.0, "cancelled_orders": 0})
-        if row["state"] == "sale":
-            entry["sale_orders"] = int(row["c"])
-            entry["revenue"] = float(row["rev"] or 0)
+        if row["state"] in SALE_ORDER_LIVE_STATES:
+            # Multiple live states (sale/done/received) can each contribute
+            # their own grouped row for the same month -- accumulate, don't
+            # overwrite, or a month with e.g. both 'sale' and 'received' rows
+            # would silently drop whichever row processed first.
+            entry["sale_orders"] += int(row["c"])
+            entry["revenue"] += float(row["rev"] or 0)
         elif row["state"] == "cancel":
             entry["cancelled_orders"] = int(row["c"])
 
@@ -228,8 +232,15 @@ async def get_orders_by_hour():
     return {"hours": [{"hour": h, "orders": by_hour.get(h, 0)} for h in range(24)]}
 
 
+@reporting.ttl_cache(seconds=300)
 async def get_summary():
-    """Fetch all dashboard sections concurrently and assemble the response."""
+    """Fetch all dashboard sections concurrently and assemble the response.
+
+    Phase 5A: cached 5 minutes (reporting.ttl_cache) -- this is Home's
+    single slowest panel (heaviest queries: unbounded top-products/top-
+    customers history scans), and takes no params, so every caller within
+    the window gets the identical, already-computed result rather than
+    re-running the same expensive scan."""
     results: dict = {}
 
     async def run(key, coro_fn):

@@ -99,7 +99,11 @@ def _estimate_how(metric_id: str, anomaly: dict, breakdowns: list, horizon: str 
 def _get_client() -> OpenAI:
     api_key = os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("NVIDIA_BASE_URL")
-    return OpenAI(api_key=api_key, base_url=base_url)
+    # Recommendations/synthesis are optional enrichments. Do not keep the
+    # whole scan (and its case-write lock) waiting through long SDK defaults
+    # and retries when a provider stalls. Existing callers retain their
+    # honest [] / None fallback; deterministic evidence is still published.
+    return OpenAI(api_key=api_key, base_url=base_url, timeout=45.0, max_retries=0)
 
 
 def _get_model() -> str:
@@ -151,6 +155,14 @@ def _generate_recommendations(metric: dict, anomaly: dict, breakdowns: list, imp
         "`impact` is null, give a qualitative outcome tied only to the evidence "
         "already provided (e.g. 'should reduce cancellations concentrated at "
         "<store>'). Never invent a number that isn't derivable from the evidence. "
+        "If `metric.notes` describes a methodology caveat (e.g. an estimate under "
+        "current costs rather than a historical realized figure, or a coverage "
+        "limitation), you must respect it in both 'action' and 'expected_benefit': "
+        "never describe the metric's own movement, or the benefit of acting on it, "
+        "as a confirmed realized profit/loss or as more certain than that caveat "
+        "allows. A stock-quantity discrepancy is evidence requiring investigation, "
+        "never a confirmed inventory-loss explanation, unless a check in `root_cause` "
+        "says otherwise. "
         "IMPORTANT: each entry in `breakdowns` is an INDEPENDENT aggregate over the "
         "whole business — the top store and the top reason were computed separately "
         "and do not mean that reason is what happened at that store. Never combine "
@@ -162,11 +174,21 @@ def _generate_recommendations(metric: dict, anomaly: dict, breakdowns: list, imp
         "against real data, each with a verdict: 'confirmed' (state this as "
         "established fact — you may say it caused or drove the move), "
         "'possible_contributor' (mention only with hedged language like 'may also "
-        "be a factor' — never state it as the cause), 'no_evidence_found' or "
+        "be a factor' — never state it as the cause), 'related_not_independent' "
+        "(a different metric moved the same way, but only because it shares the same "
+        "underlying order data — e.g. revenue and order volume from the same orders; "
+        "mention only as background if at all, e.g. 'order volume moved the same way, "
+        "which follows directly from the revenue change' — never present it as a "
+        "second, independent piece of supporting evidence), 'no_evidence_found' or "
         "'unknown' (do not mention as a cause at all; these mean it was checked and "
-        "NOT supported, or couldn't be checked). Do not propose any cause that isn't "
+        "NOT supported, or couldn't be checked — this includes a case where a "
+        "different metric confirmed the same segment but moved the OPPOSITE "
+        "direction, source 'conflicting_signal': do not use that metric to support "
+        "this finding's explanation). Do not propose any cause that isn't "
         "listed in `root_cause`, and do not claim causation where the evidence only "
-        "shows correlation. "
+        "shows correlation. Multiple correlated metrics agreeing is never sufficient "
+        "on its own to call a cause 'confirmed' — only a check whose own verdict is "
+        "already 'confirmed' may be stated as fact. "
         "If `historical_context` is present, it describes whether this finding is a "
         "one-off ('single_period_move'), part of a longer run in the same direction "
         "('consistent_declining'/'consistent_improving', with `consecutive_periods` "
@@ -215,6 +237,88 @@ def _generate_recommendations(metric: dict, anomaly: dict, breakdowns: list, imp
         return recommendations
     except Exception:
         return []
+
+
+def generate_daily_synthesis(investigations: list[dict]) -> dict | None:
+    """The one step in this pipeline that reasons ACROSS findings instead of
+    within one: every other LLM call here (_generate_recommendations) only
+    ever sees a single metric's own evidence. This looks at the whole scan
+    and asks whether evidence_engine.cross_metric_corroboration_checks found
+    two or more findings that independently confirm the same segment -- the
+    "delivery-partner failure rate AND revenue both concentrated at the same
+    3 outlets" shape of result -- and if so, writes the one paragraph that
+    connects them, instead of leaving a reader to notice the pattern across
+    10 separately-worded findings themselves.
+
+    Deliberately does NOT run when nothing is corroborated: forcing a
+    "synthesis" out of unrelated findings would be exactly the kind of
+    invented causal story this whole evidence layer exists to prevent. No
+    connected cluster this scan -> no narrative, not a fabricated one. Needs
+    at least 2 corroborated findings, not 1: a single finding can't be
+    "connected" to anything by itself.
+
+    Which findings count as connected is decided here, deterministically,
+    from each investigation's own root_cause.checks (already computed by
+    cross_metric_corroboration_checks) -- never left to the model, so it
+    can't hallucinate a metric_id that wasn't actually corroborated. The
+    model's only job is turning the already-verified overlap into a
+    sentence. Gates specifically on verdict == "possible_contributor" (the
+    only tier that function ever emits for this source), never on the
+    source name alone -- a "related_not_independent" match (e.g. revenue
+    and order_volume agreeing, which is guaranteed by their shared formula,
+    not a new fact) or a "conflicting_signal" match must not trigger a
+    synthesis narrative; only genuinely independent, same-direction
+    agreement counts as a connected story worth writing."""
+    connected = [
+        inv for inv in investigations
+        if any(c["source"] == "cross_metric_corroboration" and c["verdict"] == "possible_contributor"
+               for c in inv["root_cause"]["checks"])
+    ]
+    if len(connected) < 2:
+        return None
+
+    summary = [
+        {
+            "metric_id": inv["metric_id"],
+            "title": inv["title"],
+            "category": inv["category"],
+            "domain": inv["domain"],
+            "corroboration": next(
+                c["detail"] for c in inv["root_cause"]["checks"] if c["source"] == "cross_metric_corroboration"
+            ),
+        }
+        for inv in connected
+    ]
+    prompt = (
+        "You are a business analyst. Each finding below was independently confirmed "
+        "by Celeste's evidence engine to share the same underlying segment(s) as at "
+        "least one other finding in this list -- see each item's `corroboration` "
+        "field, which states exactly what was confirmed and by which other "
+        "finding(s). This already-verified overlap is the ONLY basis you may use to "
+        "connect them. Write ONE short paragraph (2-4 sentences, plain business "
+        "language, no markdown, no bullet points, no headline) explaining what the "
+        "combined pattern suggests is really going on, referencing only the metrics "
+        "and segments named in the data below. Do not invent a mechanism, cause, or "
+        "number that isn't explicitly stated in the `corroboration` field -- if the "
+        "data doesn't say WHY the segments overlap, don't guess why; just state that "
+        "they overlap and what that means for where to look first. Return ONLY the "
+        "paragraph text, nothing else.\n\n"
+        f"Findings:\n{json.dumps(summary, default=str)}"
+    )
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=_get_model(),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        narrative = (response.choices[0].message.content or "").strip()
+        if not narrative:
+            return None
+    except Exception:
+        return None
+
+    return {"narrative": narrative, "metric_ids": [inv["metric_id"] for inv in connected]}
 
 
 def build_investigation(metric_id: str):
@@ -282,6 +386,16 @@ def build_investigation(metric_id: str):
             "baseline": anomaly["baseline_mean"],
             "pct_change": anomaly["pct_change_vs_baseline"],
             "unit": metric["unit"],
+            # Already computed by detect_anomaly(), just never exposed past
+            # this point before -- Celeste Investigate Phase 3 revenue audit.
+            # pct_change alone can overstate a move when the baseline months
+            # varied a lot (e.g. a business's early ramp-up period pulling
+            # the mean down); z_score is the honest counter-check -- a large
+            # pct_change with a comparatively small z_score means the
+            # baseline itself was too volatile for the percentage to read as
+            # a clean signal. No new definition: this is the SAME z-score
+            # detect_anomaly already uses to help decide is_significant.
+            "z_score": anomaly.get("z_score"),
         },
         "breakdowns": breakdowns,
         "impact": impact,
@@ -302,6 +416,12 @@ def scan_all():
         results = list(executor.map(build_investigation, intelligence.METRICS))
 
     investigations = [inv for inv in results if inv.get("status") == "completed"]
+    # Second pass, after every metric's own evidence is built: check whether
+    # two independently-computed findings from this same scan corroborate
+    # each other (see evidence_engine.cross_metric_corroboration_checks) --
+    # can only run once every investigation in the batch already exists, so
+    # it can't live inside build_investigation()'s per-metric, parallel path.
+    evidence_engine.cross_metric_corroboration_checks(investigations)
     investigations.sort(key=lambda i: CATEGORY_ORDER.get(i["category"], 2))
     return investigations
 
@@ -368,6 +488,16 @@ def build_trailing_investigation(metric_id: str):
             "baseline": anomaly["baseline_mean"],
             "pct_change": anomaly["pct_change_vs_baseline"],
             "unit": metric["unit"],
+            # Already computed by detect_anomaly(), just never exposed past
+            # this point before -- Celeste Investigate Phase 3 revenue audit.
+            # pct_change alone can overstate a move when the baseline months
+            # varied a lot (e.g. a business's early ramp-up period pulling
+            # the mean down); z_score is the honest counter-check -- a large
+            # pct_change with a comparatively small z_score means the
+            # baseline itself was too volatile for the percentage to read as
+            # a clean signal. No new definition: this is the SAME z-score
+            # detect_anomaly already uses to help decide is_significant.
+            "z_score": anomaly.get("z_score"),
         },
         "breakdowns": breakdowns,
         "impact": impact,

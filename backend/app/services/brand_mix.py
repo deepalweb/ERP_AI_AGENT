@@ -15,7 +15,7 @@ that text field.
 """
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from mcp_server.tools.sales import _period_bounds, _period_label
 
 TOP_N = 12
@@ -27,7 +27,7 @@ JOIN sale_order so ON so.id = sol.order_id
 JOIN product_product pp ON pp.id = sol.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
 JOIN celeste_brand cb ON cb.id = pt.celeste_brand_id
-WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
   AND so.date_order >= :start AND so.date_order <= :end
 GROUP BY cb.name
 ORDER BY revenue DESC
@@ -41,7 +41,7 @@ JOIN sale_order so ON so.id = sol.order_id
 JOIN product_product pp ON pp.id = sol.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
 LEFT JOIN celeste_department cd ON cd.id = pt.celeste_department_id
-WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
   AND so.date_order >= :start AND so.date_order <= :end
 GROUP BY cd.name
 ORDER BY revenue DESC

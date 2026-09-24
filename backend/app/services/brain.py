@@ -10,25 +10,28 @@ CREATE TABLE IF NOT EXISTS pattern tracking.py already uses.
 """
 
 import json
-import threading
+import os
 from datetime import datetime, timedelta
 
 import anyio
 
-from backend.app.db import appdb
-from backend.app.services import customer_predictions, health, notifications, tracking, weekly_streaks
-from mcp_server.tools import investigation, state_findings
+from backend.app.db import appdb, reporting
+from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.services import (
+    action_outcomes,
+    case_engine,
+    customer_predictions,
+    health,
+    notifications,
+    state_tracking,
+    tracking,
+    weekly_streaks,
+)
+from mcp_server.tools import incident_engine, investigation, state_findings
 
 STALE_AFTER = timedelta(hours=24)
 
 _SCHEMA_READY = False
-# Guards the stale-cache recompute path: without this, two requests arriving
-# while the cache is empty/stale (e.g. two people opening the dashboard on a
-# cold start) each launch their own 80-100s scan_all() against Postgres.
-# Concurrent heavy aggregations against this DB have already been measured to
-# actively slow each other down rather than run in parallel for free (see
-# health.py), so this is a real cost to avoid, not just redundant work.
-_scan_lock = threading.Lock()
 
 
 def _ensure_schema():
@@ -70,6 +73,22 @@ def _ensure_schema():
         pass
     try:
         appdb.run_query("ALTER TABLE daily_brief ADD COLUMN new_critical_findings TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass
+    try:
+        appdb.run_query("ALTER TABLE daily_brief ADD COLUMN state_tracking TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass
+    try:
+        appdb.run_query("ALTER TABLE daily_brief ADD COLUMN streak_outcomes TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass
+    try:
+        appdb.run_query("ALTER TABLE daily_brief ADD COLUMN data_freshness TEXT")
+    except Exception:
+        pass
+    try:
+        appdb.run_query("ALTER TABLE daily_brief ADD COLUMN synthesis TEXT")
     except Exception:
         pass
     appdb.run_query("""
@@ -123,6 +142,30 @@ def _snapshot_health():
     return {**result, "overall_delta": overall_delta, "domains": domains_with_delta}
 
 
+def _data_freshness():
+    """Whether the order data every finding is computed from is actually
+    current — surfaced so the frontend can say so plainly rather than let
+    the Business Brain look more certain than its data. Anchored to the
+    data's own latest order (same as_of principle intelligence.py's
+    get_trailing_trend and incident_engine already use), not wall-clock
+    freshness assumptions. status == "stale" past 1 day is a deliberately
+    tight bar: this is a quick-commerce grocery business where "yesterday"
+    is already old."""
+    rows = reporting.run_query(
+        "SELECT MAX(date_order) AS latest FROM sale_order WHERE store_id = ANY(:stores)",
+        {"stores": list(CELESTE_STORE_IDS)},
+    )
+    latest = rows[0]["latest"] if rows else None
+    if latest is None:
+        return {"latest_order_at": None, "days_stale": None, "status": "unavailable"}
+    days_stale = (datetime.utcnow() - latest).days
+    return {
+        "latest_order_at": latest.isoformat(),
+        "days_stale": days_stale,
+        "status": "fresh" if days_stale <= 1 else "stale",
+    }
+
+
 def _previous_brief_findings():
     """The immediately prior daily_brief row's three finding lists, for
     notifications.diff_new_critical_findings to compare THIS scan against —
@@ -140,36 +183,77 @@ def _previous_brief_findings():
     )
 
 
-def run_daily_scan():
+def _compute_daily_brief():
     """Run the full scan + outcome-tracking pipeline once and cache the
     result. Called by the scheduler on its daily cadence, and inline by
     get_latest_brief() when the cache is missing or stale."""
     _ensure_schema()
     prev_investigations, prev_state, prev_short_term = _previous_brief_findings()
     investigations = investigation.scan_all()
-    # Current-state findings (stock-outs, dead/overstock value) — not fed
-    # into tracking.py: outcome tracking needs a baseline/pct_change concept
-    # a point-in-time snapshot doesn't have, so these stay untracked rather
-    # than faking a baseline.
-    state = state_findings.build_inventory_findings() + state_findings.build_operational_findings() + state_findings.build_controls_findings()
+    # One extra LLM call, ONLY when 2+ of today's findings were independently
+    # corroborated against each other (evidence_engine.
+    # cross_metric_corroboration_checks, already run inside scan_all()) --
+    # see generate_daily_synthesis's own docstring for why this is the one
+    # place the pipeline reasons ACROSS findings instead of within one, and
+    # why it stays silent (None) rather than force a connection on days
+    # where nothing actually corroborates.
+    synthesis = investigation.generate_daily_synthesis(investigations)
+    # Current-state findings (stock-outs, dead/overstock value) — tracking.py
+    # itself can't cover these (no baseline/pct_change, just a point-in-time
+    # snapshot), so state_tracking.py is the sibling module built for this
+    # shape: same record + check pattern, but comparing today's snapshot
+    # against the value first observed, not a calendar period shift.
+    #
+    # incident_engine's store x SKU x hour findings are folded in here too —
+    # they're emitted in the exact same dict shape (see incident_engine.py's
+    # docstring), so this one line is all it takes for them to get
+    # persistence tracking, proactive-warning diffing, and every frontend
+    # renderer for free, with no special-casing anywhere else.
+    state = (
+        state_findings.build_inventory_findings()
+        + state_findings.build_operational_findings()
+        + state_findings.build_controls_findings()
+        + incident_engine.build_incident_findings()
+    )
+    state_tracking.record_new_findings(state)
+    state_tracking.check_outcomes(state)
+    state_tracking_history = state_tracking.get_tracking_history()
     # Trailing 7-day findings (cancellation_rate, delayed_delivery_rate) —
-    # same non-tracking exclusion as state findings: tracking.py's
-    # check_outcomes() assumes a "YYYY-MM" period key, which a trailing
-    # window's date-range label isn't. weekly_streaks.py is the honest
-    # counterpart instead: it doesn't need a period key, just consecutive
-    # scanned days, so it works where tracking.py's model doesn't.
+    # tracking.py's check_outcomes() assumes a "YYYY-MM" period key, which a
+    # trailing window's date-range label isn't. weekly_streaks.py covers
+    # both streak continuity AND (as of Phase 4) a frozen verdict once a
+    # sound comparison point exists (WINDOW_DAYS days, or the streak ending
+    # early) — see weekly_streaks.get_verdicted_streaks().
     short_term = investigation.scan_short_term()
     weekly_streaks.record_streaks(short_term)
     active_streaks = weekly_streaks.get_active_streaks()
     for f in short_term:
         f["streak"] = active_streaks.get(f["metric_id"])
     short_term_resolved = weekly_streaks.get_recently_ended_streaks()
+    streak_outcomes = weekly_streaks.get_verdicted_streaks()
     # Proactive Warning (in-app): what's genuinely NEW in this scan versus
     # the immediately prior one — see notifications.py for why state
     # findings are diffed by metric_id, not by their own (daily-changing) id.
     new_critical = notifications.diff_new_critical_findings(
         investigations, state, short_term, prev_investigations, prev_state, prev_short_term
     )
+    # Surfaced so the frontend can say plainly when the order data behind
+    # every finding above isn't current — see _data_freshness's docstring.
+    # Computed here (rather than at its old spot further down) because
+    # case_engine.sync_cases needs it too: a weekly/snapshot case's
+    # verification window must not advance on stale data.
+    data_freshness = _data_freshness()
+    # Phase 2d: measure any completed action's declared target BEFORE this
+    # cycle's case resolution runs, so a case whose verification window
+    # closes this same cycle can already see a just-landed action outcome
+    # rather than holding one extra cycle unnecessarily.
+    action_outcomes.check_outcomes()
+    # Phase 2a Case Store sync -- mutates each finding in place with a
+    # 'case_id' (additive; every existing consumer of these lists is
+    # unaffected). Runs after notifications' own diff above so that diff
+    # sees the lists exactly as it always has. Protected against
+    # concurrent scans by the _scan_lock() this whole function runs under.
+    case_engine.sync_cases(investigations, state, short_term, data_fresh=data_freshness.get("status") != "stale")
     tracking.record_new_findings(investigations)
     tracking.check_outcomes()
     history = tracking.get_tracking_history()
@@ -194,8 +278,8 @@ def run_daily_scan():
     generated_at = datetime.utcnow().isoformat()
     appdb.run_query(
         """
-        INSERT INTO daily_brief (generated_at, investigations, tracking, state_findings, short_term_findings, health, short_term_resolved, customer_finding, new_critical_findings)
-        VALUES (:generated_at, :investigations, :tracking, :state_findings, :short_term_findings, :health, :short_term_resolved, :customer_finding, :new_critical_findings)
+        INSERT INTO daily_brief (generated_at, investigations, tracking, state_findings, short_term_findings, health, short_term_resolved, customer_finding, new_critical_findings, state_tracking, streak_outcomes, data_freshness, synthesis)
+        VALUES (:generated_at, :investigations, :tracking, :state_findings, :short_term_findings, :health, :short_term_resolved, :customer_finding, :new_critical_findings, :state_tracking, :streak_outcomes, :data_freshness, :synthesis)
         """,
         {
             "generated_at": generated_at,
@@ -207,6 +291,10 @@ def run_daily_scan():
             "short_term_resolved": json.dumps(short_term_resolved, default=str),
             "customer_finding": json.dumps(customer_finding, default=str),
             "new_critical_findings": json.dumps(new_critical, default=str),
+            "state_tracking": json.dumps(state_tracking_history, default=str),
+            "streak_outcomes": json.dumps(streak_outcomes, default=str),
+            "data_freshness": json.dumps(data_freshness, default=str),
+            "synthesis": json.dumps(synthesis, default=str) if synthesis else None,
         },
     )
     return {
@@ -219,10 +307,14 @@ def run_daily_scan():
         "short_term_resolved": short_term_resolved,
         "customer_finding": customer_finding,
         "new_critical_findings": new_critical,
+        "state_tracking": state_tracking_history,
+        "streak_outcomes": streak_outcomes,
+        "data_freshness": data_freshness,
+        "synthesis": synthesis,
     }
 
 
-def _fresh_cached_brief():
+def _fresh_cached_brief(*, allow_stale=False):
     """Returns the cached brief if one exists and isn't stale, else None."""
     rows = appdb.run_query(
         "SELECT * FROM daily_brief ORDER BY generated_at DESC LIMIT 1"
@@ -232,10 +324,19 @@ def _fresh_cached_brief():
 
     row = rows[0]
     generated_at = datetime.fromisoformat(row["generated_at"])
-    if datetime.utcnow() - generated_at >= STALE_AFTER:
+    age = datetime.utcnow() - generated_at
+    if age >= STALE_AFTER and not allow_stale:
         return None
 
+    customer_finding = json.loads(row["customer_finding"]) if row.get("customer_finding") else None
+    if customer_finding and customer_finding.get("analytics_contract") != customer_predictions.ANALYTICS_CONTRACT:
+        # Old briefs included partner storefronts. Hide just this stale card
+        # until the next scan builds a scoped snapshot; preserve other evidence.
+        customer_finding = None
+
     return {
+        "cache_status": "stale" if age >= STALE_AFTER else "fresh",
+        "cache_age_seconds": max(0, age.total_seconds()),
         "generated_at": row["generated_at"],
         "investigations": json.loads(row["investigations"]),
         "tracking": json.loads(row["tracking"]),
@@ -247,26 +348,41 @@ def _fresh_cached_brief():
         "short_term_findings": json.loads(row["short_term_findings"]) if row.get("short_term_findings") else [],
         "health": json.loads(row["health"]) if row.get("health") else {},
         "short_term_resolved": json.loads(row["short_term_resolved"]) if row.get("short_term_resolved") else [],
-        "customer_finding": json.loads(row["customer_finding"]) if row.get("customer_finding") else None,
+        "customer_finding": customer_finding,
         "new_critical_findings": json.loads(row["new_critical_findings"]) if row.get("new_critical_findings") else [],
+        "state_tracking": json.loads(row["state_tracking"]) if row.get("state_tracking") else [],
+        "streak_outcomes": json.loads(row["streak_outcomes"]) if row.get("streak_outcomes") else [],
+        "data_freshness": json.loads(row["data_freshness"]) if row.get("data_freshness") else None,
+        "synthesis": json.loads(row["synthesis"]) if row.get("synthesis") else None,
     }
+
+
+def run_daily_scan(*, force: bool = True):
+    """Serialize every scan, including scheduled jobs, across threads/processes.
+
+    A forced request refreshes an existing cache, but reuses a scan that
+    completed while it waited. Failed scans release the lock for retries.
+    """
+    requested_at = datetime.utcnow()
+    with appdb.case_store_lock():
+        _ensure_schema()
+        brief = _fresh_cached_brief()
+        if brief is not None and (
+            not force or datetime.fromisoformat(brief["generated_at"]) >= requested_at
+        ):
+            return brief
+        return _compute_daily_brief()
 
 
 def get_latest_brief():
     """Read the cached brief. Self-heals if the cache is missing or older
     than STALE_AFTER by computing fresh once (slow only on that request)
     rather than serving stale or empty data. Concurrent stale requests share
-    one recompute via _scan_lock instead of each running their own scan."""
-    _ensure_schema()
-
-    brief = _fresh_cached_brief()
-    if brief is not None:
-        return brief
-
-    with _scan_lock:
-        # Another thread may have finished the recompute while this one
-        # waited for the lock — check again before running a second scan.
+    one recompute via the shared scan lock instead of each running a scan."""
+    # Once this process has initialized the schema, fresh reads need not
+    # wait for a scheduled refresh. Schema creation itself stays locked.
+    if _SCHEMA_READY:
         brief = _fresh_cached_brief()
         if brief is not None:
             return brief
-        return run_daily_scan()
+    return run_daily_scan(force=False)

@@ -9,19 +9,19 @@ from datetime import date
 import anyio
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from mcp_server.tools import intelligence
 
 BRANCH_SCORECARD_SQL = f"""
 WITH sales AS (
     SELECT COALESCE(rs.name, 'Unknown store') AS name,
-           COUNT(*) FILTER (WHERE so.state = 'sale') AS orders,
-           SUM(so.amount_total) FILTER (WHERE so.state = 'sale') AS revenue,
+           COUNT(*) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS orders,
+           SUM(so.amount_total) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS revenue,
            COUNT(*) FILTER (WHERE so.state = 'cancel') AS cancelled,
            COUNT(*) AS total_orders
     FROM sale_order so
     LEFT JOIN res_store rs ON rs.id = so.store_id
-    WHERE so.state IN ('sale', 'cancel') AND so.store_id IN {CELESTE_STORE_IDS}
+    WHERE so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND so.store_id IN {CELESTE_STORE_IDS}
       AND so.date_order >= :start AND so.date_order < :end
     GROUP BY rs.name
 ),
@@ -69,7 +69,7 @@ SELECT
     ORDER BY EXTRACT(EPOCH FROM (dispatch_datetime - packing_datetime)) / 60
   ) FILTER (WHERE dispatch_datetime >= packing_datetime) AS median_dispatch_wait_min
 FROM sale_order
-WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
   AND date_order >= :start AND date_order < :end
 """
 
@@ -108,7 +108,7 @@ SELECT
   ) FILTER (WHERE so.dispatch_datetime >= so.packing_datetime) AS median_dispatch_wait_min
 FROM sale_order so
 JOIN res_store rs ON rs.id = so.store_id
-WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
   AND so.date_order >= :start AND so.date_order < :end
 GROUP BY 1
 """
@@ -128,13 +128,13 @@ STAGE_LABELS = [
 DARK_OUTLET_SQL = f"""
     WITH bounds AS (
         SELECT MAX(date_order) AS as_of FROM sale_order
-        WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+        WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
     )
     SELECT rs.id, rs.name,
            COUNT(so.id) FILTER (WHERE so.date_order >= b.as_of - INTERVAL '30 days') AS orders_30d
     FROM res_store rs
     CROSS JOIN bounds b
-    LEFT JOIN sale_order so ON so.store_id = rs.id AND so.state = 'sale'
+    LEFT JOIN sale_order so ON so.store_id = rs.id AND so.state IN {SALE_ORDER_LIVE_STATES}
     WHERE rs.id IN {CELESTE_STORE_IDS}
     GROUP BY rs.id, rs.name
 """
@@ -195,9 +195,39 @@ def _headline_from_trend(trend: list[dict]):
     return headline["value"], growth_pct, headline["month"]
 
 
+@reporting.ttl_cache(seconds=300)
 async def get_fulfillment_summary():
+    """Phase 5A: profiling found this endpoint issuing 7 real queries fully
+    SEQUENTIALLY (each awaited before the next started) despite every one
+    of them being independent -- confirmed the dominant cost (17.9s/8.8s
+    wall across two profiling runs, ~= the sum of all 7 query times, with
+    zero overlap). Reworked below to run all 7 concurrently via the same
+    anyio.create_task_group() pattern dashboard.get_summary() already
+    uses, so wall time drops toward the SLOWEST single query instead of
+    their sum. Also cached 5 minutes (reporting.ttl_cache) -- no params,
+    same freshness reasoning as dashboard.get_summary."""
     metric = intelligence.METRICS["delayed_delivery_rate"]
-    trend = await anyio.to_thread.run_sync(intelligence.get_trend, metric)
+
+    trends: dict = {}
+
+    async def _trend(key, metric_def):
+        trends[key] = await anyio.to_thread.run_sync(intelligence.get_trend, metric_def)
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_trend, "delayed_delivery_rate", metric)
+        # Operational Control Center rollup: the same already-registered
+        # metrics Overview surfaces company-wide, reused here so an ops
+        # manager doesn't have to cross-reference the other page to see
+        # the full operational picture. Independent of the trend above --
+        # no reason to wait for it first.
+        tg.start_soon(_trend, "cancellation_rate", intelligence.METRICS["cancellation_rate"])
+        tg.start_soon(_trend, "revenue", intelligence.METRICS["revenue"])
+        tg.start_soon(_trend, "order_volume", intelligence.METRICS["order_volume"])
+
+    trend = trends["delayed_delivery_rate"]
+    cancellation_trend = trends["cancellation_rate"]
+    revenue_trend = trends["revenue"]
+    order_volume_trend = trends["order_volume"]
 
     months = [
         {
@@ -224,15 +254,6 @@ async def get_fulfillment_summary():
             (headline["delayed_rate_pct"] - previous["delayed_rate_pct"]) / previous["delayed_rate_pct"] * 100, 2
         )
 
-    # Operational Control Center rollup: the same already-registered metrics
-    # Overview surfaces company-wide, reused here so an ops manager doesn't have
-    # to cross-reference the other page to see the full operational picture.
-    cancellation_trend = await anyio.to_thread.run_sync(
-        intelligence.get_trend, intelligence.METRICS["cancellation_rate"]
-    )
-    revenue_trend = await anyio.to_thread.run_sync(intelligence.get_trend, intelligence.METRICS["revenue"])
-    order_volume_trend = await anyio.to_thread.run_sync(intelligence.get_trend, intelligence.METRICS["order_volume"])
-
     headline_cancellation_rate_pct, cancellation_rate_growth_pct, _ = _headline_from_trend(cancellation_trend)
     headline_revenue, revenue_growth_pct, _ = _headline_from_trend(revenue_trend)
     headline_orders, orders_growth_pct, _ = _headline_from_trend(order_volume_trend)
@@ -243,10 +264,21 @@ async def get_fulfillment_summary():
     funnel_wait_times = []
     if headline_month:
         start, end = _month_bounds(headline_month)
-        median_rows = await reporting.fetch_report(OVERALL_MEDIAN_MINUTES_SQL, {"start": start, "end": end})
+        sql_results: dict = {}
+
+        async def _sql(key, query):
+            rows = await reporting.fetch_report(query, {"start": start, "end": end})
+            sql_results[key] = rows
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_sql, "median", OVERALL_MEDIAN_MINUTES_SQL)
+            tg.start_soon(_sql, "branch", BRANCH_SCORECARD_SQL)
+            tg.start_soon(_sql, "funnel", FULFILLMENT_FUNNEL_SQL)
+
+        median_rows = sql_results["median"]
         median_minutes = float((median_rows[0].get("median_minutes") if median_rows else 0) or 0)
 
-        branch_rows = await reporting.fetch_report(BRANCH_SCORECARD_SQL, {"start": start, "end": end})
+        branch_rows = sql_results["branch"]
         branches = [
             {
                 "name": r["name"],
@@ -259,7 +291,7 @@ async def get_fulfillment_summary():
             for r in branch_rows
         ]
 
-        funnel_rows = await reporting.fetch_report(FULFILLMENT_FUNNEL_SQL, {"start": start, "end": end})
+        funnel_rows = sql_results["funnel"]
         f = funnel_rows[0] if funnel_rows else {}
         total = int(f.get("total_orders") or 0)
 

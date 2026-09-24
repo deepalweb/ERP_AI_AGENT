@@ -13,6 +13,7 @@ import json
 from datetime import datetime
 
 from backend.app.db import appdb
+from backend.app.services import finding_actions
 from mcp_server.tools import intelligence
 
 IMPROVED_RATIO = 0.8  # deviation shrank to <=80% of its original size
@@ -45,6 +46,22 @@ def _ensure_schema():
             UNIQUE(metric_id, period)
         )
     """)
+    # action_status_at_check: whether finding_actions showed real engagement
+    # (in_progress/completed) for this finding by the time its outcome was
+    # checked — see verdict_for_deviation/check_outcomes below. Added after
+    # tracked_findings already had live rows, so best-effort ALTER.
+    try:
+        appdb.run_query("ALTER TABLE tracked_findings ADD COLUMN action_status_at_check TEXT")
+    except Exception:
+        pass
+    # One-time correction for rows written before the fix above: any row
+    # already marked 'resolved' with a non-improved verdict was mislabeled
+    # by the old unconditional check_outcomes() logic. Safe to run on every
+    # startup -- matches 0 rows once corrected.
+    appdb.run_query(
+        "UPDATE tracked_findings SET status = 'checked_unresolved' "
+        "WHERE status = 'resolved' AND verdict IS NOT NULL AND verdict != 'improved'"
+    )
     _SCHEMA_READY = True
 
 
@@ -81,9 +98,16 @@ def record_new_findings(investigations: list[dict]):
         )
 
 
-def _verdict_for(detected_pct_change: float, outcome_pct_change: float) -> str:
-    deviation_before = abs(detected_pct_change)
-    deviation_after = abs(outcome_pct_change)
+def verdict_for_deviation(before: float, after: float) -> str:
+    """Symmetric verdict from two magnitudes, shape-agnostic by design: a
+    monthly finding passes pct_change values, but a state/short-term finding
+    can pass a raw count or Rs figure directly (these are already
+    deviation-like quantities — a stock-out count, a Rs-at-risk figure —
+    with an implicit 'zero is fine' baseline), and gets the identical
+    improved/worsened/unchanged logic rather than a second, drifting
+    threshold implementation living somewhere else."""
+    deviation_before = abs(before)
+    deviation_after = abs(after)
     if deviation_before == 0:
         return "unchanged"
     if deviation_after <= deviation_before * IMPROVED_RATIO:
@@ -116,21 +140,36 @@ def check_outcomes():
         if outcome_pct_change is None:
             continue
 
-        verdict = _verdict_for(row["detected_pct_change"], outcome_pct_change)
+        verdict = verdict_for_deviation(row["detected_pct_change"], outcome_pct_change)
+        finding_id = f"{row['metric_id']}-{row['period']}"
+        action = finding_actions.get_actions_for([finding_id]).get(finding_id)
+        action_status_at_check = action["status"] if action else None
+
+        # A finding is only "resolved" if the outcome actually improved --
+        # 'worsened'/'unchanged' still got a real comparison (checked_at,
+        # outcome_value, verdict are all populated the same as a resolved
+        # row), it just isn't a resolution. Previously this set status =
+        # 'resolved' unconditionally the moment ANY outcome was checked,
+        # which meant a finding that got WORSE was displayed as "resolved"
+        # -- caught while designing case_engine.py's resolution policy.
+        status = "resolved" if verdict == "improved" else "checked_unresolved"
 
         appdb.run_query(
             """
             UPDATE tracked_findings
-            SET status = 'resolved', checked_at = :checked_at, outcome_period = :outcome_period,
-                outcome_value = :outcome_value, outcome_pct_change = :outcome_pct_change, verdict = :verdict
+            SET status = :status, checked_at = :checked_at, outcome_period = :outcome_period,
+                outcome_value = :outcome_value, outcome_pct_change = :outcome_pct_change, verdict = :verdict,
+                action_status_at_check = :action_status_at_check
             WHERE id = :id
             """,
             {
+                "status": status,
                 "checked_at": datetime.utcnow().isoformat(),
                 "outcome_period": next_period,
                 "outcome_value": outcome_value,
                 "outcome_pct_change": round(outcome_pct_change, 2),
                 "verdict": verdict,
+                "action_status_at_check": action_status_at_check,
                 "id": row["id"],
             },
         )

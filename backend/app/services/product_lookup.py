@@ -10,7 +10,7 @@ instead of aggregated away.
 
 from mcp_server.tools.sales import _period_bounds, get_sales_summary
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 
 MAX_MATCHES = 10
 
@@ -35,7 +35,7 @@ SALES_MARGIN_SQL = f"""
     JOIN sale_order so ON so.id = sol.order_id
     JOIN product_product pp ON pp.id = sol.product_id
     JOIN product_template pt ON pt.id = pp.product_tmpl_id
-    WHERE pt.id = :tmpl_id AND so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+    WHERE pt.id = :tmpl_id AND so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
       AND so.date_order >= :start AND so.date_order <= :end
 """
 
@@ -51,7 +51,7 @@ CHANNEL_SQL = f"""
     FROM sale_order_line sol
     JOIN sale_order so ON so.id = sol.order_id
     JOIN product_product pp ON pp.id = sol.product_id
-    WHERE pp.product_tmpl_id = :tmpl_id AND so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+    WHERE pp.product_tmpl_id = :tmpl_id AND so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
       AND so.date_order >= :start AND so.date_order <= :end
     GROUP BY 1 ORDER BY revenue DESC
 """

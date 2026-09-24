@@ -1,15 +1,18 @@
 import logging
+import os
 
 import anyio
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
 load_dotenv()
 
-from mcp_server.tools import intelligence, investigation, state_findings
+from mcp_server.tools import intelligence, state_findings
+from .core.access import AccessControlMiddleware, auth_mode
 from .db import reporting
 from .db.store_scope import CELESTE_STORE_NAMES
 from .services import (
@@ -17,6 +20,7 @@ from .services import (
     basket,
     brain,
     brand_mix,
+    case_engine,
     channels,
     concentration,
     customer_predictions,
@@ -24,13 +28,16 @@ from .services import (
     dashboard,
     finding_actions,
     forecast,
+    home_briefing,
     inventory,
     loss_and_damage,
     loyalty,
+    management,
     notifications,
     operations,
+    outcome_intelligence,
     stock_alerts,
-    tracking,
+    stock_counts,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,14 +47,17 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.add_middleware(AccessControlMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[origin.strip() for origin in os.getenv(
+        "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",") if origin.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone=os.getenv("APP_TIMEZONE", "Asia/Colombo"))
 
 
 @app.on_event("startup")
@@ -56,13 +66,15 @@ def start_scheduler():
     request, once a day, so the morning brief (see /brief) is precomputed
     instead of making whoever opens the dashboard first eat an 80-100s
     anomaly-detection pass. See backend/app/services/brain.py."""
-    scheduler.add_job(brain.run_daily_scan, "cron", hour=5, minute=0, id="daily_brief_scan")
-    scheduler.start()
+    if os.getenv("ENABLE_SCHEDULER", "true").lower() == "true":
+        scheduler.add_job(brain.run_daily_scan, "cron", hour=5, minute=0, id="daily_brief_scan")
+        scheduler.start()
 
 
 @app.on_event("shutdown")
 def stop_scheduler():
-    scheduler.shutdown(wait=False)
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
 
 
 class ChatMessage(BaseModel):
@@ -79,6 +91,60 @@ class FindingActionRequest(BaseModel):
     status: str
     action_taken: str | None
     owner: str | None = None
+    deadline: str | None = None
+    # Optional and new (Phase 2b) -- the existing "Track this" form never
+    # sends this, and set_action's COALESCE-on-conflict means omitting it
+    # preserves whatever a case-aware caller set earlier rather than
+    # wiping it back to null on every unrelated edit.
+    action_kind: str | None = None
+    # Phase 2d additions -- all optional/additive, same COALESCE posture.
+    intended_result: str | None = None
+    target_metric_id: str | None = None
+    target_value: float | None = None
+    target_comparison: str | None = None
+    target_baseline_relative: bool = False
+    # "monthly" (default) or "weekly" -- validated against the target
+    # metric's own trend support server-side (finding_actions.set_action),
+    # never trusted as-is (Phase 2e Task 4).
+    target_measurement_period: str | None = None
+    # The opaque version token (case_engine._observation_version --
+    # "<observation row id>:<revision>", never a timestamp) of the
+    # evidence this save is being made against -- omitted by any caller
+    # that doesn't track evidence versions (skips the server-side
+    # freshness check entirely); sent by CaseDetail.jsx after its own
+    # client-side check already passed, as the authoritative reassertion
+    # (see case_engine.verify_evidence_version). Not a timestamp because a
+    # timestamp isn't a reliable version identifier -- see
+    # case_engine._observation_version's docstring.
+    evidence_version: str | None = None
+
+
+class RecommendationAcceptanceRequest(BaseModel):
+    """Celeste Investigate Phase 2, final correction: accepting a
+    recommendation is deliberately NOT a FindingActionRequest -- it never
+    touches relevant/status/action_taken/owner/deadline at all, so it
+    can't accidentally create the "phantom" blank finding_actions row the
+    earlier revision did (see case_engine.accept_recommendation's own
+    docstring). recommendation_action is matched server-side against the
+    finding's real, current recommendations -- never trusted as an
+    arbitrary client string beyond that match."""
+    recommendation_action: str
+    evidence_version: str | None = None
+
+
+class CaseObjectiveRequest(BaseModel):
+    metric_id: str
+    target_value: float
+    comparison: str
+    baseline_relative: bool = False
+
+
+class CaseObjectiveFromActionRequest(BaseModel):
+    finding_id: str
+
+
+class CaseReasonRequest(BaseModel):
+    reason: str
 
 
 @app.get("/health")
@@ -87,6 +153,17 @@ async def health():
         "status": "ok",
         "service": "erp-ai-agent",
     }
+
+
+@app.get("/auth/status")
+async def access_status():
+    return {"status": "ok", "mode": auth_mode()}
+
+
+@app.get("/auth/session")
+async def access_session():
+    # Reaching this route means the access middleware accepted the request.
+    return {"status": "ok"}
 
 
 @app.get("/")
@@ -263,17 +340,103 @@ async def customer_predictions_order_forecast_chart(actual_days: int = 5, foreca
         return {"status": "error", "detail": "Could not compute the order forecast chart."}
 
 
+@reporting.ttl_cache(seconds=300)
+def _stock_alerts_cached():
+    # Phase 5A: cached 5 minutes here, at the route layer -- Home's Inventory
+    # panel is a pure supplementary display. state_findings.py and
+    # evidence_engine.py call stock_alerts.get_stock_alerts() directly
+    # (uncached) as part of scan_all()'s real detection pipeline.
+    return stock_alerts.get_stock_alerts()
+
+
 @app.get("/inventory/stock-alerts")
 async def stock_alerts_route():
     """Which actively-selling products are out of stock or critically low at
     each of Celeste's 5 outlets right now — see
     backend/app/services/stock_alerts.py get_stock_alerts()."""
     try:
-        result = await anyio.to_thread.run_sync(stock_alerts.get_stock_alerts)
+        result = await anyio.to_thread.run_sync(_stock_alerts_cached)
         return {"status": "ok", **result}
     except Exception:
         logger.exception("stock alerts failed")
         return {"status": "error", "detail": "Could not load stock alerts."}
+
+
+@app.get("/inventory/stuck-stock-counts")
+async def stuck_stock_counts_route():
+    """Physical stock counts started but never finished — any variance
+    pulled off one of these is phantom (un-scanned lines still carry the
+    system's on-hand qty), not real shrinkage. See
+    backend/app/services/stock_counts.py."""
+    try:
+        result = await anyio.to_thread.run_sync(stock_counts.get_stuck_stock_counts)
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("stuck stock counts failed")
+        return {"status": "error", "detail": "Could not load stuck stock counts."}
+
+
+@app.get("/inventory/stuck-stock-counts/{session_id}")
+async def stuck_stock_count_session_detail(session_id: int):
+    """Incident Investigation Phase 2/5: one stuck session's full record --
+    header, every count line, and every real scan event. Read-only, scoped
+    to Celeste's own stores by the same join stuck_stock_counts_route uses.
+    See backend/app/services/stock_counts.py get_stock_count_session_detail()."""
+    try:
+        result = await anyio.to_thread.run_sync(stock_counts.get_stock_count_session_detail, session_id)
+        if result is None:
+            return {"status": "error", "detail": "Stock count session not found."}
+        return {"status": "ok", "session": result}
+    except Exception:
+        logger.exception("stuck stock count session detail failed")
+        return {"status": "error", "detail": "Could not load this stock count session's detail."}
+
+
+@app.get("/inventory/completed-stock-count-variance")
+async def completed_stock_count_variance_route(
+    period: str | None = None, start_date: str | None = None, end_date: str | None = None, store_id: int | None = None,
+):
+    """Completed (state='done') stock counts' REAL, physically-verified
+    variance -- distinct from stuck-stock-counts above, which is only ever
+    a phantom estimate for sessions that never finished. See
+    backend/app/services/stock_counts.py get_completed_stock_count_variance()."""
+    try:
+        result = await anyio.to_thread.run_sync(
+            stock_counts.get_completed_stock_count_variance, period, start_date, end_date, store_id
+        )
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("completed stock count variance failed")
+        return {"status": "error", "detail": "Could not load completed stock-count variance."}
+
+
+@app.post("/inventory/completed-stock-count-variance/save-as-case")
+async def save_completed_stock_count_variance_case(
+    period: str | None = None, start_date: str | None = None, end_date: str | None = None, store_id: int | None = None,
+):
+    """Turns an on-demand completed-stock-count-variance investigation into
+    a persistent, trackable case -- the one "save as case" action this
+    milestone adds. Deliberately takes the SAME scope parameters the
+    investigation was run with and recomputes server-side (never a
+    client-supplied finding/evidence/impact blob): a saved case must be
+    exactly what the server actually measured, not whatever numbers a
+    client claims it saw. metric_id is scoped to store_id + the resolved
+    date range so re-investigating the same scope updates the same case,
+    while a different scope opens a genuinely new one -- see
+    case_engine.save_ad_hoc_case's own docstring."""
+    try:
+        result = await anyio.to_thread.run_sync(
+            stock_counts.get_completed_stock_count_variance, period, start_date, end_date, store_id
+        )
+        if not result["sessions"]:
+            return {"status": "error", "detail": "No completed stock counts found for that period/store — nothing to save."}
+        metric_id = f"completed_stock_count_variance-{store_id or 'all'}-{result['start_date']}_{result['end_date']}"
+        finding = state_findings.build_completed_stock_count_variance_finding(result, metric_id)
+        case_id = await anyio.to_thread.run_sync(case_engine.save_ad_hoc_case, finding)
+        return {"status": "ok", "case_id": case_id}
+    except Exception:
+        logger.exception("save completed stock count variance as case failed")
+        return {"status": "error", "detail": "Could not save this investigation as a case."}
 
 
 @app.get("/inventory/top-product-stock-coverage")
@@ -489,11 +652,22 @@ async def intelligence_metrics():
     return {"status": "ok", "metrics": intelligence.list_metrics()}
 
 
+@reporting.ttl_cache(seconds=300)
+def _investigate_cached(metric_id: str):
+    # Phase 5A: cached 5 minutes here, at the route layer, specifically
+    # because THIS caller is always a pure supplementary display (Home's
+    # Suppliers panel, RevenueInvestigationPanel's cross-checks) -- never
+    # investigation.build_investigation(), which calls intelligence.investigate()
+    # directly (uncached) as the core of scan_all()'s real detection pipeline
+    # and must see fresh data on every rescan.
+    return intelligence.investigate(metric_id)
+
+
 @app.get("/intelligence/investigate/{metric_id}")
 async def intelligence_investigate(metric_id: str):
     """Run the full trend + anomaly + contributor-breakdown pipeline for one metric."""
     try:
-        result = await anyio.to_thread.run_sync(intelligence.investigate, metric_id)
+        result = await anyio.to_thread.run_sync(_investigate_cached, metric_id)
         if "error" in result:
             return {"status": "error", "detail": result["error"]}
         return {"status": "ok", **result}
@@ -509,27 +683,23 @@ def _attach_actions(findings: list[dict], actions: dict[str, dict]) -> None:
 
 @app.get("/brief")
 async def daily_brief():
-    """The precomputed morning brief: the same finding + tracking data
-    /investigations computes live, but read from the daily cache (see
-    backend/app/services/brain.py) instead of re-running the 80-100s scan on
-    every request. Self-heals (computes once, inline) if the cache is empty
-    or older than 24h — e.g. the first request ever, or a missed scheduled
-    run.
-
-    Each finding also gets a manager-set `action` (relevant/status/
-    action_taken — see finding_actions.py) merged in fresh on every request,
-    never baked into the daily_brief cache: action state changes far more
-    often than the once-a-day scan, so it has to be read live for an update
-    to show up immediately instead of waiting for tomorrow's scan."""
+    """Return cached evidence promptly, with explicit refresh/freshness state."""
     try:
-        result = await anyio.to_thread.run_sync(brain.get_latest_brief)
+        result = await anyio.to_thread.run_sync(home_briefing.get_brief)
+        if result["status"] != "ok":
+            return JSONResponse(result, status_code=503 if result["status"] == "error" else 202)
         all_findings = [*result["investigations"], *result["state_findings"], *result["short_term_findings"]]
         actions = await anyio.to_thread.run_sync(finding_actions.get_actions_for, [f["id"] for f in all_findings])
         _attach_actions(all_findings, actions)
-        return {"status": "ok", **result}
+        return {**result, "home": home_briefing.presentation(result)}
     except Exception:
         logger.exception("daily brief fetch failed")
-        return {"status": "error", "detail": "Could not load the daily brief."}
+        return JSONResponse({"status": "error", "detail": "Could not load the daily brief."}, status_code=503)
+
+
+@app.post("/brief/refresh")
+async def refresh_home_brief():
+    return JSONResponse({"status": "accepted", "refresh": home_briefing.request_refresh(retry=True)}, status_code=202)
 
 
 @app.get("/notifications/summary")
@@ -546,6 +716,21 @@ async def notifications_summary():
         return {"status": "error", "detail": "Could not load notifications."}
 
 
+@app.get("/outcomes/summary")
+async def outcomes_summary():
+    """Phase 5 v1: the cross-metric "is this working" scorecard — see
+    backend/app/services/outcome_intelligence.py for why this is
+    aggregate-only rather than per-metric pattern learning. Cheap (tens of
+    rows across 3 small tables), computed fresh on every request, same
+    posture as /notifications/summary."""
+    try:
+        result = await anyio.to_thread.run_sync(outcome_intelligence.get_summary)
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("outcomes summary failed")
+        return {"status": "error", "detail": "Could not load the outcomes summary."}
+
+
 @app.post("/notifications/acknowledge")
 async def notifications_acknowledge():
     """Marks everything seen up to now — called when Home loads."""
@@ -560,12 +745,58 @@ async def notifications_acknowledge():
 @app.patch("/findings/{finding_id}/action")
 async def update_finding_action(finding_id: str, request: FindingActionRequest):
     """Manager-facing action tracking, separate from tracking.py's automatic
-    outcome verdicts — see finding_actions.py."""
+    outcome verdicts — see finding_actions.py. case_id is resolved inside
+    case_engine.save_action_with_verification (not sent by the client)
+    from case_observations, so every action save stays correctly linked to
+    whichever case this finding_id belongs to without the frontend needing
+    to know about cases at all yet.
+
+    evidence_version, when sent, is verified server-side against the
+    finding's actual current evidence — the authoritative reassertion of
+    the same check CaseDetail.jsx already performs client-side. The
+    version check, the write (in one real SQL transaction with its
+    decision-snapshot record), all happen inside ONE call under ONE lock
+    acquisition (see save_action_with_verification's docstring) rather
+    than as separate steps, so a scan cannot land in the gap between
+    "evidence verified" and "action saved" (Phase 2e Task 1) — the
+    previous three-call version of this endpoint had exactly that gap. A
+    version mismatch is rejected with a structured conflict carrying the
+    fresh evidence; a scan holding the lock too long is rejected with a
+    distinct, retryable conflict."""
+    action_kwargs = dict(
+        relevant=request.relevant,
+        status=request.status,
+        action_taken=request.action_taken,
+        owner=request.owner,
+        deadline=request.deadline,
+        action_kind=request.action_kind,
+        intended_result=request.intended_result,
+        target_metric_id=request.target_metric_id,
+        target_value=request.target_value,
+        target_comparison=request.target_comparison,
+        target_baseline_relative=request.target_baseline_relative,
+        target_measurement_period=request.target_measurement_period,
+    )
     try:
-        await anyio.to_thread.run_sync(
-            finding_actions.set_action, finding_id, request.relevant, request.status, request.action_taken, request.owner
+        result = await anyio.to_thread.run_sync(
+            case_engine.save_action_with_verification, finding_id, action_kwargs, request.evidence_version
         )
-        return {"status": "ok"}
+        return {"status": "ok", "evidence_verified": result["evidence_verified"]}
+    except case_engine.StaleEvidenceError as e:
+        return {
+            "status": "error",
+            "error": "stale_evidence",
+            "detail": "The evidence for this finding has changed since it was last reviewed.",
+            "current_version": e.current_version,
+            "current_observed_at": e.current_observed_at,
+            "current_snapshot": e.current_snapshot,
+        }
+    except case_engine.ScanInProgressError as e:
+        return {
+            "status": "error",
+            "error": "scan_in_progress",
+            "detail": str(e) or "A scan is currently running; please retry in a moment.",
+        }
     except ValueError as e:
         return {"status": "error", "detail": str(e)}
     except Exception:
@@ -573,26 +804,196 @@ async def update_finding_action(finding_id: str, request: FindingActionRequest):
         return {"status": "error", "detail": "Could not save this action."}
 
 
+@app.post("/findings/{finding_id}/recommendation-acceptance")
+async def accept_finding_recommendation(finding_id: str, request: RecommendationAcceptanceRequest):
+    """Celeste Investigate Phase 2, final correction: a separate route
+    from PATCH /findings/{finding_id}/action on purpose -- see
+    RecommendationAcceptanceRequest's own docstring and case_engine.
+    accept_recommendation's. Same evidence-version-conflict/scan-lock
+    error shapes as the action route, so CaseDetail.jsx's existing
+    stale-evidence handling works unchanged against either."""
+    try:
+        result = await anyio.to_thread.run_sync(
+            case_engine.accept_recommendation, finding_id, request.recommendation_action, request.evidence_version
+        )
+        return {"status": "ok", "evidence_verified": result["evidence_verified"], "recorded": result["recorded"]}
+    except case_engine.StaleEvidenceError as e:
+        return {
+            "status": "error",
+            "error": "stale_evidence",
+            "detail": "The evidence for this finding has changed since it was last reviewed.",
+            "current_version": e.current_version,
+            "current_observed_at": e.current_observed_at,
+            "current_snapshot": e.current_snapshot,
+        }
+    except case_engine.ScanInProgressError as e:
+        return {
+            "status": "error",
+            "error": "scan_in_progress",
+            "detail": str(e) or "A scan is currently running; please retry in a moment.",
+        }
+    except ValueError as e:
+        return {"status": "error", "detail": str(e)}
+    except Exception:
+        logger.exception("recommendation acceptance failed for %s", finding_id)
+        return {"status": "error", "detail": "Could not record this acceptance."}
+
+
+@app.post("/cases/{case_id}/objective")
+async def set_case_objective_endpoint(case_id: str, request: CaseObjectiveRequest):
+    """Declares a case-level business objective directly — validated
+    against the real metric registry (unit is always derived server-side,
+    never trusted from the request). See case_engine.set_case_objective."""
+    try:
+        await anyio.to_thread.run_sync(
+            case_engine.set_case_objective, case_id, request.metric_id, request.target_value,
+            request.comparison, request.baseline_relative,
+        )
+        return {"status": "ok"}
+    except ValueError as e:
+        return {"status": "error", "detail": str(e)}
+    except Exception:
+        logger.exception("case objective set failed for %s", case_id)
+        return {"status": "error", "detail": "Could not set this case's objective."}
+
+
+@app.post("/cases/{case_id}/objective/from-action")
+async def designate_case_objective_endpoint(case_id: str, request: CaseObjectiveFromActionRequest):
+    """Designates an already-validated action target as this case's
+    objective, instead of declaring a new one directly. See
+    case_engine.designate_case_objective_from_action."""
+    try:
+        await anyio.to_thread.run_sync(
+            case_engine.designate_case_objective_from_action, case_id, request.finding_id
+        )
+        return {"status": "ok"}
+    except ValueError as e:
+        return {"status": "error", "detail": str(e)}
+    except Exception:
+        logger.exception("case objective designation failed for %s", case_id)
+        return {"status": "error", "detail": "Could not designate this case's objective."}
+
+
+@app.get("/management/summary")
+async def management_summary():
+    try:
+        return {"status": "ok", **await anyio.to_thread.run_sync(management.summary)}
+    except Exception:
+        logger.exception("management summary failed")
+        return {"status": "error", "detail": "Could not load management totals."}
+
+
+@app.get("/management/actions")
+async def management_actions(status: str | None = None, outcome_status: str | None = None,
+                             relevant: bool | None = None, limit: int = 20, offset: int = 0):
+    try:
+        result = await anyio.to_thread.run_sync(
+            management.list_actions, status, outcome_status, relevant, limit, offset
+        )
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("management actions failed")
+        return {"status": "error", "detail": "Could not load actions."}
+
+
+@app.get("/findings/{finding_id}/case")
+async def finding_case(finding_id: str):
+    return {"status": "ok", "case_id": await anyio.to_thread.run_sync(management.finding_case_id, finding_id)}
+
+
+@app.get("/cases")
+async def list_cases(status: str | None = None, metric_id: str | None = None, domain: str | None = None,
+                      limit: int = 50, offset: int = 0):
+    """Persistent business cases (Phase 2a/2b Case Store) — filterable,
+    stably ordered (last_seen_at desc, case_id as a tiebreaker), paginated.
+    Read-only; see the POST endpoints below for the only two mutations
+    this phase supports.
+
+    Each item's "action" key is that case's most recently updated action
+    (owner/status/deadline/target/outcome), the same composition /cases/
+    {id} already does for its full action history — added for the Actions
+    and Outcomes workspaces, which need a case's action state in the list
+    view itself rather than one extra fetch per case (Frontend Experience
+    v2, Stage 1). "has_outstanding_action" is a separate, correct answer to
+    "does this case have ANY open action" — "action" alone can't answer
+    that (an older still-open action can be masked by a newer completed
+    one; see finding_actions.has_outstanding_action_for_cases)."""
+    try:
+        result = await anyio.to_thread.run_sync(
+            case_engine.list_cases, status, metric_id, domain, limit, offset
+        )
+        case_ids = [item["case_id"] for item in result["items"]]
+        actions_by_case = await anyio.to_thread.run_sync(finding_actions.get_latest_action_for_cases, case_ids)
+        outstanding_case_ids = await anyio.to_thread.run_sync(finding_actions.has_outstanding_action_for_cases, case_ids)
+        for item in result["items"]:
+            item["action"] = actions_by_case.get(item["case_id"])
+            # Distinct from item["action"].status: that's only the most
+            # recently updated action, which can be "completed" while an
+            # older action on the same case is still open. This flag
+            # answers "any outstanding work on this case," not "is the
+            # latest action outstanding."
+            item["has_outstanding_action"] = item["case_id"] in outstanding_case_ids
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("case list failed")
+        return {"status": "error", "detail": "Could not load cases."}
+
+
+@app.get("/cases/{case_id}")
+async def get_case_detail(case_id: str):
+    """The case, its observations, a performance history derived from
+    those observations' own stored current/baseline values, its
+    relationships to other cases (e.g. recurrence_of), its audit history,
+    and every action recorded against any of its findings."""
+    try:
+        detail = await anyio.to_thread.run_sync(case_engine.get_case_detail, case_id)
+        if detail is None:
+            return {"status": "error", "detail": "No such case."}
+        actions = await anyio.to_thread.run_sync(finding_actions.get_actions_for_case, case_id)
+        return {"status": "ok", **detail, "actions": actions}
+    except Exception:
+        logger.exception("case detail failed for %s", case_id)
+        return {"status": "error", "detail": "Could not load this case."}
+
+
+@app.post("/cases/{case_id}/dismiss")
+async def dismiss_case_endpoint(case_id: str, request: CaseReasonRequest):
+    """Closes the whole case without verification (distinct from
+    finding_actions.relevant=False, which dismisses one action and never
+    touches a case) — a real reason is required, see case_engine.dismiss_case."""
+    try:
+        await anyio.to_thread.run_sync(case_engine.dismiss_case, case_id, request.reason)
+        return {"status": "ok"}
+    except ValueError as e:
+        return {"status": "error", "detail": str(e)}
+    except Exception:
+        logger.exception("case dismiss failed for %s", case_id)
+        return {"status": "error", "detail": "Could not dismiss this case."}
+
+
+@app.post("/cases/{case_id}/reopen")
+async def reopen_case_endpoint(case_id: str, request: CaseReasonRequest):
+    """Manually reopens a closed (resolved or dismissed) case — for
+    correcting a closure that shouldn't have happened, with no fresh
+    finding required. A real reason is required and logged to case_history."""
+    try:
+        await anyio.to_thread.run_sync(case_engine.reopen_case, case_id, request.reason)
+        return {"status": "ok"}
+    except ValueError as e:
+        return {"status": "error", "detail": str(e)}
+    except Exception:
+        logger.exception("case reopen failed for %s", case_id)
+        return {"status": "error", "detail": "Could not reopen this case."}
+
+
 @app.get("/investigations")
 async def investigations():
-    """Scan every registered metric and return a narrated Investigation for each
-    one currently outside its normal range — the 24/7-analyst feed. Also records
-    each finding for outcome tracking and checks whether older ones have
-    resolved (see backend/app/services/tracking.py — the "AI Impact" loop)."""
+    """Refresh the complete briefing through the same coordinated pipeline
+    as the scheduler. Outcome checks must receive every state-finding source;
+    an inventory-only scan would falsely resolve operational incidents."""
     try:
-        result = await anyio.to_thread.run_sync(investigation.scan_all)
-        state = await anyio.to_thread.run_sync(state_findings.build_inventory_findings)
-        short_term = await anyio.to_thread.run_sync(investigation.scan_short_term)
-        await anyio.to_thread.run_sync(tracking.record_new_findings, result)
-        await anyio.to_thread.run_sync(tracking.check_outcomes)
-        history = await anyio.to_thread.run_sync(tracking.get_tracking_history)
-        return {
-            "status": "ok",
-            "investigations": result,
-            "tracking": history,
-            "state_findings": state,
-            "short_term_findings": short_term,
-        }
+        result = await anyio.to_thread.run_sync(brain.run_daily_scan)
+        return {"status": "ok", **result}
     except Exception:
         logger.exception("investigation scan failed")
         return {"status": "error", "detail": "Could not run investigations."}

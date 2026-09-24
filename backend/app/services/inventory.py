@@ -10,7 +10,7 @@ reasoning as customers.py: the DB snapshot lags the system clock by weeks.
 """
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 
 OVERSTOCK_DAYS = 90  # p90 of the days-of-stock distribution across in-stock retail products
 TOP_ITEMS = 8
@@ -35,8 +35,8 @@ INVENTORY_BY_OUTLET_SQL = f"""
     ORDER BY estimated_value DESC
 """
 
-INVENTORY_DEPTH_SQL = """
-    WITH bounds AS (SELECT MAX(date_order) AS as_of FROM sale_order WHERE state = 'sale'),
+INVENTORY_DEPTH_SQL = f"""
+    WITH bounds AS (SELECT MAX(date_order) AS as_of FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES}),
     in_stock AS (
         SELECT sq.product_id, SUM(sq.quantity) AS total_qty
         FROM stock_quant sq
@@ -50,7 +50,7 @@ INVENTORY_DEPTH_SQL = """
         FROM sale_order_line sol
         JOIN sale_order so ON so.id = sol.order_id
         CROSS JOIN bounds b
-        WHERE so.state = 'sale' AND so.date_order >= b.as_of - INTERVAL '30 days'
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.date_order >= b.as_of - INTERVAL '30 days'
         GROUP BY sol.product_id
     )
     SELECT i.product_id, pt.name->>'en_US' AS product_name, i.total_qty,

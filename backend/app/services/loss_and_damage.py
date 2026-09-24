@@ -37,7 +37,7 @@ ORDER BY qty DESC
 """
 
 SHORTAGE_TOP_PRODUCTS_SQL = f"""
-SELECT pt.name->>'en_US' AS name, COUNT(*) AS lines, SUM(sms.quantity) AS qty
+SELECT pt.name->>'en_US' AS name, MIN(pp.id) AS product_id, pt.default_code AS sku, COUNT(*) AS lines, SUM(sms.quantity) AS qty
 FROM stock_move_shortage sms
 JOIN stock_picking sp ON sp.id = sms.picking_id
 JOIN stock_picking_type spt ON spt.id = sp.picking_type_id
@@ -45,7 +45,7 @@ JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
 JOIN product_product pp ON pp.id = sms.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
 WHERE rs.id IN {CELESTE_STORE_IDS} AND sms.create_date >= :start AND sms.create_date <= :end
-GROUP BY pt.name
+GROUP BY pt.name, pt.default_code
 ORDER BY qty DESC
 LIMIT {TOP_N}
 """
@@ -62,7 +62,7 @@ ORDER BY qty DESC
 """
 
 DAMAGED_TOP_PRODUCTS_SQL = f"""
-SELECT pt.name->>'en_US' AS name, COUNT(*) AS lines, SUM(dol.initial_demand) AS qty
+SELECT pt.name->>'en_US' AS name, MIN(pp.id) AS product_id, pt.default_code AS sku, COUNT(*) AS lines, SUM(dol.initial_demand) AS qty
 FROM damaged_order_line dol
 JOIN damaged_order do_ ON do_.id = dol.order_id
 JOIN stock_picking_type spt ON spt.id = do_.operation_type_id
@@ -70,7 +70,7 @@ JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
 JOIN product_product pp ON pp.id = dol.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
 WHERE rs.id IN {CELESTE_STORE_IDS} AND do_.date >= :start AND do_.date <= :end
-GROUP BY pt.name
+GROUP BY pt.name, pt.default_code
 ORDER BY qty DESC
 LIMIT {TOP_N}
 """
@@ -116,7 +116,8 @@ def get_loss_and_damage(period: str | None = None, start_date: str | None = None
             for r in shortage_by_reason
         ],
         "shortage_top_products": [
-            {"name": r["name"] or "Unknown", "lines": int(r["lines"]), "qty": float(r["qty"] or 0)}
+            {"name": r["name"] or "Unknown", "product_id": r["product_id"], "sku": r["sku"],
+             "lines": int(r["lines"]), "qty": float(r["qty"] or 0)}
             for r in shortage_top_products
         ],
         "shortage_by_store": [
@@ -124,7 +125,8 @@ def get_loss_and_damage(period: str | None = None, start_date: str | None = None
             for r in shortage_by_store
         ],
         "damaged_top_products": [
-            {"name": r["name"] or "Unknown", "lines": int(r["lines"]), "qty": float(r["qty"] or 0)}
+            {"name": r["name"] or "Unknown", "product_id": r["product_id"], "sku": r["sku"],
+             "lines": int(r["lines"]), "qty": float(r["qty"] or 0)}
             for r in damaged_top_products
         ],
         "damaged_by_store": [

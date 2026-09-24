@@ -1,4 +1,5 @@
-"""Current-state findings: stock-outs, low-stock, dead stock, and overstock.
+"""Current-state findings: stock-outs, low-stock, dead stock, overstock, and
+stuck physical stock counts.
 
 These are point-in-time conditions, not month-over-month trends, so they
 don't fit intelligence.py's trend/anomaly shape (there's no "baseline month"
@@ -17,15 +18,15 @@ Thresholds are the same ones already driving the Business Health inventory
 score (backend/app/services/health.py) — this must agree with what already
 counts as "bad" there, not define a second, competing definition.
 
-Phase 5 of the evidence-based root-cause rollout: _stock_availability_finding
-and _dead_overstock_finding attach evidence via evidence_engine.py's
-build_snapshot_evidence — the same >=60% concentration rule as the trend
-findings, adapted for a snapshot's "which segment holds most of the total"
-instead of a trend's "which segment drove the move," plus a data-quality
-(staleness) check. _top_seller_stock_finding and _outlet_activity_finding
-are deliberately left out — see the comment next to each one's
-"root_cause": None for why forcing the same check onto those two would
-produce a hollow, trivially-true result rather than real evidence.
+Phase 5 of the evidence-based root-cause rollout: _stock_availability_finding,
+_dead_overstock_finding, and _stuck_stock_count_finding attach evidence via
+evidence_engine.py's build_snapshot_evidence — the same >=60% concentration
+rule as the trend findings, adapted for a snapshot's "which segment holds
+most of the total" instead of a trend's "which segment drove the move," plus
+a data-quality (staleness) check. _top_seller_stock_finding and
+_outlet_activity_finding are deliberately left out — see the comment next to
+each one's "root_cause": None for why forcing the same check onto those two
+would produce a hollow, trivially-true result rather than real evidence.
 There is no LLM in this module (all four findings build their recommendations
 directly from the evidence, no _generate_recommendations() call), so unlike
 the trend metrics this isn't protecting an LLM from inventing a cause — it's
@@ -36,14 +37,36 @@ already used elsewhere, instead of a bare, unranked breakdown list.
 from datetime import date
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from backend.app.services import data_controls
 from backend.app.services import inventory as inventory_service
+from backend.app.services import stock_counts
 from backend.app.services.stock_alerts import get_stock_alerts, get_top_product_stock_coverage
 from mcp_server.tools import evidence_engine, impact_engine
 
 DEAD_STOCK_VALUE_SHARE_THRESHOLD_PCT = 5
 OVERSTOCK_VALUE_SHARE_THRESHOLD_PCT = 25
+# Value tiers for _stuck_stock_count_finding's priority -- same posture as
+# _priority_for_share: stated cutoffs, not a judgment call. Discovered live
+# investigating one real case (Colombo 6, Rs ~150k+ of unscanned-line value)
+# -- these bands aren't re-tuned from a larger sample yet, same caveat as
+# evidence_engine.CONCENTRATION_THRESHOLD_PCT's own docstring.
+STUCK_COUNT_CRITICAL_VALUE_RS = 100_000
+STUCK_COUNT_HIGH_VALUE_RS = 20_000
+# Completed Stock-Count Variance & Shrinkage Investigation: tiers set from
+# the real observed distribution (last 30 days, 53 completed sessions,
+# 2026-09-15): only 1 session exceeded Rs 500k (the Rs 7.1M Colombo 6
+# outlier), 9 exceeded Rs 100k, the rest form a long tail below that --
+# real gaps in the data, not round numbers picked blind.
+COMPLETED_VARIANCE_CRITICAL_SESSION_RS = 500_000
+COMPLETED_VARIANCE_HIGH_SESSION_RS = 100_000
+# How far back a scan looks for a newly-completed session -- completed
+# counts are sporadic (some months have only a handful), so "since
+# yesterday" would miss most of them; 7 days balances catching a real
+# spike promptly against re-flagging the same session's snapshot daily
+# (case_engine's own same-day upsert already keeps a single day's re-scan
+# from duplicating -- this window is about not going quiet between scans).
+COMPLETED_VARIANCE_WINDOW_DAYS = 7
 
 # Business Data Controls, Wave 1 Step 1: tiers set from the real observed
 # count (54 real INVENTORY products, company-wide, on 2026-09-22) -- a
@@ -73,6 +96,11 @@ def _stock_availability_finding():
     total_low = sum(s["low_stock"] for s in segments)
     if total_out == 0:
         return None  # matches health.py: out-of-stock is the trigger; low-stock is context
+    # total_out counts (outlet, product) rows -- the same product out of
+    # stock at 3 outlets counts 3 times. distinct_products is the number a
+    # reader actually means by "how many products are unavailable"; both
+    # are real, neither is invented, they just answer different questions.
+    distinct_products = alerts.get("distinct_out_of_stock_products", total_out)
 
     by_outlet = [
         {"name": s["outlet"], "current": s["out_of_stock"], "delta": s["out_of_stock"]}
@@ -96,7 +124,7 @@ def _stock_availability_finding():
             "owner": "Inventory team",
             "priority": "high",
             "expected_benefit": f"Restores availability for {min(3, len(seen_names))} of the "
-            f"{total_out} currently out-of-stock, actively-selling products.",
+            f"{distinct_products} currently out-of-stock, actively-selling products.",
         }
     ]
     if total_low:
@@ -127,16 +155,17 @@ def _stock_availability_finding():
         "kind": "products_out_of_stock",
         "financial_impact_rs": None,
         "count": total_out,
+        "distinct_products": distinct_products,
         "avg_order_value_used": None,
         "confidence": "measured",
         "month": alerts["as_of_date"],
-        "detail": f"{total_out} actively-selling products currently unavailable to sell.",
+        "detail": f"{distinct_products} actively-selling products are out of stock somewhere, totalling {total_out} product-store stockouts across all outlets.",
     }
     return {
         "id": f"stock_availability-{alerts['as_of_date']}",
         "metric_id": "stock_availability",
         "domain": "inventory",
-        "title": f"{total_out} actively-selling product(s) are out of stock",
+        "title": f"{distinct_products} product(s) out of stock at one or more stores ({total_out} product-store stockouts)",
         "category": "critical",
         "severity": "high",
         "priority": priority,
@@ -288,12 +317,279 @@ def _dead_overstock_finding():
     }
 
 
+def _stuck_stock_count_finding():
+    """A physical stock count (Odoo's cycle-count feature) that was started
+    but never finished -- state != 'done', no completed_datetime, open more
+    than stock_counts.STUCK_AFTER_HOURS. Discovered live: a manager-reported
+    "huge stock variance" at Colombo 6 traced to exactly this -- a 7,724-line
+    full-store count where only 30 lines were ever scanned, left open for a
+    month. An unfinished session's un-scanned lines still carry the system's
+    onhand_qty with counted_qty defaulting to 0, so any variance/shrinkage
+    report pulled from it is phantom, not real loss -- see
+    backend/app/services/stock_counts.py's module docstring for the full
+    investigation this came from.
+
+    Fires whenever ANY session is stuck (no value threshold to clear) --
+    same posture as _stock_availability_finding: a stuck count is a real,
+    binary process failure (either a session completed or it didn't), not a
+    fuzzy magnitude judgment call. Priority still scales with the phantom
+    value at risk, so a 3-line forgotten count doesn't read as loudly as a
+    full-store one."""
+    result = stock_counts.get_stuck_stock_counts()
+    sessions = result["sessions"]
+    if not sessions:
+        return None
+
+    by_outlet = {}
+    for s in sessions:
+        by_outlet[s["outlet"]] = by_outlet.get(s["outlet"], 0) + s["unscanned_value_rs"]
+    top_contributors = [{"name": name, "current": round(v, 2), "delta": round(v, 2)} for name, v in by_outlet.items()]
+    top_contributors.sort(key=lambda c: c["current"], reverse=True)
+
+    worst = sessions[0]  # already sorted by unscanned_value_rs desc
+    plural = len(sessions) != 1
+    # Incident Investigation, Phase 6: the prior wording ("then either
+    # complete it for a real count, or void it and schedule a recount")
+    # still prescribed a specific fix -- this system has no basis to
+    # recommend which disposition is correct (that depends on physical
+    # reality this app can't observe). Replaced with "review the evidence,
+    # then make an authorized disposition decision" -- doesn't presume
+    # complete vs. void vs. something else. Activity clause is honest about
+    # what's actually on record: some sessions have real scan activity
+    # (worst['has_scan_activity']), most of the current real 8 don't.
+    activity_clause = (
+        f"last scan activity {worst['last_scan_at'][:10] if worst['last_scan_at'] else 'unknown'}"
+        if worst["has_scan_activity"]
+        else "no counting activity has been recorded"
+    )
+    notes_clause = f" (system note: {worst['notes']})" if worst.get("notes") else ""
+    recommendations = [
+        {
+            "action": f"Review count session {worst['name']} at {worst['outlet']} — recorded owner "
+            f"{worst['responsible']}, open {worst['days_stuck']:.0f} day(s), {worst['unscanned_lines']} of "
+            f"{worst['total_lines']} lines never scanned, {activity_clause}{notes_clause} — then make an "
+            f"authorized disposition decision based on the evidence",
+            "owner": "Inventory team",
+            "priority": "high",
+            "expected_benefit": f"Establishes whether the recorded Rs. {worst['unscanned_value_rs']:,.0f} "
+            f"reflects real inventory or is an artifact of the incomplete count, before it's treated as "
+            f"either one.",
+        }
+    ]
+    if len(sessions) > 1:
+        recommendations.append(
+            {
+                "action": f"{len(sessions) - 1} more stock count(s) are stuck the same way — review count "
+                f"completion as a recurring process gap, not a one-off",
+                "owner": "Operations team",
+                "priority": "medium",
+                "expected_benefit": "Prevents future counts from silently going unfinished the same way.",
+            }
+        )
+
+    breakdowns = [
+        {
+            "dimension": "store",
+            "label": "Estimated value of unscanned lines by outlet",
+            "mode": "contribution",
+            "baseline_month": None,
+            "total": round(result["total_value_at_risk_rs"], 2),
+            "top_contributors": top_contributors,
+        }
+    ]
+    evidence = evidence_engine.build_snapshot_evidence(breakdowns, result["as_of"][:10])
+    total_value = result["total_value_at_risk_rs"]
+    priority = (
+        "critical" if total_value >= STUCK_COUNT_CRITICAL_VALUE_RS
+        else "high" if total_value >= STUCK_COUNT_HIGH_VALUE_RS
+        else "medium"
+    )
+    # Final Stock-Count Financial Disclosure, items 1-2: one consistent
+    # label ("estimated value of unscanned stock-count lines" -- never
+    # "phantom variance," never implying confirmed loss or a fully valued
+    # total) plus the coverage counts right beside the figure, not buried.
+    # Deliberately states the excluded-line count and "value unknown" --
+    # never characterizes it as small, since there's no basis to assume
+    # that (see stock_counts.get_stuck_stock_counts's valuation_coverage
+    # docstring for the exact tally this is built from).
+    coverage = result["valuation_coverage"]
+    valued_lines = coverage["source_cost_lines"] + coverage["catalog_estimate_lines"]
+    impact = {
+        "kind": "stuck_stock_count_value_at_risk",
+        "financial_impact_rs": round(total_value, 2),
+        "count": len(sessions),
+        "avg_order_value_used": None,
+        "confidence": "measured",
+        "month": result["as_of"][:10],
+        "valuation_coverage": coverage,
+        "detail": f"Rs. {total_value:,.0f} estimated value of unscanned lines across {len(sessions)} unfinished "
+        f"stock count{'s' if plural else ''} -- valued {valued_lines} of {coverage['total_unscanned_lines']} "
+        f"unscanned lines; {coverage['no_cost_data_lines']} have no recorded cost and are excluded "
+        f"(their value is unknown).",
+    }
+    return {
+        "id": f"stuck_stock_count-{result['as_of'][:10]}",
+        "metric_id": "stuck_stock_count",
+        "domain": "inventory",
+        "title": f"{len(sessions)} stock count{'s' if plural else ''} started but never finished"
+        + (f" -- Rs. {total_value:,.0f} estimated value of unscanned lines" if total_value else ""),
+        "category": "critical",
+        "severity": "high",
+        "priority": priority,
+        "business_impact_score": impact_engine.business_impact_score(priority, None, impact, evidence["data_quality"]),
+        "detected": date.today().isoformat(),
+        "confirm": {
+            "period": result["as_of"][:10],
+            "current": len(sessions),
+            "baseline": None,
+            "pct_change": None,
+            "unit": "count",
+        },
+        "breakdowns": breakdowns,
+        "impact": impact,
+        "how": None,
+        "root_cause": {"checks": evidence["checks"], "summary": evidence["summary"]},
+        "data_quality": evidence["data_quality"],
+        "recommendations": recommendations,
+        # Visual Investigation V2, Phase 2 (affected-session table): every
+        # stuck session's own real record -- already fully computed by
+        # get_stuck_stock_counts() above, just not previously carried past
+        # this function. Not a new query, not scraped from recommendation
+        # text -- the same `sessions` list already used for breakdowns/
+        # recommendations, passed through whole so the frontend can render
+        # a real per-session table instead of only the "worst" one's prose.
+        "sessions": sessions,
+        "status": "completed",
+    }
+
+
+def build_completed_stock_count_variance_finding(result: dict, metric_id: str):
+    """Completed Stock-Count Variance & Shrinkage Investigation: builds a
+    finding dict from an already-computed stock_counts.
+    get_completed_stock_count_variance() result. Public (no leading
+    underscore) and metric_id-parameterized on purpose -- shared by two
+    callers: _completed_stock_count_variance_finding() below (the daily
+    scan, fixed metric_id, gated by a threshold) and the Ask Celeste
+    "save as case" route in main.py (an ad-hoc investigation scope, e.g.
+    one store/period, always saved regardless of size since the manager
+    already decided it's worth tracking -- see save_ad_hoc_case's own
+    docstring on why metric_id must be scope-specific there). Returns None
+    only when there's nothing to build a finding from at all (no completed
+    sessions in scope) -- never a threshold decision, that's the caller's
+    job.
+
+    A physical stock count that actually FINISHED (state='done') carrying
+    a real, physically-verified discrepancy -- distinct from
+    _stuck_stock_count_finding above, which is about counts that never
+    finished at all and only ever produces a phantom estimate. Discovered
+    live: a single completed session at Colombo 6 (2026-09-08) carried
+    Rs 7.1M gross variance, 44% of the entire trailing-3-month total across
+    all outlets, invisible to every existing detector because none of them
+    look at completed counts."""
+    if not result["sessions"]:
+        return None
+    worst = result["sessions"][0]  # already sorted by gross_abs_variance_value_rs desc
+
+    evidence = evidence_engine.build_snapshot_evidence(result["breakdowns"], date.today().isoformat())
+    checks = list(evidence["checks"])
+    checks.append(evidence_engine.shrinkage_loss_damage_check(
+        result["breakdowns"], result["start_date"], result["end_date"],
+    ))
+    evidence = {"checks": checks, "summary": evidence_engine.summarize(checks), "data_quality": evidence["data_quality"]}
+
+    product_type_breakdown = next((b for b in result["breakdowns"] if b["dimension"] == "product_type"), None)
+    top_product_type = product_type_breakdown["top_contributors"][0]["name"] if product_type_breakdown and product_type_breakdown["top_contributors"] else None
+    product_type_clause = (
+        f" -- most of it in {top_product_type.replace('_', ' ').lower()} lines" if top_product_type else ""
+    )
+
+    plural = result["session_count"] != 1
+    priority = (
+        "critical" if worst["gross_abs_variance_value_rs"] >= COMPLETED_VARIANCE_CRITICAL_SESSION_RS
+        else "high" if worst["gross_abs_variance_value_rs"] >= COMPLETED_VARIANCE_HIGH_SESSION_RS
+        else "medium"
+    )
+    impact = {
+        "kind": "completed_stock_count_variance",
+        "financial_impact_rs": round(result["gross_abs_variance_value_rs"], 2),
+        "count": result["session_count"],
+        "avg_order_value_used": None,
+        "confidence": "measured",
+        "month": date.today().isoformat(),
+        "detail": f"Rs. {result['gross_abs_variance_value_rs']:,.0f} of variance across "
+        f"{result['session_count']} completed stock count{'s' if plural else ''} "
+        f"({result['period']}){product_type_clause}.",
+    }
+    recommendations = [
+        {
+            "action": f"Review count session {worst['name']} at {worst['outlet']} — Rs. "
+            f"{worst['gross_abs_variance_value_rs']:,.0f} in confirmed variance across "
+            f"{worst['lines']} lines, completed {worst['completed_at'][:10] if worst['completed_at'] else 'recently'} "
+            f"— then investigate whether the affected product type suggests a tracking/UOM gap "
+            f"(e.g. packing material) or real shrinkage (e.g. high-value inventory)",
+            "owner": "Inventory team",
+            "priority": priority,
+            "expected_benefit": "Determines whether this specific count's variance reflects a real "
+            "loss, a data-tracking gap, or a receiving-timing artifact, using the actual product "
+            "and outlet breakdown rather than treating all variance as one undifferentiated problem.",
+        }
+    ]
+
+    return {
+        "id": f"{metric_id}-{date.today().isoformat()}",
+        "metric_id": metric_id,
+        "domain": "inventory",
+        "title": f"Completed stock count{'s' if plural else ''} showed Rs. "
+        f"{result['gross_abs_variance_value_rs']:,.0f} in variance ({result['period']})",
+        "category": "critical",
+        "severity": "high",
+        "priority": priority,
+        "business_impact_score": impact_engine.business_impact_score(priority, None, impact, evidence["data_quality"]),
+        "detected": date.today().isoformat(),
+        "confirm": {
+            "period": result["period"],
+            "current": result["session_count"],
+            "baseline": None,
+            "pct_change": None,
+            "unit": "count",
+        },
+        "breakdowns": result["breakdowns"],
+        "impact": impact,
+        "how": None,
+        "root_cause": {"checks": evidence["checks"], "summary": evidence["summary"]},
+        "data_quality": evidence["data_quality"],
+        "recommendations": recommendations,
+        # Same pattern as _stuck_stock_count_finding's "sessions" field --
+        # detail-only, carried through so the case-detail page can render
+        # a real per-session table instead of only the worst one's prose.
+        "sessions": result["sessions"],
+        "status": "completed",
+    }
+
+
+def _completed_stock_count_variance_finding():
+    """Daily-scan trigger: fires only when the WORST single session in the
+    trailing window clears COMPLETED_VARIANCE_HIGH_SESSION_RS -- most
+    completed counts land exactly right or close to it (verified live: 44
+    of 53 sessions in a real 30-day sample were under Rs 100k), so this
+    isn't a "some variance exists" trigger, only a "something unusually
+    large just happened" one. See build_completed_stock_count_variance_
+    finding for the finding itself, shared with the ad-hoc save path."""
+    result = stock_counts.get_completed_stock_count_variance(period=f"{COMPLETED_VARIANCE_WINDOW_DAYS}d")
+    if not result["sessions"] or result["sessions"][0]["gross_abs_variance_value_rs"] < COMPLETED_VARIANCE_HIGH_SESSION_RS:
+        return None
+    return build_completed_stock_count_variance_finding(result, "completed_stock_count_variance")
+
+
 def build_inventory_findings():
-    """Runs both inventory state checks and returns whichever findings
-    actually breached their threshold — 0, 1, or 2 results. Never fabricates
-    a finding when the underlying data is empty (both helpers return None in
+    """Runs all inventory state checks and returns whichever findings
+    actually breached their threshold — 0 to 3 results. Never fabricates
+    a finding when the underlying data is empty (each helper returns None in
     that case) — same "don't fabricate" posture as the trend engine."""
-    findings = [_stock_availability_finding(), _dead_overstock_finding()]
+    findings = [
+        _stock_availability_finding(), _dead_overstock_finding(), _stuck_stock_count_finding(),
+        _completed_stock_count_variance_finding(),
+    ]
     return [f for f in findings if f is not None]
 
 
@@ -493,32 +789,92 @@ def _top_seller_stock_finding():
     if not out_of_stock:
         return None
 
+    # The real count of top sellers this scan actually considered -- was
+    # previously hardcoded as the literal "15" in the title/detail/
+    # recommendation text below (TOP_PRODUCTS_TOP_N's usual value, but not
+    # guaranteed if fewer than 15 products have recent sales). Deriving it
+    # from the real list makes the copy match what was actually measured.
+    total_top_sellers = len(coverage["products"])
+
     negative = [p for p in out_of_stock if p["negative_stock"]]
     other_short = [p for p in coverage["products"] if p["short"] and p["current_stock"] > 0]
 
+    # sku/negative_stock/days_of_cover/qty_sold_30d already exist on each
+    # product dict from get_top_product_stock_coverage() -- carried through
+    # here rather than dropped, so the case-detail investigation panel has
+    # a real SKU and stock-status flag per product instead of parsing them
+    # back out of the "name" string or recommendation prose.
     top_contributors = [
-        {"name": p["name"], "current": p["current_stock"], "delta": p["current_stock"]} for p in out_of_stock
+        {
+            "name": p["name"],
+            "sku": p["sku"],
+            "current": p["current_stock"],
+            "delta": p["current_stock"],
+            "negative_stock": p["negative_stock"],
+            "qty_sold_30d": p["qty_sold_30d"],
+        }
+        for p in out_of_stock
     ]
+    breakdowns = [
+        {
+            "dimension": "product",
+            "label": "Current stock (units)",
+            "mode": "contribution",
+            "baseline_month": None,
+            "top_contributors": top_contributors,
+        }
+    ]
+    if other_short:
+        breakdowns.append(
+            {
+                "dimension": "product",
+                "label": f"Other top sellers under {coverage.get('low_stock_threshold_days', 3)} days of cover",
+                "mode": "contribution",
+                "baseline_month": None,
+                "top_contributors": [
+                    {
+                        "name": p["name"],
+                        "sku": p["sku"],
+                        "current": p["days_of_cover"],
+                        "delta": p["days_of_cover"],
+                        "days_of_cover": p["days_of_cover"],
+                        "qty_sold_30d": p["qty_sold_30d"],
+                    }
+                    for p in other_short
+                ],
+            }
+        )
     names = [p["name"] for p in out_of_stock[:3]]
 
     recommendations = [
         {
-            "action": f"Urgently restock top sellers that are completely out: {', '.join(names)}",
+            "action": f"Urgently verify and restock top sellers recorded at zero or negative stock: {', '.join(names)}",
             "owner": "Inventory team",
             "priority": "critical",
-            "expected_benefit": f"Restores availability for {len(out_of_stock)} of your 15 best-selling "
-            f"products by volume — these drive a disproportionate share of daily orders.",
+            "expected_benefit": f"Restores recorded stock for {len(out_of_stock)} of your {total_top_sellers} "
+            f"best-selling products by volume — these drive a disproportionate share of daily orders.",
         }
     ]
     if negative:
+        # Metric Truthfulness Correction, Task 2: the earlier wording ("Corrects
+        # a data-integrity issue (sold past what's recorded on hand)") stated a
+        # specific cause as settled fact. A negative recorded quantity is
+        # evidence of a stock-record discrepancy, not proof of any one
+        # explanation (a missed physical count, an unrecorded transaction, a
+        # reservation mismatch, and a genuine oversell are all still open) --
+        # matches negativeStockText()'s own already-correct hedging
+        # (frontend/src/design/plainLanguage.js), which this recommendation
+        # previously contradicted on the same page.
         recommendations.append(
             {
-                "action": f"Investigate recorded stock for {', '.join(p['name'] for p in negative)} — "
-                f"showing negative on-hand quantity",
+                "action": f"Reconcile recorded stock for {', '.join(p['name'] for p in negative)} — "
+                f"negative on-hand quantity requires investigation",
                 "owner": "Inventory team",
                 "priority": "high",
-                "expected_benefit": "Corrects a data-integrity issue (sold past what's recorded on hand) "
-                "before it distorts reorder decisions.",
+                "expected_benefit": "Determines the actual cause (e.g. a physical count, an unrecorded "
+                "transaction, or a reservation mismatch) by reconciling physical stock, recorded "
+                "inventory, relevant transactions, and reservations where data is available -- before "
+                "it distorts reorder decisions.",
             }
         )
     if other_short:
@@ -536,16 +892,31 @@ def _top_seller_stock_finding():
         "kind": "top_sellers_out_of_stock",
         "financial_impact_rs": None,
         "count": len(out_of_stock),
+        # The denominator for "N of {total_top_sellers} top-selling products
+        # out of stock" -- a real, already-computed field, not parsed back
+        # out of the title/detail text. Lives on impact (already a
+        # pass-through field on the case API) rather than a new top-level
+        # key, so no case_engine.py schema/whitelist change is needed.
+        "total_top_sellers": total_top_sellers,
         "avg_order_value_used": None,
         "confidence": "measured",
         "month": coverage["as_of_date"],
-        "detail": f"{len(out_of_stock)} of your 15 best-selling products are completely out of stock.",
+        # Metric Truthfulness Correction, Task 1: "completely out of stock" claimed
+        # verified unavailability. What's actually measured is recorded on-hand
+        # quantity, company-wide across the monitored internal stock locations,
+        # summed via get_top_product_stock_coverage() (TOP_PRODUCTS_STOCK_SQL) --
+        # it neither confirms per-outlet availability nor subtracts reserved
+        # quantity. See InventoryInvestigationPanel.jsx for the fuller scope
+        # disclosure shown alongside this on the case page.
+        "detail": f"{len(out_of_stock)} of your {total_top_sellers} best-selling products are recorded at zero "
+        f"or negative stock across monitored locations, company-wide.",
     }
     return {
         "id": f"top_seller_stock-{coverage['as_of_date']}",
         "metric_id": "top_seller_stock",
         "domain": "inventory",
-        "title": f"{len(out_of_stock)} of your top 15 best-selling products are completely out of stock",
+        "title": f"{len(out_of_stock)} of your top {total_top_sellers} best-selling products are recorded at "
+        f"zero or negative stock, company-wide",
         "category": "critical",
         "severity": "high",
         "priority": "critical",
@@ -558,15 +929,7 @@ def _top_seller_stock_finding():
             "pct_change": None,
             "unit": "count",
         },
-        "breakdowns": [
-            {
-                "dimension": "product",
-                "label": "Current stock (units)",
-                "mode": "contribution",
-                "baseline_month": None,
-                "top_contributors": top_contributors,
-            }
-        ],
+        "breakdowns": breakdowns,
         "impact": impact,
         "how": None,
         # Not run through _current_total_concentration_checks on purpose: the
@@ -583,13 +946,13 @@ def _top_seller_stock_finding():
 OUTLET_ACTIVITY_SQL = f"""
     WITH bounds AS (
         SELECT MAX(date_order) AS as_of FROM sale_order
-        WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+        WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
     )
     SELECT rs.id, rs.name, b.as_of,
            COUNT(so.id) FILTER (WHERE so.date_order >= b.as_of - INTERVAL '30 days') AS orders_30d
     FROM res_store rs
     CROSS JOIN bounds b
-    LEFT JOIN sale_order so ON so.store_id = rs.id AND so.state = 'sale'
+    LEFT JOIN sale_order so ON so.store_id = rs.id AND so.state IN {SALE_ORDER_LIVE_STATES}
     WHERE rs.id IN {CELESTE_STORE_IDS}
     GROUP BY rs.id, rs.name, b.as_of
 """

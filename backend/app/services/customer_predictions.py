@@ -1,41 +1,14 @@
-"""Customer Next-Order Intelligence — Phase 1: per-customer purchase
-cadence, an expected next-order window, and overdue detection.
+"""Customer timing, lifecycle and next-basket heuristics.
 
-Phase 1 scope only: WHEN a customer is likely to order next, and whether
-they're currently on track, due, or overdue. Next-basket prediction,
-an order-value range, and a prediction -> actual-outcome tracking loop
-(comparing what Celeste predicted against what really happened, the same
-way tracking.py and weekly_streaks.py already do for findings) are real,
-separate pieces of work and are deferred to a later phase rather than
-half-built here.
+All reporting queries share the configured Celeste outlet scope and convert
+Odoo UTC timestamps to Asia/Colombo before constructing calendar dates.
+Timing uses each qualifying customer's recent purchase gaps and variability;
+these windows are heuristics, not calibrated statistical prediction intervals.
+Customers need at least three orders and a lifetime average gap of one day.
 
-Same "stated rule, not a judgment call" posture as investigation.py's
-_priority_for and state_findings.py's _priority_for_share: the expected
-window comes directly from EACH customer's own order-gap history (their
-average gap +/- their own variability), not a guessed number and not a
-machine-learning model. customers.py's existing at-risk segmentation uses
-one fixed 28-day threshold for every customer; this replaces that with a
-window personal to each customer, since a customer who reliably orders
-every 3 days and one who reliably orders every 20 shouldn't be judged
-against the same number.
-
-Only customers with order_count >= 3 (at least 2 gaps to measure) get a
-prediction — checked against the live DB before building this: of
-~84,900 customers, ~51,300 have only 1-2 orders and genuinely have no
-individual pattern to measure yet. They're left out entirely rather than
-assigned a guessed window.
-
-Also checked against the live DB: a small number of accounts (15 of the
-~9,700 with 10+ orders) place many orders per day on average — clearly
-not an individual shopper's cadence (an internal/staff/test account, not
-a customer). MIN_AVG_GAP_DAYS excludes these rather than silently
-producing a nonsensical "expected every few hours" prediction.
-
-This is a per-customer computation over the whole order history (~3.6s
-DB query alone for ~33,600 qualifying customers) — too slow to compute
-live on every page load, so it runs once a day inside brain.py's existing
-daily scan and is cached into its own appdb table, read directly by the
-/customers/predictions routes.
+The daily scan writes versioned application snapshots. Aggregate expected
+orders cover only qualifying repeat customers, not all outlet orders. The
+separate offline outlet forecasting pilot evaluates complete daily histories.
 """
 
 import json
@@ -44,7 +17,8 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import text
 
 from backend.app.db import appdb, reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
+from backend.app.services.order_history import customer_order_query
 
 MIN_ORDER_COUNT = 3
 HIGH_CONFIDENCE_ORDER_COUNT = 10
@@ -81,7 +55,7 @@ OVERDUE_SEVERITY = [
     ("recent", "Recent", 0.0),
 ]
 
-PATTERN_DISTRIBUTION_SQL = """
+PATTERN_DISTRIBUTION_SQL = customer_order_query(f"""
     SELECT
       CASE
         WHEN order_count >= :high_threshold THEN 'ten_plus'
@@ -91,24 +65,24 @@ PATTERN_DISTRIBUTION_SQL = """
       COUNT(*) AS n
     FROM (
         SELECT partner_id, COUNT(*) AS order_count
-        FROM sale_order WHERE state = 'sale'
+        FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES}
         GROUP BY partner_id
     ) x
     GROUP BY bucket
-"""
+""")
 
-TOTAL_CUSTOMERS_SQL = "SELECT COUNT(DISTINCT partner_id) AS n FROM sale_order WHERE state = 'sale'"
+TOTAL_CUSTOMERS_SQL = customer_order_query(f"SELECT COUNT(DISTINCT partner_id) AS n FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES}")
 
-AS_OF_DATE_SQL = "SELECT MAX(date_order) AS as_of_date FROM sale_order WHERE state = 'sale'"
+AS_OF_DATE_SQL = customer_order_query(f"SELECT MAX(date_order) AS as_of_date FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES}")
 
-PREDICTIONS_SQL = """
+PREDICTIONS_SQL = customer_order_query(f"""
     WITH ordered AS (
         SELECT so.partner_id, so.date_order,
                LAG(so.date_order) OVER (PARTITION BY so.partner_id ORDER BY so.date_order) AS prev_order,
                ROW_NUMBER() OVER (PARTITION BY so.partner_id ORDER BY so.date_order) AS rn,
                COUNT(*) OVER (PARTITION BY so.partner_id) AS n_orders
-        FROM sale_order so
-        WHERE so.state = 'sale'
+        FROM customer_orders so
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES}
     ),
     gaps AS (
         SELECT partner_id, rn, n_orders,
@@ -133,9 +107,9 @@ PREDICTIONS_SQL = """
         SELECT so.partner_id, rp.name AS customer_name, COUNT(*) AS order_count,
                SUM(so.amount_total) AS revenue, AVG(so.amount_total) AS avg_order_value,
                STDDEV(so.amount_total) AS stddev_order_value, MAX(so.date_order) AS last_order
-        FROM sale_order so
+        FROM customer_orders so
         JOIN res_partner rp ON rp.id = so.partner_id
-        WHERE so.state = 'sale'
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES}
         GROUP BY so.partner_id, rp.name
     ),
     bounds AS (SELECT MAX(last_order) AS as_of_date FROM orders)
@@ -145,9 +119,12 @@ PREDICTIONS_SQL = """
     JOIN gap_stats g ON g.partner_id = o.partner_id
     CROSS JOIN bounds b
     WHERE o.order_count >= :min_order_count AND g.avg_gap_all >= :min_avg_gap_days
-"""
+""")
 
 _SCHEMA_READY = False
+# Disposable snapshots are versioned for the new outlet/timezone contract.
+# Legacy snapshots remain intact but cannot be served under the new scope.
+ANALYTICS_CONTRACT = "celeste-outlets-colombo-v2"
 
 
 def _ensure_schema():
@@ -155,7 +132,7 @@ def _ensure_schema():
     if _SCHEMA_READY:
         return
     appdb.run_query("""
-        CREATE TABLE IF NOT EXISTS customer_predictions (
+        CREATE TABLE IF NOT EXISTS customer_predictions_v2 (
             partner_id INTEGER PRIMARY KEY,
             name TEXT,
             order_count INTEGER,
@@ -174,17 +151,17 @@ def _ensure_schema():
             generated_at TEXT
         )
     """)
-    # customer_predictions is a pure daily-replace snapshot (record_predictions
+    # customer_predictions_v2 is a pure daily-replace snapshot (record_predictions
     # deletes and reinserts every row on every scan) — no historical value in
     # existing rows, so a best-effort ALTER is enough. SQLite has no ADD
     # COLUMN IF NOT EXISTS, so guard it the same way brain.py does.
     for column in ("days_until_due INTEGER", "timing_bucket TEXT", "overdue_severity TEXT"):
         try:
-            appdb.run_query(f"ALTER TABLE customer_predictions ADD COLUMN {column}")
+            appdb.run_query(f"ALTER TABLE customer_predictions_v2 ADD COLUMN {column}")
         except Exception:
             pass
     appdb.run_query("""
-        CREATE TABLE IF NOT EXISTS customer_prediction_stats (
+        CREATE TABLE IF NOT EXISTS customer_prediction_stats_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             generated_at TEXT NOT NULL,
             as_of_date TEXT,
@@ -196,7 +173,7 @@ def _ensure_schema():
         )
     """)
     try:
-        appdb.run_query("ALTER TABLE customer_prediction_stats ADD COLUMN as_of_date TEXT")
+        appdb.run_query("ALTER TABLE customer_prediction_stats_v2 ADD COLUMN as_of_date TEXT")
     except Exception:
         pass
     _SCHEMA_READY = True
@@ -309,11 +286,11 @@ def record_predictions(predictions: list[dict]) -> None:
     generated_at = datetime.utcnow().isoformat()
     engine = appdb.get_engine()
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM customer_predictions"))
+        conn.execute(text("DELETE FROM customer_predictions_v2"))
         if predictions:
             conn.execute(
                 text("""
-                    INSERT INTO customer_predictions
+                    INSERT INTO customer_predictions_v2
                         (partner_id, name, order_count, confidence, last_order_date, avg_gap_days,
                          stddev_gap_days, expected_window_start, expected_window_end,
                          days_since_last_order, status, days_overdue, days_until_due, timing_bucket,
@@ -361,9 +338,9 @@ def compute_pattern_stats(predictable_count: int) -> dict:
 def record_pattern_stats(stats: dict) -> None:
     """Snapshot, not history — same reasoning as record_predictions()."""
     _ensure_schema()
-    appdb.run_query("DELETE FROM customer_prediction_stats")
+    appdb.run_query("DELETE FROM customer_prediction_stats_v2")
     appdb.run_query(
-        """INSERT INTO customer_prediction_stats
+        """INSERT INTO customer_prediction_stats_v2
                (generated_at, as_of_date, total_customers, ten_plus, three_to_nine, one_to_two, excluded)
            VALUES (:generated_at, :as_of_date, :total_customers, :ten_plus, :three_to_nine, :one_to_two, :excluded)""",
         {**stats, "generated_at": datetime.utcnow().isoformat()},
@@ -396,25 +373,25 @@ def get_summary() -> dict:
     _ensure_schema()
     status_rows = appdb.run_query(
         "SELECT status, COUNT(*) AS count, SUM(revenue) AS revenue, SUM(avg_order_value) AS expected_value "
-        "FROM customer_predictions GROUP BY status"
+        "FROM customer_predictions_v2 GROUP BY status"
     )
     confidence_rows = appdb.run_query(
-        "SELECT confidence, COUNT(*) AS count FROM customer_predictions GROUP BY confidence"
+        "SELECT confidence, COUNT(*) AS count FROM customer_predictions_v2 GROUP BY confidence"
     )
     timing_rows = appdb.run_query(
         "SELECT timing_bucket, COUNT(*) AS count, SUM(avg_order_value) AS expected_value "
-        "FROM customer_predictions WHERE timing_bucket IS NOT NULL GROUP BY timing_bucket"
+        "FROM customer_predictions_v2 WHERE timing_bucket IS NOT NULL GROUP BY timing_bucket"
     )
     overdue_rows = appdb.run_query(
         "SELECT overdue_severity, COUNT(*) AS count, SUM(revenue) AS historical_value "
-        "FROM customer_predictions WHERE overdue_severity IS NOT NULL GROUP BY overdue_severity"
+        "FROM customer_predictions_v2 WHERE overdue_severity IS NOT NULL GROUP BY overdue_severity"
     )
     high_conf_due_rows = appdb.run_query(
-        "SELECT COUNT(*) AS n, SUM(avg_order_value) AS v FROM customer_predictions "
+        "SELECT COUNT(*) AS n, SUM(avg_order_value) AS v FROM customer_predictions_v2 "
         "WHERE status = 'due' AND confidence = 'high'"
     )
-    generated_rows = appdb.run_query("SELECT generated_at FROM customer_predictions LIMIT 1")
-    pattern_rows = appdb.run_query("SELECT * FROM customer_prediction_stats ORDER BY generated_at DESC LIMIT 1")
+    generated_rows = appdb.run_query("SELECT generated_at FROM customer_predictions_v2 LIMIT 1")
+    pattern_rows = appdb.run_query("SELECT * FROM customer_prediction_stats_v2 ORDER BY generated_at DESC LIMIT 1")
 
     by_status = {
         r["status"]: {"count": r["count"], "revenue": round(r["revenue"] or 0, 2)} for r in status_rows
@@ -501,6 +478,7 @@ def build_home_finding(summary: dict) -> dict | None:
 
     return {
         "id": f"customer-purchase-opportunity-{summary.get('as_of_date') or 'unknown'}",
+        "analytics_contract": ANALYTICS_CONTRACT,
         "title": "Customer Purchase Opportunity",
         "as_of_date": summary.get("as_of_date"),
         "approaching_count": due["count"],
@@ -519,36 +497,26 @@ def list_predictions(status: str | None, sort: str, limit: int, offset: int) -> 
         params["status"] = status
 
     rows = appdb.run_query(
-        f"SELECT * FROM customer_predictions {where} ORDER BY {order} LIMIT :limit OFFSET :offset", params
+        f"SELECT * FROM customer_predictions_v2 {where} ORDER BY {order} LIMIT :limit OFFSET :offset", params
     )
-    total_rows = appdb.run_query(f"SELECT COUNT(*) AS n FROM customer_predictions {where}", params)
+    total_rows = appdb.run_query(f"SELECT COUNT(*) AS n FROM customer_predictions_v2 {where}", params)
     return rows, total_rows[0]["n"]
 
 
-# Scoped to Celeste's own 5 retail outlets (see store_scope.py) — unlike the
-# rest of this module, which doesn't filter by store at all. Checked against
-# the live DB before adding this: of 379,999 'sale' orders and 84,896
-# customers system-wide, only 299,948 orders / 68,242 customers belong to
-# these 5 outlets — the remaining ~20% are SPAR co-located locations and
-# Budget Kade partner-fulfillment channels, explicitly called out in
-# store_scope.py's own docstring as not Celeste's own retail business. This
-# view is genuinely about "my 5 outlets," so it's scoped correctly; the rest
-# of this module (predictions, pattern distribution, the Home finding) is
-# NOT scoped this way today — a real, separate discrepancy worth fixing
-# later, flagged rather than silently carried into new code.
-OUTLET_BEHAVIOR_SQL = f"""
+# All customer and outlet analytics share the configured Celeste outlet scope.
+OUTLET_BEHAVIOR_SQL = customer_order_query(f"""
     SELECT COALESCE(rs.name, 'Unknown store') AS outlet,
-           COUNT(*) FILTER (WHERE so.state = 'sale') AS orders,
+           COUNT(*) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS orders,
            COUNT(*) FILTER (WHERE so.state = 'cancel') AS cancelled,
-           COUNT(DISTINCT so.partner_id) FILTER (WHERE so.state = 'sale') AS unique_customers,
-           SUM(so.amount_total) FILTER (WHERE so.state = 'sale') AS revenue,
-           AVG(so.amount_total) FILTER (WHERE so.state = 'sale') AS avg_order_value
-    FROM sale_order so
+           COUNT(DISTINCT so.partner_id) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS unique_customers,
+           SUM(so.amount_total) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS revenue,
+           AVG(so.amount_total) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS avg_order_value
+    FROM customer_orders so
     LEFT JOIN res_store rs ON rs.id = so.store_id
-    WHERE so.state IN ('sale', 'cancel') AND so.store_id IN {CELESTE_STORE_IDS}
+    WHERE so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND so.store_id IN {CELESTE_STORE_IDS}
     GROUP BY rs.name
     ORDER BY orders DESC
-"""
+""")
 
 
 DAILY_FORECAST_SQL = """
@@ -556,7 +524,7 @@ DAILY_FORECAST_SQL = """
       SUM(1.0 / (julianday(expected_window_end) - julianday(expected_window_start) + 1)) AS expected_orders,
       SUM(avg_order_value / (julianday(expected_window_end) - julianday(expected_window_start) + 1)) AS expected_value,
       COUNT(*) AS customers_in_window
-    FROM customer_predictions
+    FROM customer_predictions_v2
     WHERE expected_window_start <= :d AND expected_window_end >= :d
 """
 
@@ -600,7 +568,7 @@ def _forecast_for_day(day: str) -> dict:
 
 def _latest_as_of_date() -> date | None:
     _ensure_schema()
-    rows = appdb.run_query("SELECT as_of_date FROM customer_prediction_stats ORDER BY generated_at DESC LIMIT 1")
+    rows = appdb.run_query("SELECT as_of_date FROM customer_prediction_stats_v2 ORDER BY generated_at DESC LIMIT 1")
     if not rows or not rows[0]["as_of_date"]:
         return None
     return date.fromisoformat(rows[0]["as_of_date"])
@@ -724,14 +692,14 @@ CHANNELS = [
     ("direct", "Direct", "🏪"),
 ]
 
-LIFECYCLE_SQL = """
+LIFECYCLE_SQL = customer_order_query(f"""
     WITH ordered AS (
         SELECT so.partner_id, so.date_order,
                LAG(so.date_order) OVER (PARTITION BY so.partner_id ORDER BY so.date_order) AS prev_order,
                ROW_NUMBER() OVER (PARTITION BY so.partner_id ORDER BY so.date_order) AS rn,
                COUNT(*) OVER (PARTITION BY so.partner_id) AS n_orders
-        FROM sale_order so
-        WHERE so.state = 'sale'
+        FROM customer_orders so
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES}
     ),
     gaps AS (
         SELECT partner_id, rn, n_orders,
@@ -776,8 +744,8 @@ LIFECYCLE_SQL = """
                COUNT(*) FILTER (WHERE so.pickme_order_id IS NOT NULL) AS pickme_orders,
                COUNT(*) FILTER (WHERE so.uber_order_id IS NOT NULL) AS uber_orders,
                COUNT(*) FILTER (WHERE so.pickme_order_id IS NULL AND so.uber_order_id IS NULL) AS direct_orders
-        FROM sale_order so
-        WHERE so.state = 'sale'
+        FROM customer_orders so
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES}
         GROUP BY so.partner_id
     ),
     bounds AS (SELECT MAX(last_order) AS as_of_date FROM orders)
@@ -786,16 +754,16 @@ LIFECYCLE_SQL = """
     FROM orders o
     LEFT JOIN gap_stats g ON g.partner_id = o.partner_id
     CROSS JOIN bounds b
-"""
+""")
 
-VALUE_PERCENTILE_SQL = """
+VALUE_PERCENTILE_SQL = customer_order_query(f"""
     SELECT PERCENTILE_CONT(0.8) WITHIN GROUP (ORDER BY revenue) AS p80,
            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY revenue) AS p50
     FROM (
         SELECT partner_id, SUM(amount_total) AS revenue
-        FROM sale_order WHERE state = 'sale' GROUP BY partner_id
+        FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES} GROUP BY partner_id
     ) x
-"""
+""")
 
 
 def _lifecycle_category(row: dict, as_of_date) -> str:
@@ -937,7 +905,7 @@ def _ensure_lifecycle_schema():
     if _LIFECYCLE_SCHEMA_READY:
         return
     appdb.run_query("""
-        CREATE TABLE IF NOT EXISTS customer_lifecycle_stats (
+        CREATE TABLE IF NOT EXISTS customer_lifecycle_stats_v2 (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             generated_at TEXT NOT NULL,
             summary TEXT NOT NULL
@@ -962,7 +930,7 @@ def record_lifecycle_summary(summary: dict | None) -> None:
     _ensure_lifecycle_schema()
 
     prior_rows = appdb.run_query(
-        "SELECT summary FROM customer_lifecycle_stats ORDER BY generated_at DESC LIMIT 1"
+        "SELECT summary FROM customer_lifecycle_stats_v2 ORDER BY generated_at DESC LIMIT 1"
     )
     prior = json.loads(prior_rows[0]["summary"]) if prior_rows else None
     prior_cat_count = {c["id"]: c["count"] for c in prior["categories"]} if prior else {}
@@ -990,14 +958,14 @@ def record_lifecycle_summary(summary: dict | None) -> None:
     }
 
     appdb.run_query(
-        "INSERT INTO customer_lifecycle_stats (generated_at, summary) VALUES (:generated_at, :summary)",
+        "INSERT INTO customer_lifecycle_stats_v2 (generated_at, summary) VALUES (:generated_at, :summary)",
         {"generated_at": datetime.utcnow().isoformat(), "summary": json.dumps(summary_with_deltas)},
     )
 
 
 def get_lifecycle_summary() -> dict | None:
     _ensure_lifecycle_schema()
-    rows = appdb.run_query("SELECT summary FROM customer_lifecycle_stats ORDER BY generated_at DESC LIMIT 1")
+    rows = appdb.run_query("SELECT summary FROM customer_lifecycle_stats_v2 ORDER BY generated_at DESC LIMIT 1")
     if not rows:
         return None
     return json.loads(rows[0]["summary"])
@@ -1012,13 +980,13 @@ def get_lifecycle_summary() -> dict | None:
 # inside a warehouse full of slow-moving stock. Per-product stock coverage
 # for the top sellers lives separately — see stock_alerts.py
 # get_top_product_stock_coverage().
-ACTUAL_DAILY_ORDERS_SQL = """
+ACTUAL_DAILY_ORDERS_SQL = customer_order_query(f"""
     SELECT DATE(date_order) AS day, COUNT(*) AS orders
-    FROM sale_order
-    WHERE state = 'sale' AND date_order >= :start_date AND date_order < :end_date
+    FROM customer_orders
+    WHERE state IN {SALE_ORDER_LIVE_STATES} AND date_order >= :start_date AND date_order < :end_date
     GROUP BY DATE(date_order)
     ORDER BY day
-"""
+""")
 
 
 def get_order_forecast_chart(actual_days: int = 5, forecast_days: int = 5) -> dict | None:
@@ -1046,7 +1014,8 @@ def get_order_forecast_chart(actual_days: int = 5, forecast_days: int = 5) -> di
         d_iso = (start_date + timedelta(days=i)).isoformat()
         points.append({
             "date": d_iso,
-            "actual_orders": actual_by_day.get(d_iso, 0),
+            "actual_orders": actual_by_day.get(d_iso),
+            "is_partial": d_iso == as_of_date.isoformat(),
             "predicted_orders": None,
         })
     for i in range(1, forecast_days + 1):
@@ -1060,32 +1029,26 @@ def get_order_forecast_chart(actual_days: int = 5, forecast_days: int = 5) -> di
     return {
         "as_of_date": as_of_date.isoformat(),
         "points": points,
+        "timezone": "Asia/Colombo",
+        "forecast_scope": "repeat_customers_only",
+        "latest_actual_day_is_partial": True,
     }
 
 
 # ---------------------------------------------------------------------------
-# Outlet-wise order forecast — the company-wide daily forecast above split
-# across Celeste's 5 outlets by each outlet's own real share of order
-# volume over the trailing 30 days (store-scoped, unlike the forecast
-# itself). Not customer-level attribution (which outlet each predictable
-# customer orders from most) — that would require resolving this module's
-# open store-scoping gap first (see the module docstring), a bigger piece
-# of work. This is the simpler, honestly-approximate version: it assumes
-# each outlet keeps its current share of volume, so it won't catch one
-# outlet growing faster than another, but every number behind it (the
-# shares) is real and store-scoped. Per-outlet counts are rounded
-# independently for display, so they may not sum exactly to the total —
-# expected, not a bug.
-OUTLET_RECENT_VOLUME_SQL = f"""
-    WITH bounds AS (SELECT MAX(date_order) AS as_of FROM sale_order WHERE state = 'sale')
+# Outlet allocation of the repeat-customer estimate, using trailing 30-day
+# shares. This remains a heuristic, not an independently trained outlet forecast.
+# Independently rounded counts need not sum exactly to the displayed total.
+OUTLET_RECENT_VOLUME_SQL = customer_order_query(f"""
+    WITH bounds AS (SELECT MAX(date_order) AS as_of FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES})
     SELECT rs.name AS outlet, COUNT(*) AS orders_30d
-    FROM sale_order so
+    FROM customer_orders so
     JOIN res_store rs ON rs.id = so.store_id
     CROSS JOIN bounds b
-    WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
       AND so.date_order >= b.as_of - INTERVAL '30 days'
     GROUP BY rs.name
-"""
+""")
 
 
 def get_outlet_order_forecast(forecast_days: int = 5) -> dict | None:
@@ -1141,14 +1104,14 @@ def get_outlet_order_forecast(forecast_days: int = 5) -> dict | None:
 # the rest of this module) — it only matters when someone drills into a
 # specific customer, and a single-partner query is cheap, unlike the
 # ~33,600-customer whole-order computation this module caches daily.
-NEXT_BASKET_SQL = """
+NEXT_BASKET_SQL = customer_order_query(f"""
     WITH order_products AS (
         SELECT so.id AS order_id, sol.product_id, so.date_order
-        FROM sale_order so
+        FROM customer_orders so
         JOIN sale_order_line sol ON sol.order_id = so.id
         JOIN product_product pp ON pp.id = sol.product_id
         JOIN product_template pt ON pt.id = pp.product_tmpl_id
-        WHERE so.partner_id = :partner_id AND so.state = 'sale'
+        WHERE so.partner_id = :partner_id AND so.state IN {SALE_ORDER_LIVE_STATES}
           AND pt.celeste_product_type = 'INVENTORY'
         GROUP BY so.id, sol.product_id, so.date_order
     ),
@@ -1182,7 +1145,7 @@ NEXT_BASKET_SQL = """
     JOIN last_purchase lp ON lp.product_id = ps.product_id
     JOIN product_product pp ON pp.id = ps.product_id
     JOIN product_template pt ON pt.id = pp.product_tmpl_id
-"""
+""")
 
 NEXT_BASKET_MIN_TIMES_BOUGHT = 3  # same MIN_ORDER_COUNT reasoning: at least 2 gaps to measure a pattern
 NEXT_BASKET_STATUS_ORDER = {"overdue": 0, "due": 1, "on_track": 2}
@@ -1257,11 +1220,11 @@ def get_predicted_next_basket(partner_id: int, top_n: int = 8) -> dict | None:
 # distinct names across 33,609 predictable customers) — a name search can
 # and often will return more than one person; the frontend shows a picker
 # rather than guessing which one was meant.
-CUSTOMER_SEARCH_SQL = """
+CUSTOMER_SEARCH_SQL = f"""
     SELECT rp.id AS partner_id, rp.name, rp.phone, rp.email,
-           (SELECT COUNT(*) FROM sale_order so WHERE so.partner_id = rp.id AND so.state = 'sale') AS order_count
+           (SELECT COUNT(*) FROM sale_order so WHERE so.partner_id = rp.id AND so.state IN {SALE_ORDER_LIVE_STATES}) AS order_count
     FROM res_partner rp
-    WHERE rp.id IN (SELECT DISTINCT partner_id FROM sale_order WHERE state = 'sale')
+    WHERE rp.id IN (SELECT DISTINCT partner_id FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES})
       AND (CAST(:name_pattern AS text) IS NULL OR rp.name ILIKE :name_pattern)
       AND (CAST(:phone_last9 AS text) IS NULL OR RIGHT(regexp_replace(COALESCE(rp.phone, ''), '[^0-9]', '', 'g'), 9) = :phone_last9)
       AND (CAST(:email AS text) IS NULL OR rp.email ILIKE :email)

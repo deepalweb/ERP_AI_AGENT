@@ -26,6 +26,7 @@ from . import (
     operations,
     product_lookup,
     stock_alerts,
+    stock_counts,
 )
 
 
@@ -145,8 +146,15 @@ def _system_prompt() -> str:
         "repeat its 'note' caveat when you quote it rather than stating the "
         "projection as a plain fact. For 'what is margin' / 'what is AOV' "
         "questions about one period, call get_gross_margin / get_sales_summary "
-        "— always repeat get_gross_margin's cost_data_coverage_pct caveat when "
-        "quoting the figure. For 'why did margin change', 'is margin trending', "
+        "— get_gross_margin is an ESTIMATE on a current-cost basis (product "
+        "cost is today's catalog price applied to historical sales, not a "
+        "historical cost-of-goods-sold record), so always call it that "
+        "('estimated gross margin, current-cost basis') rather than 'gross "
+        "margin' alone, and mention cost_data_coverage_pct separately as what "
+        "share of revenue had a cost value at all — coverage does NOT establish "
+        "that the cost value is period-accurate, so never present a high "
+        "coverage percentage as validating the figure's historical accuracy. "
+        "For 'why did margin change', 'is margin trending', "
         "or 'is revenue growth volume-driven or price-driven', call "
         "investigate_metric with 'gross_margin' or 'average_order_value' — "
         "reading average_order_value next to order_volume is exactly how to "
@@ -427,11 +435,15 @@ TOOLS = [
         "function": {
             "name": "get_gross_margin",
             "description": (
-                "Get gross margin (revenue minus cost of goods sold) for a month, "
-                "rolling window, or explicit date range: amount, percent, and what "
-                "share of revenue actually had cost data (cost_data_coverage_pct) "
-                "— always mention that coverage figure when quoting margin, since "
-                "it's not quite 100%. Defaults to last month if period is omitted."
+                "Get ESTIMATED gross margin on a current-cost basis (revenue minus "
+                "cost of goods sold, where cost is product_template's current "
+                "catalog cost applied to historical sales quantities — not a "
+                "historical cost-of-goods-sold record) for a month, rolling window, "
+                "or explicit date range: amount, percent, and what share of revenue "
+                "had a cost value at all (cost_data_coverage_pct). Coverage and "
+                "point-in-time cost accuracy are separate questions — mention both "
+                "the current-cost-basis caveat AND the coverage figure when quoting "
+                "margin, never coverage alone. Defaults to last month if period is omitted."
             ),
             "parameters": {
                 "type": "object",
@@ -513,14 +525,16 @@ TOOLS = [
         "function": {
             "name": "get_product_lookup",
             "description": (
-                "Look up a single product by name or SKU and get its sales, gross "
-                "margin, Uber removal count, channel mix, and current stock by "
-                "outlet — all in one call. Use this for any question about one "
-                "specific item ('how is X selling', 'margin on X', 'stock of X'), "
-                "instead of scanning a Top-N tool's results for it. If the result's "
-                "status is 'ambiguous', list the returned matches and ask which one "
-                "the user meant rather than guessing. If 'not_found', say so plainly "
-                "— don't infer a product that isn't in the matches."
+                "Look up a single product by name or SKU and get its sales, "
+                "ESTIMATED gross margin (current-cost basis — same caveat as "
+                "get_gross_margin, always mention it when quoting), Uber removal "
+                "count, channel mix, and current stock by outlet — all in one call. "
+                "Use this for any question about one specific item ('how is X "
+                "selling', 'margin on X', 'stock of X'), instead of scanning a Top-N "
+                "tool's results for it. If the result's status is 'ambiguous', list "
+                "the returned matches and ask which one the user meant rather than "
+                "guessing. If 'not_found', say so plainly — don't infer a product "
+                "that isn't in the matches."
             ),
             "parameters": {
                 "type": "object",
@@ -666,6 +680,41 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_stock_count_variance",
+            "description": (
+                "Get REAL, physically-verified variance from COMPLETED "
+                "physical stock counts for a month, rolling window, or "
+                "explicit date range — how much the physical count differed "
+                "from what the system recorded, broken down by outlet and by "
+                "product type (real inventory vs. packing material vs. raw "
+                "items vs. services). This is DIFFERENT from a stuck/"
+                "unfinished stock count (a phantom estimate for a count "
+                "that never finished) — this tool is only for counts that "
+                "actually completed. Use for 'stock variance', 'stock-take "
+                "discrepancies', or 'why did a stock count come out wrong' "
+                "questions. State plainly which outlet/product type the "
+                "variance is concentrated in and whether it overlaps with "
+                "picking-loss/damage data (a real correlation, never proof "
+                "of cause) — never invent a reason beyond what the "
+                "breakdown and evidence actually show. Defaults to last "
+                "month if period is omitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "description": "Month (YYYY-MM), or a rolling window like '7d'/'30d' for the last N days. Defaults to last month.",
+                    },
+                    **_DATE_RANGE_PROPS,
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_loyalty_and_promotions",
             "description": (
                 "Get loyalty-points activity (issued/used/outstanding, top "
@@ -775,6 +824,7 @@ TOOL_FUNCTIONS = {
     "get_revenue_concentration": concentration.get_revenue_concentration,
     "get_basket_analysis": basket.get_basket_analysis,
     "get_loss_and_damage": loss_and_damage.get_loss_and_damage,
+    "get_stock_count_variance": stock_counts.get_completed_stock_count_variance,
     "get_loyalty_and_promotions": loyalty.get_loyalty_and_promotions,
     "get_brand_and_department_mix": brand_mix.get_brand_and_department_mix,
 }

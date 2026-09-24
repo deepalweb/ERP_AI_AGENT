@@ -14,7 +14,7 @@ so a rare coincidence can't surface as a top result.
 """
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from mcp_server.tools.sales import _period_bounds, get_sales_summary
 
 TOP_N = 10
@@ -24,7 +24,7 @@ BASKET_SQL = f"""
 WITH bounds_orders AS (
     SELECT so.id AS order_id
     FROM sale_order so
-    WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
       AND so.date_order >= :start AND so.date_order <= :end
 ),
 scoped_lines AS (

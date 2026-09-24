@@ -17,7 +17,7 @@ from statistics import mean, pstdev
 from typing import Literal, Optional
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 
 Direction = Literal["higher_is_bad", "higher_is_good"]
 # "rate" = numerator/denominator*100, for percentage metrics (e.g. cancellation
@@ -84,35 +84,85 @@ class MetricDef:
     # metrics to price the excess). None means investigation.py skips impact estimation
     # for this metric rather than guessing a unit.
     impact_kind: Optional[Literal["lost_orders"]] = None
+    # Which metrics this one is NOT statistically independent of, for
+    # evidence_engine.cross_metric_corroboration_checks. Two metrics sharing
+    # a group means they're arithmetically/definitionally linked (same base
+    # rows, or one is mechanically derived from another) — not just
+    # correlated in practice. Left unset (empty string), a metric defaults
+    # to being its own group, i.e. independent of everything else by
+    # default; only metrics actually inspected and found to share a formula
+    # or base population get grouped together. This is deliberately a small,
+    # explicit safeguard against double-counting dependent metrics as
+    # corroboration — not a general statistical independence model (no
+    # covariance estimation, no confound detection). See that function's
+    # docstring for exactly how it's used.
+    independence_group: str = ""
+    # Conservative gate on independence_group's own default: a metric
+    # defaults to independence_group="" (independent of everything) purely
+    # because nobody has grouped it, which is the WRONG default for a
+    # brand-new, never-inspected metric — it would immediately start
+    # corroborating other findings without anyone having checked whether it
+    # actually shares a formula or base table with them. independence_
+    # reviewed=False means "nobody has verified this metric's independence
+    # relationships one way or the other yet" — evidence_engine.
+    # cross_metric_corroboration_checks refuses to let an unreviewed metric
+    # strengthen (or contradict) anything until this is flipped to True by
+    # someone who has actually inspected its SQL, same posture as the
+    # independence_group backfill below.
+    independence_reviewed: bool = False
+    # A declared, opt-in expectation about how this metric's movement
+    # relates to a SPECIFIC other metric's, keyed by the other metric's id:
+    # "same_direction" (both improving or both worsening together is the
+    # expected/consistent pattern) or "opposite_direction" (one improving
+    # while the other worsens is the expected/consistent pattern — e.g. a
+    # mechanical trade-off). Deliberately sparse and manually declared, not
+    # inferred: most metric pairs have no known relationship at all, and
+    # evidence_engine must not manufacture a "conflicting signal" claim for
+    # an undeclared pair just because their categories happen to differ —
+    # see that function's docstring.
+    expected_relationship: dict[str, str] = field(default_factory=dict)
 
 
 METRICS: dict[str, MetricDef] = {
     "cancellation_rate": MetricDef(
         id="cancellation_rate",
+        # Every metric below is marked reviewed=True as a one-time backfill:
+        # each one's SQL was read end-to-end (this file, in full) to decide
+        # independence_group membership, so "reviewed" is already true for
+        # all of them, not a default being waived. A metric added later
+        # starts unreviewed (the dataclass default) until someone does the
+        # same inspection for it.
+        independence_reviewed=True,
         label="Order cancellation rate",
         unit="percent",
         direction="higher_is_bad",
         is_rate=True,
         impact_kind="lost_orders",
+        # Same base sale_order rows as revenue/order_volume/average_order_value
+        # (cancel + the live states from the same table), and mechanically
+        # trades off against order_volume by definition — a cancelled order
+        # is excluded from order_volume's own SALE_ORDER_LIVE_STATES filter.
+        # See independence_group's own docstring.
+        independence_group="order_funnel",
         trend_sql=f"""
             SELECT date_trunc('month', date_order) AS month,
                    COUNT(*) FILTER (WHERE state = 'cancel') AS numerator,
                    COUNT(*) AS denominator
             FROM sale_order
-            WHERE state IN ('sale', 'cancel') AND store_id IN {CELESTE_STORE_IDS}
+            WHERE state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND store_id IN {CELESTE_STORE_IDS}
             GROUP BY 1 ORDER BY 1
         """,
         short_term_trend_sql=f"""
             WITH bounds AS (
                 SELECT MAX(date_order) AS as_of FROM sale_order
-                WHERE state IN ('sale', 'cancel') AND store_id IN {CELESTE_STORE_IDS}
+                WHERE state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND store_id IN {CELESTE_STORE_IDS}
             ),
             bucketed AS (
                 SELECT so.state,
                        FLOOR(EXTRACT(EPOCH FROM (b.as_of - so.date_order)) / (7*86400))::int AS periods_ago,
                        b.as_of
                 FROM sale_order so CROSS JOIN bounds b
-                WHERE so.state IN ('sale', 'cancel') AND so.store_id IN {CELESTE_STORE_IDS}
+                WHERE so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND so.store_id IN {CELESTE_STORE_IDS}
                   AND so.date_order >= b.as_of - INTERVAL '63 days'
             )
             SELECT periods_ago, MAX(as_of) AS as_of,
@@ -130,7 +180,7 @@ METRICS: dict[str, MetricDef] = {
                            COUNT(*) AS denominator
                     FROM sale_order so
                     LEFT JOIN res_store rs ON rs.id = so.store_id
-                    WHERE so.state IN ('sale', 'cancel') AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY rs.name
                 """,
@@ -166,12 +216,17 @@ METRICS: dict[str, MetricDef] = {
     ),
     "revenue": MetricDef(
         id="revenue",
+        independence_reviewed=True,
         label="Revenue",
         unit="currency",
         direction="higher_is_good",
+        # SUM(amount_total) over the exact same sale_order rows order_volume
+        # COUNTs and average_order_value AVGs -- revenue ~= order_volume x
+        # AOV by construction, not empirical correlation.
+        independence_group="order_funnel",
         trend_sql=f"""
             SELECT date_trunc('month', date_order) AS month, SUM(amount_total) AS numerator
-            FROM sale_order WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS} GROUP BY 1 ORDER BY 1
+            FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS} GROUP BY 1 ORDER BY 1
         """,
         dimensions=[
             Dimension(
@@ -184,7 +239,7 @@ METRICS: dict[str, MetricDef] = {
                     JOIN sale_order so ON so.id = sol.order_id
                     JOIN product_product pp ON pp.id = sol.product_id
                     JOIN product_template pt ON pt.id = pp.product_tmpl_id
-                    WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY pt.name
                 """,
@@ -196,7 +251,7 @@ METRICS: dict[str, MetricDef] = {
                 sql=f"""
                     SELECT rp.name AS name, SUM(so.amount_total) AS value
                     FROM sale_order so JOIN res_partner rp ON rp.id = so.partner_id
-                    WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY rp.name
                 """,
@@ -208,7 +263,7 @@ METRICS: dict[str, MetricDef] = {
                 sql=f"""
                     SELECT COALESCE(rs.name, 'Unknown store') AS name, SUM(so.amount_total) AS value
                     FROM sale_order so LEFT JOIN res_store rs ON rs.id = so.store_id
-                    WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY rs.name
                 """,
@@ -217,12 +272,14 @@ METRICS: dict[str, MetricDef] = {
     ),
     "order_volume": MetricDef(
         id="order_volume",
+        independence_reviewed=True,
         label="Confirmed order volume",
         unit="count",
         direction="higher_is_good",
+        independence_group="order_funnel",
         trend_sql=f"""
             SELECT date_trunc('month', date_order) AS month, COUNT(*) AS numerator
-            FROM sale_order WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS} GROUP BY 1 ORDER BY 1
+            FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS} GROUP BY 1 ORDER BY 1
         """,
         dimensions=[
             Dimension(
@@ -232,7 +289,7 @@ METRICS: dict[str, MetricDef] = {
                 sql=f"""
                     SELECT COALESCE(rs.name, 'Unknown store') AS name, COUNT(*) AS value
                     FROM sale_order so LEFT JOIN res_store rs ON rs.id = so.store_id
-                    WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY rs.name
                 """,
@@ -244,7 +301,7 @@ METRICS: dict[str, MetricDef] = {
                 sql=f"""
                     SELECT rp.name AS name, COUNT(*) AS value
                     FROM sale_order so JOIN res_partner rp ON rp.id = so.partner_id
-                    WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY rp.name
                 """,
@@ -253,6 +310,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "delayed_delivery_rate": MetricDef(
         id="delayed_delivery_rate",
+        independence_reviewed=True,
         label="Severely delayed delivery rate",
         unit="percent",
         direction="higher_is_bad",
@@ -323,6 +381,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "uber_failure_rate": MetricDef(
         id="uber_failure_rate",
+        independence_reviewed=True,
         label="Uber order failure rate",
         unit="percent",
         direction="higher_is_bad",
@@ -383,6 +442,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "pickme_cancellation_rate": MetricDef(
         id="pickme_cancellation_rate",
+        independence_reviewed=True,
         label="PickMe order cancellation rate",
         unit="percent",
         direction="higher_is_bad",
@@ -418,6 +478,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "customer_retention_rate": MetricDef(
         id="customer_retention_rate",
+        independence_reviewed=True,
         label="Customer retention rate",
         unit="percent",
         direction="higher_is_good",
@@ -425,7 +486,7 @@ METRICS: dict[str, MetricDef] = {
         trend_sql=f"""
             WITH monthly_active AS (
                 SELECT date_trunc('month', date_order) AS month, partner_id
-                FROM sale_order WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+                FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
                 GROUP BY 1, 2
             ),
             bounds AS (SELECT MAX(month) AS max_month FROM monthly_active)
@@ -448,7 +509,19 @@ METRICS: dict[str, MetricDef] = {
     ),
     "gross_margin": MetricDef(
         id="gross_margin",
-        label="Gross margin",
+        independence_reviewed=True,
+        # Metric Truthfulness Correction, Task 3: "Gross margin" implied a
+        # realized historical figure. The numerator below applies TODAY's
+        # catalog cost (product_template.celeste_cost_price_ex_vat, a single
+        # current-value column, not a cost-history table) to every past
+        # month's sales — so this is an estimate under current costs, not a
+        # measured historical gross margin. Kept as the metric's own label
+        # (not a Case-Detail-only disclaimer) so every surface that reads
+        # metric.label — headlines, Investigate rows, the target-metric
+        # picker, chat tools — carries the same corrected terminology from
+        # one source, rather than some pages saying "Gross margin" and
+        # others hedging it.
+        label="Estimated gross margin (current-cost basis)",
         unit="percent",
         direction="higher_is_good",
         is_rate=True,
@@ -461,7 +534,7 @@ METRICS: dict[str, MetricDef] = {
             JOIN sale_order so ON so.id = sol.order_id
             JOIN product_product pp ON pp.id = sol.product_id
             JOIN product_template pt ON pt.id = pp.product_tmpl_id
-            WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+            WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
             GROUP BY 1 ORDER BY 1
         """,
         dimensions=[
@@ -479,29 +552,34 @@ METRICS: dict[str, MetricDef] = {
                     LEFT JOIN res_store rs ON rs.id = so.store_id
                     JOIN product_product pp ON pp.id = sol.product_id
                     JOIN product_template pt ON pt.id = pp.product_tmpl_id
-                    WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY rs.name
                 """,
             ),
         ],
-        notes="Cost comes from product_template.celeste_cost_price_ex_vat — verified "
-        "86-100% revenue coverage in every month of history, so unlike some other cost "
-        "fields in this schema it's reliable back to the start of the data. Store is the "
-        "only dimension: a per-product breakdown would need a currency-sized volume "
-        "threshold this engine's MIN_SEGMENT_VOLUME (built for order counts) doesn't "
-        "give a meaningful one for, so it's deliberately not offered rather than risk a "
-        "low-revenue, high-margin-swing product dominating the ranking.",
+        notes="Cost comes from product_template.celeste_cost_price_ex_vat — today's catalog cost, applied to "
+        "every historical month alike, not a cost-history record. This figure does not establish realized "
+        "historical gross margin; treat it as an estimate under current costs. Separately: cost-value "
+        "COVERAGE is verified at 86-100% of revenue in every month of history (so the vast majority of "
+        "revenue has SOME cost value to work with) — but coverage only means a cost value exists, never that "
+        "it's the value that was actually true in that historical month. High coverage does not establish "
+        "point-in-time accuracy. Store is the only dimension: a per-product breakdown would need a "
+        "currency-sized volume threshold this engine's MIN_SEGMENT_VOLUME (built for order counts) doesn't "
+        "give a meaningful one for, so it's deliberately not offered rather than risk a low-revenue, "
+        "high-margin-swing product dominating the ranking.",
     ),
     "average_order_value": MetricDef(
         id="average_order_value",
+        independence_reviewed=True,
         label="Average order value",
         unit="currency",
         direction="higher_is_good",
+        independence_group="order_funnel",
         trend_sql=f"""
             SELECT date_trunc('month', date_order) AS month, AVG(amount_total) AS numerator
             FROM sale_order
-            WHERE state IN ('sale', 'done') AND store_id IN {CELESTE_STORE_IDS}
+            WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
             GROUP BY 1 ORDER BY 1
         """,
         dimensions=[
@@ -513,7 +591,7 @@ METRICS: dict[str, MetricDef] = {
                     SELECT COALESCE(rs.name, 'Unknown store') AS name,
                            SUM(so.amount_total) AS numerator, COUNT(*) AS denominator
                     FROM sale_order so LEFT JOIN res_store rs ON rs.id = so.store_id
-                    WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
                       AND so.date_order >= :start AND so.date_order < :end
                     GROUP BY rs.name
                 """,
@@ -538,6 +616,7 @@ METRICS: dict[str, MetricDef] = {
     # way sales metrics are.
     "supplier_fill_rate": MetricDef(
         id="supplier_fill_rate",
+        independence_reviewed=True,
         label="Supplier on-time fill rate",
         unit="percent",
         direction="higher_is_good",
@@ -572,6 +651,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "purchase_price_variance": MetricDef(
         id="purchase_price_variance",
+        independence_reviewed=True,
         label="Purchase order price mismatch rate",
         unit="percent",
         direction="higher_is_bad",
@@ -627,6 +707,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "supplier_concentration": MetricDef(
         id="supplier_concentration",
+        independence_reviewed=True,
         label="Top-supplier spend concentration",
         unit="percent",
         direction="higher_is_bad",
@@ -677,6 +758,13 @@ def list_metrics():
             "direction": m.direction,
             "dimensions": [{"id": d.id, "label": d.label} for d in m.dimensions],
             "notes": m.notes,
+            # Whether this metric has a trailing-7-day trend at all (see
+            # short_term_trend_sql) -- the frontend's action-target form
+            # uses this to only offer "weekly" measurement for a metric
+            # that genuinely supports it, rather than letting a manager
+            # request a cadence the backend would reject (Phase 2e Task 4:
+            # never invent measurement semantics on the client).
+            "supports_weekly_measurement": m.short_term_trend_sql is not None,
         }
         for m in METRICS.values()
     ]
@@ -928,6 +1016,12 @@ def get_trailing_breakdown(dim: Dimension, as_of, moved_up: bool, window_days: i
 
 
 def investigate(metric_id: str):
+    # Phase 5A: deliberately NOT cached here -- investigation.build_investigation()
+    # calls this same function as the core of scan_all()'s real pipeline, which
+    # MUST see fresh data on every rescan (the stale-evidence-conflict mechanism
+    # depends on a rescan actually recomputing, not replaying a stale result).
+    # Caching happens one layer up, in main.py's /intelligence/investigate/
+    # {metric_id} route -- the ONLY caller that's a pure supplementary display.
     metric = METRICS.get(metric_id)
     if metric is None:
         return {"error": f"Unknown metric '{metric_id}'. Call list_metrics for available options."}

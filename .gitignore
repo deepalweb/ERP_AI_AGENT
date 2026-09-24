@@ -1,4 +1,7 @@
 .venv/
+.venv-forecast/
+artifacts/forecasting/
+artifacts/home-review/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -12,6 +15,7 @@ __pycache__/
 
 *.log
 *.db
+*.scan.lock
 
 dist/
 build/

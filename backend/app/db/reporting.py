@@ -1,4 +1,7 @@
+import functools
+import inspect
 import os
+import time
 from functools import lru_cache
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -33,6 +36,59 @@ def run_query(query: str, params: dict | None = None):
 async def fetch_report(query: str, params: dict | None = None):
 	"""Async wrapper to run DB queries in a threadpool."""
 	return await anyio.to_thread.run_sync(run_query, query, params)
+
+
+def ttl_cache(seconds: float):
+    """Phase 5A: an in-process, time-expiring cache for a slow read-only
+    reporting query -- the reporting mirror is already a periodic ETL that
+    lags real time by days (see Home's own "Order data through... N days
+    behind" disclosure), so serving a same-args call from up to `seconds`
+    ago never makes the data meaningfully staler than it already is.
+
+    Key: the wrapped function's name + its exact args/kwargs (via repr) --
+    different params (e.g. a different period) get their own entry, never
+    collide. Lifetime: `seconds`, fixed per call site. Invalidation: purely
+    time-based expiry, checked on the next call after it lapses -- nothing
+    here writes, so there is no event to invalidate on. Freshness: this
+    NEVER rewrites a timestamp/as_of field already in the cached payload
+    (those describe the underlying data's own period, computed once at
+    query time, and stay correct for the life of the entry) -- it also
+    never fabricates a "just now" label; callers get exactly what the
+    underlying query returned, just not always freshly re-run.
+
+    Works on both a sync and an async function, since this codebase's
+    reporting-backed functions are a mix of both."""
+    def decorator(fn):
+        store: dict[str, tuple[float, object]] = {}
+
+        def _key(args, kwargs) -> str:
+            return repr((args, tuple(sorted(kwargs.items()))))
+
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def async_wrapper(*args, **kwargs):
+                key = _key(args, kwargs)
+                hit = store.get(key)
+                if hit and hit[0] > time.monotonic():
+                    return hit[1]
+                result = await fn(*args, **kwargs)
+                store[key] = (time.monotonic() + seconds, result)
+                return result
+            async_wrapper.cache_clear = store.clear  # same escape hatch functools.lru_cache offers -- used by tests
+            return async_wrapper
+
+        @functools.wraps(fn)
+        def sync_wrapper(*args, **kwargs):
+            key = _key(args, kwargs)
+            hit = store.get(key)
+            if hit and hit[0] > time.monotonic():
+                return hit[1]
+            result = fn(*args, **kwargs)
+            store[key] = (time.monotonic() + seconds, result)
+            return result
+        sync_wrapper.cache_clear = store.clear
+        return sync_wrapper
+    return decorator
 
 
 async def fetch_schema():

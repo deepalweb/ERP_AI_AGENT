@@ -16,6 +16,7 @@ judgment call — so a low score is always traceable to specific `drivers`.
 import anyio
 
 from backend.app.db import reporting
+from backend.app.db.store_scope import SALE_ORDER_LIVE_STATES
 from backend.app.services import dashboard, inventory as inventory_service
 from mcp_server.tools import intelligence
 
@@ -26,7 +27,7 @@ CUSTOMER_CONCENTRATION_THRESHOLD_PCT = 40
 DEAD_STOCK_VALUE_SHARE_THRESHOLD_PCT = 5
 OVERSTOCK_VALUE_SHARE_THRESHOLD_PCT = 25
 
-ALL_TIME_REVENUE_SQL = "SELECT SUM(amount_total) AS revenue FROM sale_order WHERE state = 'sale'"
+ALL_TIME_REVENUE_SQL = f"SELECT SUM(amount_total) AS revenue FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES}"
 
 
 def _status_for(score: float) -> str:

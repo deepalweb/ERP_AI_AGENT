@@ -4,7 +4,7 @@ from calendar import monthrange
 from typing import Optional
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 
 _DAY_WINDOW_RE = re.compile(r"^(\d{1,3})d$")
 
@@ -23,7 +23,7 @@ def _latest_order_date() -> date:
     not date.today(), since the DB snapshot can lag real time by weeks (same
     reasoning as the partial-period detection below)."""
     rows = reporting.run_query(
-        f"SELECT MAX(date_order) AS max_d FROM sale_order WHERE state IN ('sale','done') AND store_id IN {CELESTE_STORE_IDS}"
+        f"SELECT MAX(date_order) AS max_d FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}"
     )
     max_d = rows[0].get("max_d") if rows else None
     return max_d.date() if max_d else date.today()
@@ -95,6 +95,42 @@ def _period_label(
     return period or start[:7]
 
 
+def period_completeness(period: Optional[str], start: str, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    """Whether `period` (as resolved to `start` by _period_bounds) is fully
+    elapsed yet, and how much of it has -- the same logic get_sales_summary
+    already computed, extracted so a caller that only needs THIS (e.g.
+    channels.get_channel_breakdown, which used to call the full
+    get_sales_summary and throw away its revenue/orders/AOV/growth numbers
+    just to reach these three fields) doesn't have to pay for the revenue
+    aggregate queries it never uses. Same one real query as before
+    (_latest_order_date, for a plain calendar month); a rolling window or
+    custom range needs none at all.
+
+    Returns (is_partial_period, days_elapsed, days_in_period)."""
+    custom = _parse_custom_range(start_date, end_date)
+    days = _parse_day_window(period)
+    # A rolling window is anchored to the data's own latest order date, and a
+    # custom range is exactly what was asked for -- either way there's no
+    # "still in progress" concept the way a calendar month has.
+    if days:
+        return False, days, days
+    if custom:
+        span = (custom[1] - custom[0]).days + 1
+        return False, span, span
+
+    s_year, s_month = map(int, start.split("-")[:2])
+    as_of = _latest_order_date()
+    days_in_period = monthrange(s_year, s_month)[1]
+    period_start = date(s_year, s_month, 1)
+    period_end = date(s_year, s_month, days_in_period)
+
+    if as_of >= period_end:
+        return False, days_in_period, days_in_period
+    if as_of < period_start:
+        return True, 0, days_in_period
+    return True, as_of.day, days_in_period
+
+
 def get_sales_summary(period: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None):
     """Return a structured sales summary for `period` (YYYY-MM, or a rolling
     'Nd' window), or an explicit start_date/end_date range. Defaults to last
@@ -111,7 +147,7 @@ def get_sales_summary(period: Optional[str] = None, start_date: Optional[str] = 
       COUNT(id) AS orders,
       AVG(amount_total) AS average_order_value
     FROM sale_order
-    WHERE state IN ('sale','done')
+    WHERE state IN {SALE_ORDER_LIVE_STATES}
       AND store_id IN {CELESTE_STORE_IDS}
       AND date_order >= :start
       AND date_order <= :end
@@ -140,7 +176,7 @@ def get_sales_summary(period: Optional[str] = None, start_date: Optional[str] = 
     sql_prev = f"""
     SELECT SUM(amount_total) AS revenue FROM (
       SELECT amount_total FROM sale_order
-        WHERE state IN ('sale','done') AND store_id IN {CELESTE_STORE_IDS}
+        WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
           AND date_order >= :start AND date_order <= :end
       UNION ALL
       SELECT amount_total FROM account_move WHERE move_type='out_invoice' AND invoice_date >= :start AND invoice_date <= :end AND state='posted'
@@ -159,8 +195,6 @@ def get_sales_summary(period: Optional[str] = None, start_date: Optional[str] = 
         start_d = date.fromisoformat(start)
         pend = (start_d - timedelta(days=1)).isoformat()
         pstart = (start_d - timedelta(days=span)).isoformat()
-        is_partial_period = False
-        days_elapsed = days_in_period = span
     else:
         # compute previous month bounds
         s_year, s_month = map(int, start.split("-")[:2])
@@ -170,26 +204,7 @@ def get_sales_summary(period: Optional[str] = None, start_date: Optional[str] = 
             ps, pm = s_year, s_month - 1
         pstart, pend = _period_bounds(f"{ps:04d}-{pm:02d}")
 
-        # Flag when the requested period isn't fully covered by the data yet,
-        # since a partial period's revenue isn't comparable to a full prior
-        # one. Anchored to the data's own latest order date, not
-        # date.today() — the DB snapshot can lag real time by weeks, which
-        # would otherwise make a fully elapsed month look "partial" or
-        # (worse) a genuinely partial one look done.
-        as_of = _latest_order_date()
-        days_in_period = monthrange(s_year, s_month)[1]
-        period_start = date(s_year, s_month, 1)
-        period_end = date(s_year, s_month, days_in_period)
-
-        if as_of >= period_end:
-            is_partial_period = False
-            days_elapsed = days_in_period
-        elif as_of < period_start:
-            is_partial_period = True
-            days_elapsed = 0
-        else:
-            is_partial_period = True
-            days_elapsed = as_of.day
+    is_partial_period, days_elapsed, days_in_period = period_completeness(period, start, start_date, end_date)
 
     prow = reporting.run_query(sql_prev, {"start": pstart, "end": pend})
     prev_row = prow[0] if prow else {}

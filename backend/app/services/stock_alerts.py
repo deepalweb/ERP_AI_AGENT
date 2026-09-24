@@ -9,7 +9,7 @@ get_inventory_depth.
 """
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 
 LOW_STOCK_DAYS = 3  # quick-commerce grocery — a few days' cover is already tight
 TOP_N = 10
@@ -17,14 +17,14 @@ TOP_N = 10
 STOCK_ALERTS_SQL = f"""
     WITH bounds AS (
         SELECT MAX(date_order) AS as_of FROM sale_order
-        WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+        WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
     ),
     recent_sales AS (
         SELECT so.store_id, sol.product_id, SUM(sol.product_uom_qty) AS qty_sold_30d
         FROM sale_order_line sol
         JOIN sale_order so ON so.id = sol.order_id
         CROSS JOIN bounds b
-        WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
           AND so.date_order >= b.as_of - INTERVAL '30 days'
         GROUP BY so.store_id, sol.product_id
     ),
@@ -49,6 +49,12 @@ STOCK_ALERTS_SQL = f"""
 
 
 def get_stock_alerts():
+    # Phase 5A: deliberately NOT cached here -- state_findings.py and
+    # evidence_engine.py both call this directly as part of scan_all()'s
+    # real detection pipeline, which must see fresh stock levels on every
+    # rescan. Caching happens one layer up, in main.py's own
+    # /inventory/stock-alerts route -- Home's Inventory panel is the only
+    # caller that's a pure supplementary display.
     rows = reporting.run_query(STOCK_ALERTS_SQL)
     if not rows:
         return {
@@ -91,12 +97,21 @@ def get_stock_alerts():
     out_of_stock_items.sort(key=lambda x: -x["sold_30d"])
     low_stock_items.sort(key=lambda x: -x["sold_30d"])
 
+    # segments_by_outlet's out_of_stock counts (and their sum) are per
+    # (outlet, product) row -- the same product out of stock at 3 outlets
+    # counts 3 times there, which is correct for the store-concentration
+    # breakdown but NOT the same thing as "how many distinct products are
+    # out of stock". Callers that want the latter (state_findings.py's
+    # headline count) need this separately.
+    distinct_out_of_stock_products = len({i["sku"] for i in out_of_stock_items})
+
     return {
         "as_of_date": as_of_date.date().isoformat(),
         "segments_by_outlet": [{"outlet": outlet, **c} for outlet, c in sorted(counts.items())],
         "top_out_of_stock": out_of_stock_items[:TOP_N],
         "top_low_stock": low_stock_items[:TOP_N],
         "low_stock_threshold_days": LOW_STOCK_DAYS,
+        "distinct_out_of_stock_products": distinct_out_of_stock_products,
     }
 
 
@@ -114,14 +129,14 @@ COVERAGE_HORIZON_DAYS = 10  # matches the Order forecast chart's window
 TOP_PRODUCTS_STOCK_SQL = f"""
     WITH bounds AS (
         SELECT MAX(date_order) AS as_of FROM sale_order
-        WHERE state = 'sale' AND store_id IN {CELESTE_STORE_IDS}
+        WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
     ),
     recent_sales AS (
         SELECT sol.product_id, SUM(sol.product_uom_qty) AS qty_sold_30d
         FROM sale_order_line sol
         JOIN sale_order so ON so.id = sol.order_id
         CROSS JOIN bounds b
-        WHERE so.state = 'sale' AND so.store_id IN {CELESTE_STORE_IDS}
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
           AND so.date_order >= b.as_of - INTERVAL '30 days'
         GROUP BY sol.product_id
     ),

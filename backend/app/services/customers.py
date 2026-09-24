@@ -12,6 +12,7 @@ would make every customer look artificially more idle than they are.
 import anyio
 
 from backend.app.db import reporting
+from backend.app.db.store_scope import SALE_ORDER_LIVE_STATES
 from mcp_server.tools import intelligence
 
 AT_RISK_DAYS = 28   # p90 gap between orders for repeat customers
@@ -19,14 +20,14 @@ CHURNED_DAYS = 60   # ~2x that — clearly disengaged
 
 TOP_AT_RISK = 8
 
-CUSTOMER_STATS_SQL = """
+CUSTOMER_STATS_SQL = f"""
     WITH customer_orders AS (
         SELECT so.partner_id, rp.name AS customer_name, COUNT(*) AS order_count,
                SUM(so.amount_total) AS revenue,
                MIN(so.date_order) AS first_order, MAX(so.date_order) AS last_order
         FROM sale_order so
         JOIN res_partner rp ON rp.id = so.partner_id
-        WHERE so.state = 'sale'
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES}
         GROUP BY so.partner_id, rp.name
     ),
     bounds AS (SELECT MAX(last_order) AS as_of_date FROM customer_orders)

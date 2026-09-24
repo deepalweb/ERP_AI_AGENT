@@ -15,6 +15,7 @@ dependencies = [
     "pydantic-settings",
     "python-dotenv",
     "apscheduler",
+    "filelock>=3.16,<4",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,12 @@ line-length = 100
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# real_backend tests hit the live, read-only reporting database and take
+# minutes -- excluded from the default run so `pytest`/`pytest -q` stays
+# fast and deterministic. Run them explicitly with:
+#   pytest -m real_backend tests/test_real_backend_integration.py
+markers = ["real_backend: exercises the real reporting database (slow, needs network access)"]
+addopts = "-m 'not real_backend'"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

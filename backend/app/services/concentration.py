@@ -6,7 +6,7 @@ covers the ranking itself).
 
 from mcp_server.tools.sales import _period_bounds, get_sales_summary
 from backend.app.db import reporting
-from backend.app.db.store_scope import CELESTE_STORE_IDS
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 
 TOP_N = 10
 
@@ -16,7 +16,7 @@ FROM sale_order_line sol
 JOIN sale_order so ON so.id = sol.order_id
 JOIN product_product pp ON pp.id = sol.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
-WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
   AND so.date_order >= :start AND so.date_order <= :end
 GROUP BY pt.name ORDER BY revenue DESC LIMIT {TOP_N}
 """
@@ -25,7 +25,7 @@ TOP_CUSTOMERS_SQL = f"""
 SELECT rp.name AS name, SUM(so.amount_total) AS revenue
 FROM sale_order so
 JOIN res_partner rp ON rp.id = so.partner_id
-WHERE so.state IN ('sale', 'done') AND so.store_id IN {CELESTE_STORE_IDS}
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
   AND so.date_order >= :start AND so.date_order <= :end
 GROUP BY rp.name ORDER BY revenue DESC LIMIT {TOP_N}
 """
