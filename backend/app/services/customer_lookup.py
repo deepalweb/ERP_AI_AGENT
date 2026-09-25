@@ -1,7 +1,14 @@
-"""Customer analytical lookup -- Wave 1 Customer domain, Phase A (see the
-"Customer Lookup Design" doc). Resolves a customer by name/phone/email and
-returns an analytical profile: order history, lifecycle category, next-
-basket prediction -- never raw phone/email.
+"""Customer analytical lookup -- Wave 1 Customer domain, Phase A + Phase B
+measurement layer (see the "Customer Lookup Design" doc). Resolves a
+customer by name/phone/email and returns an analytical profile: order
+history, lifecycle category, next-basket prediction, and raw deterioration
+signals -- never raw phone/email.
+
+Phase B here is measurement only: recent-vs-prior order/revenue/AOV,
+calendar recency, cadence deviation. No "deteriorating customer" verdict,
+threshold, or automatic case -- see _deterioration()'s docstring. What
+counts as material deterioration is a decision for real-data calibration,
+not something this module decides.
 
 This is the ONLY place Ask Celeste's customer tool reads from, never
 customer_predictions.search_customers directly -- so masking can't be
@@ -26,11 +33,13 @@ from datetime import datetime
 
 from backend.app.db import appdb, reporting
 from backend.app.services.customer_predictions import (
+    DETERIORATION_WINDOW_DAYS_DEFAULT,
     LIFECYCLE_SQL,
     RECENT_WINDOW_GAPS,
     VALUE_PERCENTILE_SQL,
     _lifecycle_category,
     _value_tier,
+    get_deterioration_window,
     get_predicted_next_basket,
     search_customers,
 )
@@ -83,6 +92,63 @@ def _log_access(partner_id: int, access_type: str, sensitivity: str) -> None:
     )
 
 
+def _deterioration(partner_id: int, lifecycle_row: dict | None, window_days: int = DETERIORATION_WINDOW_DAYS_DEFAULT) -> dict | None:
+    """Wave 1 Customer Phase B, measurement layer only: recent-vs-prior
+    order count/revenue/AOV, calendar recency, and cadence deviation --
+    no blended score, no "deteriorating" verdict. Cadence deviation reuses
+    LIFECYCLE_SQL's own last_gap/prior_avg_gap (already fetched for this
+    customer) rather than a second copy of that math; recent/prior
+    order+revenue come from the day-window DETERIORATION_SQL, a genuinely
+    different comparison LIFECYCLE_SQL doesn't make (order-count windows,
+    not day windows)."""
+    rows = get_deterioration_window(partner_id, window_days)
+    if not rows:
+        return None
+    d = rows[0]
+    recent_orders = int(d["recent_orders"] or 0)
+    prior_orders = int(d["prior_orders"] or 0)
+    recent_revenue = float(d["recent_revenue"] or 0)
+    prior_revenue = float(d["prior_revenue"] or 0)
+    as_of_date = d["as_of_date"]
+
+    last_order = lifecycle_row["last_order"] if lifecycle_row else None
+    days_since_last = (
+        round((as_of_date - last_order).total_seconds() / 86400.0) if last_order and as_of_date else None
+    )
+    prior_avg_gap = (
+        float(lifecycle_row["prior_avg_gap"])
+        if lifecycle_row and lifecycle_row["prior_avg_gap"] is not None
+        else None
+    )
+    cadence_ratio = (
+        round(days_since_last / prior_avg_gap, 1)
+        if days_since_last is not None and prior_avg_gap and prior_avg_gap > 0
+        else None
+    )
+
+    return {
+        "window_days": window_days,
+        "as_of": as_of_date.date().isoformat() if as_of_date else None,
+        "recent": {
+            "orders": recent_orders,
+            "revenue": round(recent_revenue, 2),
+            "avg_order_value": round(recent_revenue / recent_orders, 2) if recent_orders else None,
+        },
+        "prior": {
+            "orders": prior_orders,
+            "revenue": round(prior_revenue, 2),
+            "avg_order_value": round(prior_revenue / prior_orders, 2) if prior_orders else None,
+        },
+        "days_since_last_order": days_since_last,
+        "historical_reorder_interval_days": round(prior_avg_gap, 1) if prior_avg_gap else None,
+        # >1 = slower than this customer's own normal cadence; <1 = faster.
+        # Deliberately not labeled "risk" or "score" -- a plain ratio the
+        # reader interprets themselves, same posture as every other raw
+        # figure in this module.
+        "cadence_ratio": cadence_ratio,
+    }
+
+
 def _customer_profile(partner_id: int, name: str, phone: str | None, order_count: int) -> tuple[dict, str | None]:
     rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS, "partner_id": partner_id})
     row = rows[0] if rows else None
@@ -119,7 +185,7 @@ def _customer_profile(partner_id: int, name: str, phone: str | None, order_count
         "lifecycle_category": lifecycle_category,
         "value_tier": value_tier,
         "next_basket": get_predicted_next_basket(partner_id),
-        "deterioration": None,  # Phase B, not built yet
+        "deterioration": _deterioration(partner_id, row),
     }
     return profile, (as_of_date.date().isoformat() if as_of_date else None)
 

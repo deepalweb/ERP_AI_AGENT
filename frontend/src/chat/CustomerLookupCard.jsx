@@ -80,6 +80,40 @@ export default function CustomerLookupCard({ result }) {
         </div>
       </div>
 
+      {c.deterioration && (
+        <div className="chart-card">
+          <div className="chart-card-title">Recent vs. prior activity ({c.deterioration.window_days}d windows)</div>
+          <table className="anomalies-table">
+            <thead>
+              <tr><th></th><th>Orders</th><th>Revenue</th><th>Avg order value</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Recent {c.deterioration.window_days}d</td>
+                <td>{formatNumber(c.deterioration.recent.orders)}</td>
+                <td>{formatCurrency(c.deterioration.recent.revenue)}</td>
+                <td>{c.deterioration.recent.avg_order_value != null ? formatCurrency(c.deterioration.recent.avg_order_value) : "—"}</td>
+              </tr>
+              <tr>
+                <td>Prior {c.deterioration.window_days}d</td>
+                <td>{formatNumber(c.deterioration.prior.orders)}</td>
+                <td>{formatCurrency(c.deterioration.prior.revenue)}</td>
+                <td>{c.deterioration.prior.avg_order_value != null ? formatCurrency(c.deterioration.prior.avg_order_value) : "—"}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div className="tool-card-notice">
+            {c.deterioration.days_since_last_order != null
+              ? `Last order ${c.deterioration.days_since_last_order}d ago`
+              : "No last-order date available"}
+            {c.deterioration.historical_reorder_interval_days != null &&
+              ` — historically orders about every ${c.deterioration.historical_reorder_interval_days}d`}
+            {c.deterioration.cadence_ratio != null && ` (${c.deterioration.cadence_ratio}× normal cadence)`}
+            . Raw comparison only — not a churn score or a flagged risk.
+          </div>
+        </div>
+      )}
+
       {overdue.length > 0 && (
         <div className="chart-card">
           <div className="chart-card-title">Due for reorder</div>

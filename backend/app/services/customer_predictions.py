@@ -772,6 +772,54 @@ VALUE_PERCENTILE_SQL = customer_order_query(f"""
     ) x
 """)
 
+DETERIORATION_WINDOW_DAYS_DEFAULT = 60
+
+# Customer deterioration, measurement layer only -- Wave 1 Customer Phase B,
+# first pass. Deliberately raw: two equal-length day windows (recent vs
+# prior) ending at the live as_of_date, order count and revenue in each,
+# nothing blended into a score and no "deteriorating" threshold applied
+# here -- that's a separate, later decision once real distributions are
+# inspected. as_of_date is computed from the WHOLE scoped population
+# before the optional partner_id filter narrows the rows, same discipline
+# LIFECYCLE_SQL already uses, so a single-customer call and a population
+# scan always agree on "data through" for the same run.
+DETERIORATION_SQL = customer_order_query(f"""
+    WITH ordered AS (
+        SELECT so.partner_id, so.date_order, so.amount_total
+        FROM customer_orders so
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES}
+    ),
+    bounds AS (SELECT MAX(date_order) AS as_of_date FROM ordered),
+    aged AS (
+        SELECT o.partner_id, o.amount_total,
+               EXTRACT(EPOCH FROM (b.as_of_date - o.date_order)) / 86400.0 AS days_ago
+        FROM ordered o CROSS JOIN bounds b
+    ),
+    windowed AS (
+        SELECT partner_id,
+               COUNT(*) FILTER (WHERE days_ago <= :window_days) AS recent_orders,
+               COALESCE(SUM(amount_total) FILTER (WHERE days_ago <= :window_days), 0) AS recent_revenue,
+               COUNT(*) FILTER (WHERE days_ago > :window_days AND days_ago <= 2 * :window_days) AS prior_orders,
+               COALESCE(SUM(amount_total) FILTER (WHERE days_ago > :window_days AND days_ago <= 2 * :window_days), 0) AS prior_revenue
+        FROM aged
+        GROUP BY partner_id
+    )
+    SELECT w.*, b.as_of_date
+    FROM windowed w
+    CROSS JOIN bounds b
+    WHERE (CAST(:partner_id AS integer) IS NULL OR w.partner_id = :partner_id)
+""")
+
+
+def get_deterioration_window(partner_id: int | None, window_days: int = DETERIORATION_WINDOW_DAYS_DEFAULT) -> list[dict]:
+    """One row per customer (or one row, for a single partner_id): recent
+    vs. prior order count/revenue over two window_days-long windows. Pass
+    partner_id=None to scan the whole scoped population -- e.g. to inspect
+    the real distribution of these signals before deciding what "material
+    deterioration" should mean, which is a separate, later decision this
+    function deliberately does not make."""
+    return reporting.run_query(DETERIORATION_SQL, {"window_days": window_days, "partner_id": partner_id})
+
 
 def _lifecycle_category(row: dict, as_of_date) -> str:
     order_count = row["order_count"]

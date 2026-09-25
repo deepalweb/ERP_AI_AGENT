@@ -55,6 +55,7 @@ def test_get_customer_lookup_never_leaks_raw_phone_or_email_in_single_match(monk
     monkeypatch.setattr(cl, "search_customers", lambda **kw: [_match(partner_id=7)])
     monkeypatch.setattr(cl.reporting, "run_query", lambda sql, params=None: [])
     monkeypatch.setattr(cl, "get_predicted_next_basket", lambda partner_id: None)
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
     logged = []
     monkeypatch.setattr(cl.appdb, "run_query", lambda sql, params=None: logged.append((sql, params)))
 
@@ -81,6 +82,7 @@ def test_get_customer_lookup_builds_profile_from_lifecycle_row(monkeypatch):
     ))
     monkeypatch.setattr(cl, "_lifecycle_category", lambda row, as_of_date: "active")
     monkeypatch.setattr(cl, "get_predicted_next_basket", lambda partner_id: {"as_of_date": "2026-09-19", "partner_id": partner_id, "products": [], "total_repeat_products": 0})
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
     monkeypatch.setattr(cl.appdb, "run_query", lambda sql, params=None: None)
 
     result = cl.get_customer_lookup(name="Ann")
@@ -94,7 +96,7 @@ def test_get_customer_lookup_builds_profile_from_lifecycle_row(monkeypatch):
     assert customer["order_count"] == 9
     assert customer["value_tier"] == "high"  # 45,000 >= p80 of 40,000
     assert customer["next_basket"]["total_repeat_products"] == 0
-    assert customer["deterioration"] is None
+    assert customer["deterioration"] is None  # get_deterioration_window returned no rows
 
 
 def test_value_tier_is_classified_against_the_whole_population_not_this_customer(monkeypatch):
@@ -110,6 +112,7 @@ def test_value_tier_is_classified_against_the_whole_population_not_this_customer
     ))
     monkeypatch.setattr(cl, "_lifecycle_category", lambda row, as_of_date: "active")
     monkeypatch.setattr(cl, "get_predicted_next_basket", lambda partner_id: None)
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
     monkeypatch.setattr(cl.appdb, "run_query", lambda sql, params=None: None)
 
     result = cl.get_customer_lookup(name="Ann")
@@ -121,6 +124,7 @@ def test_get_customer_lookup_handles_no_lifecycle_row_gracefully(monkeypatch):
     monkeypatch.setattr(cl, "search_customers", lambda **kw: [_match(partner_id=4)])
     monkeypatch.setattr(cl.reporting, "run_query", lambda sql, params=None: [])
     monkeypatch.setattr(cl, "get_predicted_next_basket", lambda partner_id: None)
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [{"recent_orders": 0, "recent_revenue": 0, "prior_orders": 0, "prior_revenue": 0, "as_of_date": None}])
     monkeypatch.setattr(cl.appdb, "run_query", lambda sql, params=None: None)
 
     result = cl.get_customer_lookup(name="Ann")
@@ -129,12 +133,17 @@ def test_get_customer_lookup_handles_no_lifecycle_row_gracefully(monkeypatch):
     assert result["as_of"] is None
     assert result["customer"]["lifecycle_category"] is None
     assert result["customer"]["lifetime_revenue"] is None
+    # No lifecycle row means no last_order/prior_avg_gap -- cadence context
+    # is honestly None, but the recent/prior order counts still come through.
+    assert result["customer"]["deterioration"]["days_since_last_order"] is None
+    assert result["customer"]["deterioration"]["cadence_ratio"] is None
 
 
 def test_single_match_logs_access_as_masked_not_named_identity(monkeypatch):
     monkeypatch.setattr(cl, "search_customers", lambda **kw: [_match(partner_id=11)])
     monkeypatch.setattr(cl.reporting, "run_query", lambda sql, params=None: [])
     monkeypatch.setattr(cl, "get_predicted_next_basket", lambda partner_id: None)
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
     monkeypatch.setenv("APP_AUTH_MODE", "basic")
     calls = []
     monkeypatch.setattr(cl.appdb, "run_query", lambda sql, params=None: calls.append((sql, params)))
@@ -148,6 +157,46 @@ def test_single_match_logs_access_as_masked_not_named_identity(monkeypatch):
     assert params["access_type"] == "analytical_lookup"
     assert params["sensitivity"] == "masked"
     assert params["auth_context"] == "basic"  # deployment auth mode -- not a named user, see docstring
+
+
+def test_deterioration_matches_the_recent_vs_prior_shape(monkeypatch):
+    """Wave 1 Customer Phase B, measurement layer: reproduces the example
+    from the design conversation almost exactly -- 2 recent orders vs 6
+    prior, a 34-day-old last order against an 11-day historical interval
+    (34 / 11 = 3.09 -> 3.1x)."""
+    import datetime
+
+    as_of = datetime.datetime(2026, 9, 20)
+    last_order = as_of - datetime.timedelta(days=34)
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [
+        {"recent_orders": 2, "recent_revenue": 5_000.0, "prior_orders": 6, "prior_revenue": 18_000.0, "as_of_date": as_of}
+    ])
+    lifecycle_row = {"last_order": last_order, "prior_avg_gap": 11.0}
+
+    result = cl._deterioration(partner_id=42, lifecycle_row=lifecycle_row, window_days=60)
+
+    assert result["window_days"] == 60
+    assert result["as_of"] == "2026-09-20"
+    assert result["recent"] == {"orders": 2, "revenue": 5000.0, "avg_order_value": 2500.0}
+    assert result["prior"] == {"orders": 6, "revenue": 18000.0, "avg_order_value": 3000.0}
+    assert result["days_since_last_order"] == 34
+    assert result["historical_reorder_interval_days"] == 11.0
+    assert result["cadence_ratio"] == 3.1
+
+
+def test_deterioration_handles_zero_prior_orders_without_a_division_error(monkeypatch):
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [
+        {"recent_orders": 1, "recent_revenue": 500.0, "prior_orders": 0, "prior_revenue": 0.0, "as_of_date": None}
+    ])
+    result = cl._deterioration(partner_id=1, lifecycle_row=None, window_days=60)
+    assert result["prior"] == {"orders": 0, "revenue": 0.0, "avg_order_value": None}
+    assert result["cadence_ratio"] is None
+    assert result["historical_reorder_interval_days"] is None
+
+
+def test_deterioration_returns_none_for_a_partner_with_no_orders_at_all(monkeypatch):
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
+    assert cl._deterioration(partner_id=999, lifecycle_row=None) is None
 
 
 def test_multiple_matches_does_not_log_access(monkeypatch):
