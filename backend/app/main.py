@@ -23,6 +23,7 @@ from .services import (
     case_engine,
     channels,
     concentration,
+    customer_lookup,
     customer_predictions,
     customers,
     dashboard,
@@ -477,10 +478,30 @@ async def customer_search(name: str | None = None, phone: str | None = None, ema
     """Find customers by any combination of name/phone/email — see
     backend/app/services/customer_predictions.py search_customers(). Email
     matches almost never find anything (17 of 84,896 customers have one on
-    file) but is still accepted for whoever tries it."""
+    file) but is still accepted for whoever tries it.
+
+    Privacy correction: this used to return raw phone/email straight from
+    search_customers() -- the same PII exposure the Customer Lookup Design
+    doc's masking discipline was built to close on the Ask Celeste side.
+    This route only ever needs to help a manager recognize the right
+    person in a short result list (there's no click-to-call, no copy
+    action, no other use of the raw number anywhere in CustomerPredictions.
+    jsx) -- masked phone is enough for that, same _mask_phone() Ask Celeste
+    uses, so the two surfaces can't drift onto two different masking
+    rules. Raw contact detail stays deferred everywhere in this app until
+    there's a real per-manager account to gate it behind."""
     try:
         results = await anyio.to_thread.run_sync(customer_predictions.search_customers, name, phone, email)
-        return {"status": "ok", "results": results}
+        masked = [
+            {
+                "partner_id": r["partner_id"],
+                "name": r["name"],
+                "phone_masked": customer_lookup._mask_phone(r["phone"]),
+                "order_count": r["order_count"],
+            }
+            for r in results
+        ]
+        return {"status": "ok", "results": masked}
     except Exception:
         logger.exception("customer search failed")
         return {"status": "error", "detail": "Could not search customers."}

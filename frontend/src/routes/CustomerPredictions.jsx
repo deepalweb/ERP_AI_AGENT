@@ -265,7 +265,7 @@ function CustomerLookupSection() {
                 >
                   <span className="font-medium text-foreground-strong">{r.name}</span>
                   <span className="ml-2 text-foreground/50">
-                    {r.phone ?? "no phone"} &middot; {formatNumber(r.order_count)} orders
+                    {r.phone_masked ?? "no phone"} &middot; {formatNumber(r.order_count)} orders
                   </span>
                 </button>
               </li>
@@ -280,7 +280,7 @@ function CustomerLookupSection() {
             <div>
               <div className="font-medium text-foreground-strong">{selected.name}</div>
               <div className="text-xs text-foreground/50">
-                {selected.phone ?? "no phone"} &middot; {formatNumber(selected.order_count)} lifetime orders
+                {selected.phone_masked ?? "no phone"} &middot; {formatNumber(selected.order_count)} lifetime orders
               </div>
             </div>
             {results.length > 1 && (
@@ -696,7 +696,10 @@ function ChannelTile({ channel }) {
 function CustomerLifecycleSection({ lifecycle }) {
   if (!lifecycle) return null;
   return (
-    <Section title="Customer lifecycle" note={`${formatNumber(lifecycle.total_customers)} customers`}>
+    <Section
+      title="Customer lifecycle"
+      note={`${formatNumber(lifecycle.total_customers)} customers · data through ${formatDate(lifecycle.as_of_date)}`}
+    >
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {lifecycle.categories.map((c) => (
           <LifecycleTile key={c.id} category={c} />
