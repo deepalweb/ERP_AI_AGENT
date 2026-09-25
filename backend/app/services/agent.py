@@ -13,6 +13,7 @@ from . import (
     brand_mix,
     channels,
     concentration,
+    customer_lookup,
     customers,
     dashboard,
     forecast,
@@ -352,6 +353,33 @@ TOOLS = [
                 "customer retention trend."
             ),
             "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_customer_lookup",
+            "description": (
+                "Look up one or more customers by name, phone, or email and get an "
+                "analytical profile: lifecycle category, value tier (high/mid/low, based "
+                "on company-wide revenue percentiles), order count, lifetime revenue, "
+                "last order date, and next-basket prediction. Phone/email are always "
+                "masked or omitted in the response — this tool never returns raw contact "
+                "detail, by design, so never claim or imply you have a customer's full "
+                "phone number or email. If status is 'multiple', list the returned "
+                "matches (name + masked phone) and ask which one the user meant. If "
+                "'not_found', say so plainly. Use for 'show me customer X', 'is customer "
+                "X still ordering', or similar single-customer questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Customer name (partial match)."},
+                    "phone": {"type": "string", "description": "Customer phone number, any format."},
+                    "email": {"type": "string", "description": "Customer email address."},
+                },
+                "required": [],
+            },
         },
     },
     {
@@ -807,6 +835,7 @@ TOOL_FUNCTIONS = {
     "list_metrics": lambda: intelligence.list_metrics(),
     "investigate_metric": lambda metric_id: intelligence.investigate(metric_id),
     "get_customer_intelligence": customers.get_customer_intelligence,
+    "get_customer_lookup": customer_lookup.get_customer_lookup,
     "get_inventory_depth": inventory.get_inventory_depth,
     "get_operations_summary": operations.get_fulfillment_summary,
     "get_top_products": dashboard.get_top_products,

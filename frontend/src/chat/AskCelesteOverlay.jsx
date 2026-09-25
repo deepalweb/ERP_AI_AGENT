@@ -27,6 +27,7 @@ import LossAndDamageCard from "./LossAndDamageCard";
 import LoyaltyPromotionsCard from "./LoyaltyPromotionsCard";
 import StockCountVarianceCard from "./StockCountVarianceCard";
 import DataControlsCard from "./DataControlsCard";
+import CustomerLookupCard from "./CustomerLookupCard";
 
 /** Ported from git history's pre-rebuild App.jsx (not a new design) — was
  * never a separate file since it's small. Kept on the same .tool-card
@@ -126,6 +127,8 @@ function ToolCalls({ toolCalls }) {
             return <StockCountVarianceCard key={i} result={call.result} />;
           case "get_data_controls":
             return <DataControlsCard key={i} result={call.result} />;
+          case "get_customer_lookup":
+            return <CustomerLookupCard key={i} result={call.result} />;
           default:
             return null;
         }

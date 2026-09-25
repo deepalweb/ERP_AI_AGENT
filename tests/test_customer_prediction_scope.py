@@ -65,11 +65,21 @@ def test_lifecycle_and_pattern_stats_use_the_same_scoped_history(query):
         "bucket": "three_to_nine",
         "n": 1,
     }
-    lifecycle = query(cp.LIFECYCLE_SQL, params)
+    lifecycle = query(cp.LIFECYCLE_SQL, {**params, "partner_id": None})
     assert len(lifecycle) == 1
     assert lifecycle[0]["order_count"] == 3
     assert lifecycle[0]["last_order"].date() == date(2026, 1, 8)
     assert query(cp.VALUE_PERCENTILE_SQL)[0]["p80"] == 300
+
+    # Customer Lookup, Phase A: filtering to one partner_id must not change
+    # as_of_date (still computed from the whole scoped population, not just
+    # the filtered customer) -- a single-customer lookup and the company-wide
+    # Customers page must report the same "data through" date.
+    one = query(cp.LIFECYCLE_SQL, {**params, "partner_id": 10})
+    assert len(one) == 1
+    assert one[0]["order_count"] == 3
+    assert one[0]["as_of_date"] == lifecycle[0]["as_of_date"]
+    assert query(cp.LIFECYCLE_SQL, {**params, "partner_id": 999999}) == []
 
 
 def test_live_scoped_snapshot_roundtrip_uses_only_isolated_appdb(appdb_reset, monkeypatch):

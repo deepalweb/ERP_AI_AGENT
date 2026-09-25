@@ -754,6 +754,13 @@ LIFECYCLE_SQL = customer_order_query(f"""
     FROM orders o
     LEFT JOIN gap_stats g ON g.partner_id = o.partner_id
     CROSS JOIN bounds b
+    -- Filtered here, after bounds is computed from the whole population --
+    -- never inside the orders CTE, or a single-customer call would silently
+    -- recompute as_of_date from just that one customer's last order instead
+    -- of the real company-wide "data through" date. NULL (the default)
+    -- returns every customer, unchanged from before this filter existed --
+    -- so compute_lifecycle_summary()'s own call needs no behavior change.
+    WHERE (CAST(:partner_id AS integer) IS NULL OR o.partner_id = :partner_id)
 """)
 
 VALUE_PERCENTILE_SQL = customer_order_query(f"""
@@ -810,6 +817,16 @@ def _primary_channel(row: dict) -> str:
     return max(counts, key=counts.get)
 
 
+def _value_tier(revenue: float, p80: float, p50: float) -> str:
+    """p80/p50 must come from VALUE_PERCENTILE_SQL run over the WHOLE
+    customer population -- classifying a single customer against their own
+    revenue as both the value and the threshold is meaningless. Shared here
+    so compute_lifecycle_summary() and a single-customer lookup can never
+    drift onto two different definitions of "high value" (same reasoning
+    as _lifecycle_category being shared, not reimplemented, per caller)."""
+    return "high" if revenue >= p80 else "mid" if revenue >= p50 else "low"
+
+
 def compute_lifecycle_summary() -> dict | None:
     """One pass over every customer's order history (~3s for ~84,900
     customers), classifying each into exactly one of the 8
@@ -823,7 +840,7 @@ def compute_lifecycle_summary() -> dict | None:
     nothing on the page drills into individual customers by lifecycle
     stage yet; that's a well-scoped follow-up if it turns out to be
     wanted, not something to build speculatively now."""
-    rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS})
+    rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS, "partner_id": None})
     if not rows:
         return None
 
@@ -844,7 +861,7 @@ def compute_lifecycle_summary() -> dict | None:
     for row in rows:
         category = _lifecycle_category(row, as_of_date)
         revenue = float(row["revenue"] or 0)
-        value_tier = "high" if revenue >= p80 else "mid" if revenue >= p50 else "low"
+        value_tier = _value_tier(revenue, p80, p50)
         channel = _primary_channel(row)
 
         cat_counts[category] += 1
