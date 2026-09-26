@@ -1,3 +1,5 @@
+import { formatDate, prettifyMetricId } from "../format";
+
 /** Outcome vocabulary for a case's declared objective/target -- distinct
  * from CASE_STATUS_META (design/caseStatus.js), which answers "is this
  * case still open." This answers "did the thing we were trying to achieve
@@ -46,3 +48,29 @@ export const OUTCOME_STATUS_META = {
   blocked: { label: "Overdue -- needs follow-up", tone: "warning" },
   inconclusive: { label: "Inconclusive -- evidence never arrived", tone: "warning" },
 };
+
+// Frontend Intelligence Integration, Phase 11: the badges above are the
+// same three words for every action in that state -- this adds the ONE
+// real, per-action fact that explains why, from fields already recorded
+// on the action (never fabricated: no session counts or reporting-period
+// completeness numbers invented here, only what target_measurement_period/
+// deadline/outcome_checked_at actually say). Returns null when there's
+// truly nothing more specific to add than the badge already says.
+export function outcomeReasonText(action) {
+  if (action.outcome_status === "pending") {
+    return action.target_measurement_period
+      ? `Checked against the ${prettifyMetricId(action.target_measurement_period)} reporting period, once it completes.`
+      : null;
+  }
+  if (action.outcome_status === "blocked") {
+    return action.deadline
+      ? `Past its ${formatDate(action.deadline)} deadline with no recorded observation yet.`
+      : null;
+  }
+  if (action.outcome_status === "inconclusive") {
+    return action.outcome_checked_at
+      ? `Last checked ${formatDate(action.outcome_checked_at.slice(0, 10))} -- the required evidence never arrived by then.`
+      : null;
+  }
+  return null;
+}

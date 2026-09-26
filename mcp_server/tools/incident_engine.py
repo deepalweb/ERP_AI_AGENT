@@ -438,6 +438,15 @@ def build_incident_findings() -> list[dict]:
             "recommendations": recommendations,
             "status": "completed",
             "incident_score": score,
+            # Frontend Intelligence Integration: store/product/hour and
+            # persistence were only ever baked into title/impact.detail's
+            # prose and _persistence_check's own detail text -- a panel
+            # shouldn't have to parse a sentence to get the store name or
+            # how many days this has recurred.
+            "store": store_name,
+            "product": c["product_name"],
+            "hour": f"{hr:02d}:00",
+            "persistence": {"days_appeared": days_appeared, "days_observed": days_observed},
         })
 
     return findings

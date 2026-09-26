@@ -15,13 +15,16 @@ def _lifecycle_row(as_of_date, revenue=1000.0, last_order=None):
     return {"revenue": revenue, "last_order": last_order, "as_of_date": as_of_date}
 
 
-def _fake_run_query(lifecycle_rows, percentile_rows):
+def _fake_run_query(lifecycle_rows, percentile_rows, identity_rows=None):
     """Dispatches on a distinguishing keyword, same pattern as
-    test_data_controls.py's _fake_run_query -- LIFECYCLE_SQL and
-    VALUE_PERCENTILE_SQL each issue their own query."""
+    test_data_controls.py's _fake_run_query -- LIFECYCLE_SQL,
+    VALUE_PERCENTILE_SQL, and PARTNER_IDENTITY_SQL each issue their own
+    query."""
     def run_query(sql, params=None):
         if "PERCENTILE_CONT" in sql:
             return percentile_rows
+        if "res_partner" in sql and "WHERE rp.id" in sql:
+            return identity_rows or []
         return lifecycle_rows
     return run_query
 
@@ -197,6 +200,43 @@ def test_deterioration_handles_zero_prior_orders_without_a_division_error(monkey
 def test_deterioration_returns_none_for_a_partner_with_no_orders_at_all(monkeypatch):
     monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
     assert cl._deterioration(partner_id=999, lifecycle_row=None) is None
+
+
+def test_get_customer_profile_builds_the_same_analytical_shape_from_a_known_partner_id(monkeypatch):
+    """The Customers page's detail view -- a caller who already has a
+    partner_id (from a prior search) shouldn't need to search by name/
+    phone/email again."""
+    import datetime
+
+    as_of = datetime.datetime(2026, 9, 20)
+    identity_rows = [{"name": "Ann Silva", "phone": "+94 77 300 0003", "order_count": 9}]
+    monkeypatch.setattr(cl.reporting, "run_query", _fake_run_query(
+        [_lifecycle_row(as_of, revenue=45_000.0)],
+        [{"p80": 40_000.0, "p50": 10_000.0}],
+        identity_rows,
+    ))
+    monkeypatch.setattr(cl, "_lifecycle_category", lambda row, as_of_date: "active")
+    monkeypatch.setattr(cl, "get_predicted_next_basket", lambda partner_id: None)
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
+    logged = []
+    monkeypatch.setattr(cl.appdb, "run_query", lambda sql, params=None: logged.append((sql, params)))
+
+    result = cl.get_customer_profile(17008)
+
+    assert result["customer"]["partner_id"] == 17008
+    assert result["customer"]["name"] == "Ann Silva"
+    assert result["customer"]["phone_masked"] == "•••• 0003"
+    assert result["customer"]["order_count"] == 9
+    assert result["customer"]["value_tier"] == "high"
+    blob = str(result)
+    assert "+94 77 300 0003" not in blob
+    insert_calls = [c for c in logged if "INSERT INTO customer_access_log" in c[0]]
+    assert len(insert_calls) == 1  # single-customer detail path logs, same as get_customer_lookup
+
+
+def test_get_customer_profile_returns_none_for_an_unknown_partner_id(monkeypatch):
+    monkeypatch.setattr(cl.reporting, "run_query", lambda sql, params=None: [])
+    assert cl.get_customer_profile(999999) is None
 
 
 def test_multiple_matches_does_not_log_access(monkeypatch):

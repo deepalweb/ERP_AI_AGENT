@@ -3,6 +3,7 @@
 No scans, model calls, new tables, inferred associations, or lifecycle rules.
 Counts cover the database; filters run before pagination, never over a case cap.
 """
+import json
 from datetime import date
 
 from backend.app.db import appdb
@@ -14,7 +15,7 @@ def _ready():
     finding_actions._ensure_schema()
 
 
-def list_actions(status=None, outcome_status=None, relevant=None, limit=20, offset=0):
+def list_actions(status=None, outcome_status=None, relevant=None, domain=None, owner=None, limit=20, offset=0):
     _ready()
     where, params = [], {}
     if status == "outstanding":
@@ -28,20 +29,45 @@ def list_actions(status=None, outcome_status=None, relevant=None, limit=20, offs
     if relevant is not None:
         where.append("a.relevant=:relevant")
         params["relevant"] = int(relevant)
+    if domain:
+        # LEFT JOIN means an action with no linked case naturally can't
+        # match a domain filter -- correct, there's nothing to filter by.
+        where.append("c.domain=:domain")
+        params["domain"] = domain
+    if owner:
+        # Partial, case-insensitive (SQLite's default LIKE behavior for
+        # ASCII) -- owner is free text a manager typed when recording the
+        # action, so an exact match would silently return nothing for
+        # anything but a perfect retype.
+        where.append("a.owner LIKE :owner")
+        params["owner"] = f"%{owner}%"
     clause = "WHERE " + " AND ".join(where) if where else ""
     limit, offset = max(1, min(limit, 200)), max(0, offset)
-    total = appdb.run_query(f"SELECT COUNT(*) AS n FROM finding_actions a {clause}", params)[0]["n"]
+    # Frontend Intelligence Integration: domain/owner filter against the
+    # same joined shape the SELECT below uses, so COUNT(*) and the page
+    # agree on what "matches" means -- has to join here too, not just
+    # filter on finding_actions alone.
+    join = """FROM finding_actions a LEFT JOIN business_cases c ON c.case_id=COALESCE(
+                a.case_id, (SELECT o.case_id FROM case_observations o
+                            WHERE o.finding_id=a.finding_id
+                            ORDER BY o.observed_at DESC, o.id DESC LIMIT 1))"""
+    total = appdb.run_query(f"SELECT COUNT(*) AS n {join} {clause}", params)[0]["n"]
     rows = appdb.run_query(
         f"""SELECT a.*, c.case_id AS linked_case_id, c.metric_id AS case_metric_id,
                    c.status AS case_status, c.resolution_verdict AS case_resolution_verdict,
-                   c.domain AS case_domain, c.horizon AS case_horizon
-            FROM finding_actions a LEFT JOIN business_cases c ON c.case_id=COALESCE(
-                a.case_id, (SELECT o.case_id FROM case_observations o
-                            WHERE o.finding_id=a.finding_id
-                            ORDER BY o.observed_at DESC, o.id DESC LIMIT 1))
+                   c.domain AS case_domain, c.horizon AS case_horizon, c.priority AS case_priority
+            {join}
             {clause} ORDER BY a.updated_at DESC, a.finding_id ASC LIMIT :limit OFFSET :offset""",
         {**params, "limit": limit, "offset": offset},
     )
+    # Frontend Intelligence Integration: "Review session" told a manager
+    # nothing about WHY -- the case's own title (from its latest finding
+    # snapshot, e.g. "8 stock counts started but never finished") is the
+    # actual business reason, not stored on business_cases itself so it's
+    # batch-fetched the same way list_cases() already does, never a
+    # per-row query.
+    case_ids = [row["linked_case_id"] for row in rows if row["linked_case_id"]]
+    latest_by_case = case_engine._latest_observations_for(case_ids)
     items = []
     for row in rows:
         action = finding_actions._action_row_to_dict(row, include_finding_id=True)
@@ -55,10 +81,16 @@ def list_actions(status=None, outcome_status=None, relevant=None, limit=20, offs
                 action["deadline_note"] = "Saved due date is earlier than the record's update year; review this date."
         except (ValueError, TypeError):
             pass
+        case_title = None
+        if row["linked_case_id"]:
+            latest_row = latest_by_case.get(row["linked_case_id"])
+            if latest_row:
+                case_title = json.loads(latest_row["snapshot"]).get("title")
         action["case"] = {
             "case_id": row["linked_case_id"], "metric_id": row["case_metric_id"],
             "status": row["case_status"], "resolution_verdict": row["case_resolution_verdict"],
-            "domain": row["case_domain"], "horizon": row["case_horizon"],
+            "domain": row["case_domain"], "horizon": row["case_horizon"], "priority": row["case_priority"],
+            "title": case_title,
         } if row["linked_case_id"] else None
         items.append(action)
     return {"items": items, "total": total, "limit": limit, "offset": offset}

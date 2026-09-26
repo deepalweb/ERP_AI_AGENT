@@ -1278,6 +1278,17 @@ def _summarize_snapshot(snapshot: dict) -> dict:
     section, found missing during the Phase 2e post-acceptance browser
     test (a brand-new case had no way to record any action at all, since
     the page only ever rendered an ActionTracker per EXISTING row)."""
+    # Frontend Intelligence Integration, Phase 10: the case list needs a
+    # "where" answer (e.g. "Ethul Kotte -- 28 affected products") without
+    # opening the case -- the top entry of the primary breakdown already
+    # carries exactly that, just never surfaced past this summarizer
+    # before. Not every finding has one (a plain trend metric with no
+    # breakdown), so this is None rather than a fabricated placeholder.
+    breakdowns = snapshot.get("breakdowns") or []
+    top_contributor = None
+    if breakdowns and breakdowns[0].get("top_contributors"):
+        c = breakdowns[0]["top_contributors"][0]
+        top_contributor = {"dimension": breakdowns[0].get("dimension"), "name": c.get("name"), "value": c.get("current")}
     return {
         "title": snapshot.get("title"),
         "category": snapshot.get("category"),
@@ -1289,10 +1300,32 @@ def _summarize_snapshot(snapshot: dict) -> dict:
         "horizon": snapshot.get("horizon"),
         "streak": snapshot.get("streak"),
         "finding_id": snapshot.get("id"),
+        "top_contributor": top_contributor,
     }
 
 
+# Frontend Intelligence Integration, Phase 10: whitelisted sort clauses,
+# never a raw user-supplied ORDER BY string. "priority" ranks by the same
+# critical>high>medium>low severity order Badge/toneForPriority already
+# use elsewhere -- a CASE WHEN, not alphabetical (which would put
+# "critical" after "high"). case_id is always the final tiebreaker so
+# pagination stays stable when two cases tie on the primary key.
+SORT_CLAUSES = {
+    "recent_change": "last_seen_at DESC, case_id ASC",
+    "newest": "opened_at DESC, case_id ASC",
+    "oldest_unresolved": "opened_at ASC, case_id ASC",
+    # (x IS NULL) ASC puts NULLs last, portable to SQLite (appdb's engine)
+    # without relying on NULLS LAST, which older SQLite builds don't support.
+    "impact": "(business_impact_score IS NULL) ASC, business_impact_score DESC, case_id ASC",
+    "priority": (
+        "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 "
+        "WHEN 'low' THEN 3 ELSE 4 END ASC, case_id ASC"
+    ),
+}
+
+
 def list_cases(status: str | None = None, metric_id: str | None = None, domain: str | None = None,
+                priority: str | None = None, sort: str | None = None,
                 limit: int = 50, offset: int = 0) -> dict:
     _ensure_schema()
     limit = max(1, min(limit, 200))
@@ -1307,15 +1340,16 @@ def list_cases(status: str | None = None, metric_id: str | None = None, domain: 
     if domain:
         where.append("domain = :domain")
         params["domain"] = domain
+    if priority:
+        where.append("priority = :priority")
+        params["priority"] = priority
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    order_sql = SORT_CLAUSES.get(sort, SORT_CLAUSES["recent_change"])
 
     total_rows = appdb.run_query(f"SELECT COUNT(*) AS n FROM business_cases {where_sql}", params)
     total = total_rows[0]["n"] if total_rows else 0
-    # last_seen_at DESC alone isn't a stable order across pages when two
-    # cases share a timestamp (same scan cycle) -- case_id as a tiebreaker
-    # makes page N+1 never re-show or skip a row page N already returned.
     items = appdb.run_query(
-        f"SELECT * FROM business_cases {where_sql} ORDER BY last_seen_at DESC, case_id ASC LIMIT :limit OFFSET :offset",
+        f"SELECT * FROM business_cases {where_sql} ORDER BY {order_sql} LIMIT :limit OFFSET :offset",
         {**params, "limit": limit, "offset": offset},
     )
 
@@ -1397,6 +1431,24 @@ def get_case_detail(case_id: str) -> dict | None:
             # in one recommendation string. Detail-only, same reasoning as
             # trend above. None for every other finding shape.
             "sessions": latest_snapshot.get("sessions"),
+            # Case Detail V3 bug fix: ControlsInvestigationPanel.jsx and
+            # IncidentInvestigationPanel.jsx both read these directly off
+            # `latest`, but they were never added to this whitelist -- so
+            # every controls case (negative_stock_control/cost_coverage_
+            # control) and every incident case silently rendered nothing in
+            # its investigation panel (get() returned undefined, both
+            # panels' own `if (products.length === 0) return null` guard
+            # fired), regardless of the panel code being correct. Confirmed
+            # live: /cases/{id} was missing `products` entirely even though
+            # state_findings.py's finding dict always includes it. None for
+            # every finding shape that doesn't set them.
+            "products": latest_snapshot.get("products"),
+            "by_outlet": latest_snapshot.get("by_outlet"),
+            "total_products": latest_snapshot.get("total_products"),
+            "coverage_pct": latest_snapshot.get("coverage_pct"),
+            "store": latest_snapshot.get("store"),
+            "product": latest_snapshot.get("product"),
+            "hour": latest_snapshot.get("hour"),
         }
 
     return {

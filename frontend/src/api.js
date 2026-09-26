@@ -275,6 +275,12 @@ export async function fetchCustomerSearch({ name, phone, email } = {}) {
   return readResponse(response);
 }
 
+export async function fetchCustomerProfile(partnerId) {
+  const response = await apiFetch(`${API_BASE_URL}/customers/${partnerId}/profile`);
+
+  return readResponse(response);
+}
+
 export async function fetchCustomerNextBasket(partnerId, topN = 8) {
   const response = await apiFetch(`${API_BASE_URL}/customers/${partnerId}/next-basket?top_n=${topN}`);
 
@@ -293,11 +299,13 @@ export async function fetchCustomerOutletBehavior() {
   return readResponse(response);
 }
 
-export async function fetchCases({ status, metric_id, domain, limit = 20, offset = 0 } = {}) {
+export async function fetchCases({ status, metric_id, domain, priority, sort, limit = 20, offset = 0 } = {}) {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (status) params.set("status", status);
   if (metric_id) params.set("metric_id", metric_id);
   if (domain) params.set("domain", domain);
+  if (priority) params.set("priority", priority);
+  if (sort) params.set("sort", sort);
   const response = await apiFetch(`${API_BASE_URL}/cases?${params.toString()}`);
 
   return readResponse(response);

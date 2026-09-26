@@ -619,14 +619,28 @@ def _negative_stock_control_finding():
         else "medium"
     )
     plural = len(products) != 1
-    breakdowns = [{
-        "dimension": "product", "label": "Products with negative recorded stock",
-        "mode": "contribution", "baseline_month": None,
-        "total": round(total_value, 2),
-        "top_contributors": [
-            {"name": p["name"], "current": p["value_rs"] or 0, "delta": p["value_rs"] or 0} for p in products[:15]
-        ],
-    }]
+    by_outlet = result["by_outlet"]
+    breakdowns = [
+        {
+            "dimension": "product", "label": "Products with negative recorded stock",
+            "mode": "contribution", "baseline_month": None,
+            "total": round(total_value, 2),
+            "top_contributors": [
+                {"name": p["name"], "current": p["value_rs"] or 0, "delta": p["value_rs"] or 0} for p in products[:15]
+            ],
+        },
+    ]
+    if by_outlet:
+        # Store-level subtotal, not derived from the company-wide product
+        # list -- see NEGATIVE_STOCK_BY_OUTLET_SQL's own docstring. Fed
+        # into evidence_engine too, so an outlet-concentration check runs
+        # for real instead of the panel only ever showing raw counts.
+        breakdowns.append({
+            "dimension": "store", "label": "Affected products by outlet",
+            "mode": "contribution", "baseline_month": None,
+            "total": sum(o["product_count"] for o in by_outlet),
+            "top_contributors": [{"name": o["outlet"], "current": o["product_count"], "delta": o["product_count"]} for o in by_outlet],
+        })
     evidence = evidence_engine.build_snapshot_evidence(breakdowns, date.today().isoformat())
     impact = {
         "kind": "negative_stock_control",
@@ -672,6 +686,7 @@ def _negative_stock_control_finding():
         # Detail-only, same pattern as sessions on the stock-count findings
         # -- the frontend can render a real per-product table.
         "products": products,
+        "by_outlet": by_outlet,
         "status": "completed",
     }
 
@@ -733,9 +748,13 @@ def _cost_coverage_control_finding():
         "data_quality": evidence["data_quality"],
         "recommendations": [
             {
-                "action": f"Add a recorded cost (or a usable catalog list price) for the {no_cost} product"
-                f"{'s' if plural else ''} listed — {', '.join(p['name'] or 'Unknown' for p in products[:5])}"
-                f"{', and others' if len(products) > 5 else ''}",
+                # Deliberately doesn't embed the product names -- with 7+
+                # affected products the sentence became an unreadable list;
+                # the affected-products table already shows every one of
+                # them, so the recommendation only needs to name the count
+                # and point at it.
+                "action": f"Review and add a recorded cost (or a usable catalog list price) for the {no_cost} "
+                f"affected product{'s' if plural else ''} listed below.",
                 "owner": "Inventory team",
                 "priority": priority,
                 "expected_benefit": f"Closes the last gap in cost coverage ({coverage_pct}% today) so margin "
@@ -743,6 +762,10 @@ def _cost_coverage_control_finding():
             }
         ],
         "products": [{"name": p["name"], "sku": p["sku"]} for p in products],
+        # Structured, not just baked into impact.detail's prose -- so a
+        # panel reads real numbers instead of parsing the sentence.
+        "total_products": total,
+        "coverage_pct": coverage_pct,
         "status": "completed",
     }
 

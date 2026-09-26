@@ -19,14 +19,14 @@ from backend.app.services import case_engine, finding_actions
 
 
 def _monthly_finding(metric_id, domain, period, category="critical", checks=None, current=100, impact=50.0,
-                      title=None):
+                      title=None, priority="high"):
     baseline = current * 1.2
     return {
         "id": f"{metric_id}-{period}",
         "metric_id": metric_id,
         "domain": domain,
         "category": category,
-        "priority": "high",
+        "priority": priority,
         "business_impact_score": impact,
         "title": title or f"{metric_id} moved",
         "confirm": {
@@ -58,6 +58,24 @@ async def test_list_cases_returns_the_synced_case(two_scans):
     assert result["items"][0]["case_id"] == two_scans
 
 
+async def test_list_cases_surfaces_the_top_contributor_for_where_context(appdb_reset, monkeypatch):
+    monkeypatch.setattr(case_engine, "_business_today", lambda: datetime.date(2026, 9, 15))
+    finding = _monthly_finding("negative_stock_control", "controls", "2026-09")
+    finding["breakdowns"] = [{
+        "dimension": "store", "label": "Affected products by outlet",
+        "top_contributors": [{"name": "Ethul Kotte", "current": 28, "delta": 28}],
+    }]
+    case_engine.sync_cases([finding], [], [])
+
+    result = await main.list_cases()
+    assert result["items"][0]["latest"]["top_contributor"] == {"dimension": "store", "name": "Ethul Kotte", "value": 28}
+
+
+async def test_list_cases_top_contributor_is_none_without_a_breakdown(two_scans):
+    result = await main.list_cases()
+    assert result["items"][0]["latest"]["top_contributor"] is None
+
+
 async def test_list_cases_filters_by_status_and_metric(two_scans):
     by_status = await main.list_cases(status="open")
     assert by_status["total"] == 1
@@ -65,6 +83,32 @@ async def test_list_cases_filters_by_status_and_metric(two_scans):
     assert by_wrong_status["total"] == 0
     by_metric = await main.list_cases(metric_id="order_volume")
     assert by_metric["total"] == 0
+
+
+async def test_list_cases_filters_by_priority(two_scans):
+    high = await main.list_cases(priority="high")
+    assert high["total"] == 1
+    critical = await main.list_cases(priority="critical")
+    assert critical["total"] == 0
+
+
+async def test_list_cases_sort_by_priority_ranks_critical_first(appdb_reset, monkeypatch):
+    monkeypatch.setattr(case_engine, "_business_today", lambda: datetime.date(2026, 9, 15))
+    case_engine.sync_cases([_monthly_finding("gross_margin", "financial", "2026-09", priority="low")], [], [])
+    case_engine.sync_cases([_monthly_finding("revenue", "financial", "2026-09", priority="critical")], [], [])
+    case_engine.sync_cases([_monthly_finding("order_volume", "order_customer", "2026-09", priority="medium")], [], [])
+
+    result = await main.list_cases(sort="priority")
+    assert [c["metric_id"] for c in result["items"]] == ["revenue", "order_volume", "gross_margin"]
+
+
+async def test_list_cases_sort_by_impact_ranks_highest_score_first(appdb_reset, monkeypatch):
+    monkeypatch.setattr(case_engine, "_business_today", lambda: datetime.date(2026, 9, 15))
+    case_engine.sync_cases([_monthly_finding("gross_margin", "financial", "2026-09", impact=10.0)], [], [])
+    case_engine.sync_cases([_monthly_finding("revenue", "financial", "2026-09", impact=90.0)], [], [])
+
+    result = await main.list_cases(sort="impact")
+    assert [c["metric_id"] for c in result["items"]] == ["revenue", "gross_margin"]
 
 
 async def test_list_cases_pagination_is_stable_across_pages(appdb_reset, monkeypatch):

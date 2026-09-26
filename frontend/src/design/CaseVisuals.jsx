@@ -199,6 +199,106 @@ export function TechnicalDetails({ summary, children }) {
   );
 }
 
+/** Case Detail V3: the page's second-level read, right under the header --
+ * one paragraph (what happened, what it means, what's uncertain) plus one
+ * separate "Next decision" line. Deliberately two distinct pieces, not one
+ * run-on sentence -- a manager should be able to read the decision without
+ * re-parsing the whole brief. Both strings are pre-composed by the caller
+ * from real fields (see caseTemplates.js) -- this component only lays them
+ * out. */
+export function BusinessBrief({ brief, nextDecision }) {
+  if (!brief) return null;
+  return (
+    <div>
+      <p className="max-w-[68ch] text-sm text-foreground">{brief}</p>
+      {nextDecision && (
+        <div className="mt-3 border-t border-border pt-3">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Next decision</span>
+          <p className="mt-1 max-w-[68ch] text-sm text-foreground-strong">{nextDecision}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Case Detail V3: the finding-type-specific KPI row that replaces the old
+ * one-size-fits-all "Current measurement / Financial impact / Internal
+ * impact score / Case status" grid -- see caseTemplates.js's
+ * primaryMetricsFor for what cards each finding type actually gets. Plain
+ * layout wrapper; every card is still a real MetricSummaryCard. */
+export function PrimaryMetricStrip({ cards }) {
+  if (!cards || cards.length === 0) return null;
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {cards.map((card) => (
+        <MetricSummaryCard key={card.label} {...card} />
+      ))}
+    </div>
+  );
+}
+
+/** Case Detail V3: replaces the old 4-column "Established observations /
+ * Supported contribution / Possible explanations / Unknown causes" grid
+ * with 2-3 plain-language buckets a manager actually reads top to bottom:
+ * "What we know", "What may be related" (omitted entirely when there's
+ * nothing in it -- never a "None identified" placeholder), "What we don't
+ * know". Preserves the one real distinction this app's evidence vocabulary
+ * insists on (plainLanguage.evidenceRollupText's own docstring): a
+ * "confirmed" verdict is a stronger claim than "possible_contributor" and
+ * must never be collapsed into it. A concentration check's own `detail` is
+ * always a real, checked fact regardless of its verdict -- "the top
+ * segments cover only 43% of it" is established knowledge (checked, and
+ * confirmed NOT concentrated), not an absence of evidence -- so every
+ * concentration check goes to "What we know", verdict aside; only
+ * non-concentration checks are bucketed by verdict. */
+export function EvidenceKnowledge({ measuredText, observationsText, checks }) {
+  const list = checks ?? [];
+  const isConcentration = (c) => c.source?.endsWith("_concentration");
+  const know = [
+    measuredText,
+    observationsText,
+    ...list.filter((c) => isConcentration(c) || c.verdict === "confirmed").map((c) => c.detail),
+  ].filter(Boolean);
+  const related = list.filter((c) => !isConcentration(c) && c.verdict === "possible_contributor");
+  const dontKnow = list
+    .filter((c) => !isConcentration(c) && c.verdict !== "confirmed" && c.verdict !== "possible_contributor")
+    .map((c) => c.detail)
+    .filter(Boolean);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">What we know</span>
+        {know.length > 0 ? (
+          <ul className="mt-1.5 list-inside list-disc space-y-1 text-sm text-foreground">
+            {know.map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        ) : (
+          <p className="mt-1.5 text-sm text-foreground-subtle">Nothing has been established yet beyond the measurement itself.</p>
+        )}
+      </div>
+      {related.length > 0 && (
+        <div>
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">What may be related</span>
+          <ul className="mt-1.5 list-inside list-disc space-y-1 text-sm text-foreground">
+            {related.map((c) => <li key={c.source}>{c.detail}</li>)}
+          </ul>
+        </div>
+      )}
+      <div>
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">What we don&rsquo;t know</span>
+        {dontKnow.length > 0 ? (
+          <ul className="mt-1.5 list-inside list-disc space-y-1 text-sm text-foreground-subtle">
+            {dontKnow.map((line, i) => <li key={i}>{line}</li>)}
+          </ul>
+        ) : (
+          <p className="mt-1.5 text-sm text-foreground-subtle">No specific unknowns recorded.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /** 1. Compact case-status panel -- title, domain, severity, status, last
  * observed, secondary dismiss/reopen action. Pure presentation; the
  * dismiss/reopen action itself stays owned by the caller (CaseDetail

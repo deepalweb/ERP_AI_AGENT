@@ -60,6 +60,41 @@ const STATUS_FILTERS = [
 // Home.jsx's findings feed groups by) rather than a second domain list.
 const DOMAIN_FILTERS = [{ value: "", label: "All domains" }, ...DOMAIN_ORDER.map((d) => ({ value: d, label: DOMAIN_LABEL[d] }))];
 
+// Real priority values Badge/toneForPriority already recognize elsewhere
+// (case_engine's own critical/high/medium/low ranking) -- not a new scale.
+const PRIORITY_FILTERS = [
+  { value: "", label: "All priorities" },
+  { value: "critical", label: "Critical" },
+  { value: "high", label: "High" },
+  { value: "medium", label: "Medium" },
+  { value: "low", label: "Low" },
+];
+
+// Matches case_engine.SORT_CLAUSES exactly -- a whitelist on both ends,
+// never a free-text sort field sent to the backend.
+const SORT_OPTIONS = [
+  { value: "recent_change", label: "Recently changed" },
+  { value: "priority", label: "Highest priority" },
+  { value: "impact", label: "Highest impact" },
+  { value: "newest", label: "Newest" },
+  { value: "oldest_unresolved", label: "Oldest" },
+];
+
+// "Case type" -- the analysis kind (trend/control/incident/snapshot/
+// opportunity), a different axis than domain (which area of the business).
+// Derived purely from real fields already on every case, using the exact
+// same routing precedent CaseDetail.jsx already established for its panel
+// selection (metric_id prefix for incidents, domain for controls) -- not a
+// new classification invented here. category only ever takes 'critical' or
+// 'opportunity' (case_engine.py), horizon only 'monthly' or 'snapshot'.
+const CASE_TYPE_TONE = { opportunity: "good", incident: "critical", control: "warning", trend: "neutral", snapshot: "neutral" };
+function caseTypeFor(item) {
+  if (item.category === "opportunity") return "opportunity";
+  if (typeof item.metric_id === "string" && item.metric_id.startsWith("incident_")) return "incident";
+  if (item.domain === "controls") return "control";
+  return item.horizon === "monthly" ? "trend" : "snapshot";
+}
+
 function CaseRow({ item }) {
   const statusMeta = caseStatusMeta(item.status);
   const severityMeta = SEVERITY_TAG_META[item.priority] ?? null;
@@ -71,20 +106,24 @@ function CaseRow({ item }) {
   const confirm = item.latest?.confirm;
   const title = item.latest?.title ?? prettifyMetricId(item.metric_id);
   const lastSeen = item.last_seen_at ? new Date(item.last_seen_at.endsWith("Z") ? item.last_seen_at : `${item.last_seen_at}Z`) : null;
+  const openedAt = item.opened_at ? new Date(item.opened_at.endsWith("Z") ? item.opened_at : `${item.opened_at}Z`) : null;
+  const topContributor = item.latest?.top_contributor;
   // Deliberately NOT derived from item.action.status -- that's only the
   // most recently *updated* action, which can read "completed" while an
   // older action on the same case is still open. has_outstanding_action is
   // a separate, correct aggregate over every action (see main.py's
   // list_cases route / finding_actions.has_outstanding_action_for_cases).
   const hasOutstandingAction = Boolean(item.has_outstanding_action);
+  const caseType = caseTypeFor(item);
 
   return (
     <Link
       to={`/investigate/${encodeURIComponent(item.case_id)}`}
-      className="investigation-row flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
+      className="investigation-row flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"
     >
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
+          <Badge tone={CASE_TYPE_TONE[caseType]}>{caseType.toUpperCase()}</Badge>
           <Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>
           {verdictMeta && <Badge tone={verdictMeta.tone}>{verdictMeta.label}</Badge>}
           {severityMeta && <Badge tone={toneForPriority(item.priority)}>{severityMeta.label}</Badge>}
@@ -108,10 +147,26 @@ function CaseRow({ item }) {
             )}
           </p>
         )}
+      </div>
+
+      {/* Previously this space was dead -- the row was two islands (left
+          info, right metadata) with a large empty middle. Evidence summary
+          and the top contributor were already fetched/rendered, just
+          stacked under the title where they got lost; giving them their own
+          column uses that space and answers "what do we know, and where"
+          without opening the case. */}
+      <div className="min-w-0 sm:w-56 sm:flex-none">
+        <div className="text-[10px] font-semibold uppercase tracking-wide text-foreground-subtle">Evidence</div>
         <p className="mt-1 text-xs text-foreground-subtle">
-          {confidenceLabelFor(item.latest?.root_cause) ?? "No evidence checks yet"}
+          {confidenceLabelFor(item.latest?.root_cause) ?? "No contributor has been established yet"}
           {hasOutstandingAction && <span className="ml-1.5 font-medium text-warning">· Action outstanding</span>}
         </p>
+        {topContributor?.name && (
+          <p className="mt-1 text-xs text-foreground-subtle">
+            Main movement: <span className="text-foreground">{topContributor.name}</span>
+            {topContributor.value != null && ` · ${formatNumber(topContributor.value)}`}
+          </p>
+        )}
       </div>
 
       <div className="flex flex-none items-center gap-4 sm:flex-col sm:items-end sm:gap-2">
@@ -121,6 +176,9 @@ function CaseRow({ item }) {
           </span>
         )}
         <span className="text-xs font-medium text-foreground">{NEXT_STEP_TEXT[item.status] ?? "Review"}</span>
+        <span className="text-xs text-foreground-subtle">
+          {openedAt ? `Opened ${openedAt.toLocaleDateString()}` : null}
+        </span>
         <span className="text-xs text-foreground-subtle">
           {lastSeen ? `Last observed ${lastSeen.toLocaleDateString()}` : "Not yet observed"}
         </span>
@@ -133,11 +191,21 @@ function CaseRow({ item }) {
 export default function Investigate() {
   const [status, setStatus] = useState("");
   const [domain, setDomain] = useState("");
+  const [priority, setPriority] = useState("");
+  const [sort, setSort] = useState("recent_change");
   const [offset, setOffset] = useState(0);
 
   const query = useQuery({
-    queryKey: ["cases", status, domain, offset],
-    queryFn: () => fetchCases({ status: status || undefined, domain: domain || undefined, limit: PAGE_SIZE, offset }),
+    queryKey: ["cases", status, domain, priority, sort, offset],
+    queryFn: () =>
+      fetchCases({
+        status: status || undefined,
+        domain: domain || undefined,
+        priority: priority || undefined,
+        sort,
+        limit: PAGE_SIZE,
+        offset,
+      }),
   });
   const summaryQuery = useQuery({ queryKey: ["management", "summary"], queryFn: fetchManagementSummary });
 
@@ -169,6 +237,30 @@ export default function Investigate() {
           {DOMAIN_FILTERS.map((d) => (
             <option key={d.value} value={d.value}>
               {d.label}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Case priority"
+          value={priority}
+          onChange={(e) => changeFilter(setPriority, e.target.value)}
+          className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground-strong outline-none focus:border-accent-border"
+        >
+          {PRIORITY_FILTERS.map((p) => (
+            <option key={p.value} value={p.value}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="Sort"
+          value={sort}
+          onChange={(e) => changeFilter(setSort, e.target.value)}
+          className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground-strong outline-none focus:border-accent-border"
+        >
+          {SORT_OPTIONS.map((s) => (
+            <option key={s.value} value={s.value}>
+              {s.label}
             </option>
           ))}
         </select>

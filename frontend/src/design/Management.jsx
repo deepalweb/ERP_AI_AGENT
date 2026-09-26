@@ -3,10 +3,13 @@ import { ArrowRight, AlertCircle, Inbox } from "lucide-react";
 import Badge from "./Badge";
 import Button from "./Button";
 import { caseStatusMeta } from "./caseStatus";
+import { DOMAIN_META } from "./domains";
+import { toneForPriority } from "./Badge";
 import {
   OUTCOME_STATUS_META,
   OUTCOME_VERDICT_META,
   RESOLUTION_VERDICT_META,
+  outcomeReasonText,
 } from "./outcomeStatus";
 import { formatByUnit, formatDate, prettifyMetricId } from "../format";
 
@@ -134,7 +137,19 @@ export function WorkItem({ action, compact = false }) {
         {action.relevant === false && <Badge>Not relevant</Badge>}
         {action.overdue && <Badge tone="critical">Overdue</Badge>}
         {outcome && <Badge tone={outcome.tone}>{outcome.label}</Badge>}
+        {action.case?.priority && (
+          <Badge tone={toneForPriority(action.case.priority)}>{prettifyMetricId(action.case.priority)}</Badge>
+        )}
       </div>
+      {action.case && (
+        // Frontend Intelligence Integration: "Review session" alone never
+        // said why -- the case's own domain + title is the real business
+        // reason a manager needs before opening anything.
+        <p className="text-xs text-foreground-subtle">
+          {DOMAIN_META[action.case.domain]?.shortLabel || prettifyMetricId(action.case.domain)}
+          {action.case.title && <> · Origin: {action.case.title}</>}
+        </p>
+      )}
       <h3>
         {action.action_taken ||
           action.intended_result ||
@@ -170,6 +185,9 @@ export function WorkItem({ action, compact = false }) {
           Target achieved is an observation, not proof this action caused it.
         </p>
       )}
+      {!action.outcome_verdict && outcomeReasonText(action) && (
+        <p className="mt-1 text-xs text-foreground-subtle">{outcomeReasonText(action)}</p>
+      )}
       {action.outcome_confidence && (
         <p className="mt-1 text-xs text-foreground-subtle">
           Attribution: {prettifyMetricId(action.outcome_confidence)}
@@ -186,7 +204,7 @@ export function WorkItem({ action, compact = false }) {
           <Link
             to={`/investigate/${encodeURIComponent(action.case_id)}?action=${encodeURIComponent(action.finding_id)}`}
           >
-            View action <ArrowRight size={14} />
+            View investigation <ArrowRight size={14} />
           </Link>
         ) : (
           <span>Case link unavailable</span>

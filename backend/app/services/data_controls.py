@@ -45,6 +45,33 @@ NEGATIVE_STOCK_SQL = f"""
     ORDER BY oh.qty ASC
 """
 
+# Frontend Intelligence Integration: the Controls investigation panel needs
+# "which outlets are affected" -- a genuinely different aggregation from
+# NEGATIVE_STOCK_SQL above (that one sums a product's quantity across every
+# store before checking negative; a product negative company-wide could in
+# principle be positive at one store and negative at another). This groups
+# by (product, store) first, so "affected" means that store's own subtotal
+# for that product is negative -- the honest per-outlet view, not derived
+# from the company-wide list.
+NEGATIVE_STOCK_BY_OUTLET_SQL = f"""
+    WITH per_store AS (
+        SELECT sq.product_id, rs.name AS outlet, SUM(sq.quantity) AS qty
+        FROM stock_quant sq
+        JOIN stock_location sl ON sl.id = sq.location_id
+        JOIN res_store rs ON rs.warehouse_id = sl.warehouse_id
+        JOIN product_product pp ON pp.id = sq.product_id
+        JOIN product_template pt ON pt.id = pp.product_tmpl_id
+        WHERE sl.usage = 'internal' AND rs.id IN {CELESTE_STORE_IDS}
+          AND pt.celeste_product_type = 'INVENTORY' AND pt.active = true
+        GROUP BY sq.product_id, rs.name
+    )
+    SELECT outlet, COUNT(*) AS product_count
+    FROM per_store
+    WHERE qty < 0
+    GROUP BY outlet
+    ORDER BY product_count DESC
+"""
+
 COST_COVERAGE_SQL = """
     SELECT
         count(*) AS total,
@@ -84,11 +111,14 @@ def get_negative_stock():
             "value_rs": round(value, 2) if value is not None else None,
         })
     products.sort(key=lambda p: p["value_rs"] or 0, reverse=True)
+    outlet_rows = reporting.run_query(NEGATIVE_STOCK_BY_OUTLET_SQL)
+    by_outlet = [{"outlet": r["outlet"] or "Unknown", "product_count": int(r["product_count"])} for r in outlet_rows]
     return {
         "as_of_date": date.today().isoformat(),
         "count": len(products),
         "total_value_rs": round(total_value, 2),
         "products": products,
+        "by_outlet": by_outlet,
     }
 
 

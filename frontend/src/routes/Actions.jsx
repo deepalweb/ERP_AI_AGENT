@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchManagementActions } from "../api";
 import Button from "../design/Button";
+import { DOMAIN_LABEL, DOMAIN_ORDER } from "../design/domains";
 import {
   PageHeading,
   Pagination,
@@ -12,13 +13,17 @@ import {
 export default function Actions() {
   const [status, setStatus] = useState("");
   const [relevance, setRelevance] = useState("");
+  const [domain, setDomain] = useState("");
+  const [owner, setOwner] = useState("");
   const [offset, setOffset] = useState(0);
   const query = useQuery({
-    queryKey: ["management", "actions", status, relevance, offset],
+    queryKey: ["management", "actions", status, relevance, domain, owner, offset],
     queryFn: () =>
       fetchManagementActions({
         status,
         relevant: relevance,
+        domain,
+        owner,
         offset,
         limit: 20,
       }),
@@ -61,6 +66,29 @@ export default function Actions() {
           <option value="true">Relevant</option>
           <option value="false">Not relevant</option>
         </select>
+        <select
+          aria-label="Domain"
+          value={domain}
+          onChange={(e) => {
+            setDomain(e.target.value);
+            setOffset(0);
+          }}
+        >
+          <option value="">All domains</option>
+          {DOMAIN_ORDER.map((d) => (
+            <option key={d} value={d}>{DOMAIN_LABEL[d]}</option>
+          ))}
+        </select>
+        <input
+          type="text"
+          aria-label="Owner"
+          placeholder="Owner"
+          value={owner}
+          onChange={(e) => {
+            setOwner(e.target.value);
+            setOffset(0);
+          }}
+        />
       </div>
       <QueryState
         query={query}

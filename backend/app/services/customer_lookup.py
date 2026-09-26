@@ -32,6 +32,7 @@ import os
 from datetime import datetime
 
 from backend.app.db import appdb, reporting
+from backend.app.db.store_scope import SALE_ORDER_LIVE_STATES
 from backend.app.services.customer_predictions import (
     DETERIORATION_WINDOW_DAYS_DEFAULT,
     LIFECYCLE_SQL,
@@ -43,6 +44,16 @@ from backend.app.services.customer_predictions import (
     get_predicted_next_basket,
     search_customers,
 )
+
+# Frontend Intelligence Integration: the Customers page's detail view
+# already has a partner_id from a prior search result -- it needs only
+# name/phone (to mask) and order_count, the same fields search_customers()
+# already resolves, scoped identically (SALE_ORDER_LIVE_STATES).
+PARTNER_IDENTITY_SQL = f"""
+    SELECT rp.name, rp.phone,
+           (SELECT COUNT(*) FROM sale_order so WHERE so.partner_id = rp.id AND so.state IN {SALE_ORDER_LIVE_STATES}) AS order_count
+    FROM res_partner rp WHERE rp.id = :partner_id
+"""
 
 _SCHEMA_READY = False
 
@@ -216,3 +227,19 @@ def get_customer_lookup(name: str | None = None, phone: str | None = None, email
             for m in matches
         ],
     }
+
+
+def get_customer_profile(partner_id: int) -> dict | None:
+    """The Customers page's detail view, for a partner_id already resolved
+    from a prior search/list -- the REST counterpart to
+    get_customer_lookup()'s single-match path, for a caller that already
+    knows exactly which customer it wants rather than searching by name/
+    phone/email. Same masking, same access logging."""
+    rows = reporting.run_query(PARTNER_IDENTITY_SQL, {"partner_id": partner_id})
+    if not rows:
+        return None
+    r = rows[0]
+    name = (r["name"] or "").strip() or "Unknown"
+    profile, as_of = _customer_profile(partner_id, name, r["phone"], int(r["order_count"] or 0))
+    _log_access(partner_id, "analytical_lookup", "masked")
+    return {"customer": profile, "as_of": as_of}

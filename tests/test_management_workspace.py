@@ -86,3 +86,45 @@ async def test_unlinked_action_is_preserved_without_guessing_a_case(workspace):
     legacy = next(a for a in result["items"] if a["finding_id"] == "legacy-unlinked")
     assert legacy["case_id"] is None
     assert legacy["case"] is None
+
+
+async def test_action_carries_its_case_title_priority_and_domain(workspace):
+    """Frontend Intelligence Integration: "Review session" alone doesn't
+    say why -- the case's own title (from its latest finding snapshot) is
+    the real business reason, batch-fetched the same way list_cases()
+    already does."""
+    appdb.run_query(
+        "UPDATE business_cases SET priority='high' WHERE case_id='case-204'"
+    )
+    appdb.run_query(
+        "INSERT INTO case_observations (case_id, scan_run_id, finding_id, observed_at, snapshot) "
+        "VALUES ('case-204', 'test-run', 'older-finding', '2026-09-18T00:00:00', "
+        "'{\"title\": \"8 stock counts started but never finished\"}')"
+    )
+    result = await main.management_actions(status="in_progress")
+    action = next(a for a in result["items"] if a["finding_id"] == "older-finding")
+    assert action["case"]["domain"] == "financial"
+    assert action["case"]["priority"] == "high"
+    assert action["case"]["title"] == "8 stock counts started but never finished"
+
+
+async def test_domain_and_owner_filters_narrow_the_action_list(workspace):
+    appdb.run_query(
+        "INSERT INTO business_cases (case_id, metric_id, domain, horizon, status, opened_at, last_seen_at) "
+        "VALUES ('case-controls', 'negative_stock_control', 'controls', 'snapshot', 'open', "
+        "'2026-09-18T00:00:00', '2026-09-18T00:00:00')"
+    )
+    finding_actions.set_action("controls-finding", True, "in_progress", "Reconcile stock", case_id="case-controls")
+    appdb.run_query("UPDATE finding_actions SET owner='Inventory team' WHERE finding_id='controls-finding'")
+    appdb.run_query("UPDATE finding_actions SET owner='Ops team' WHERE finding_id='older-finding'")
+
+    controls_only = await main.management_actions(domain="controls")
+    assert {a["finding_id"] for a in controls_only["items"]} == {"controls-finding"}
+
+    inventory_owner = await main.management_actions(owner="Inventory team")
+    assert {a["finding_id"] for a in inventory_owner["items"]} == {"controls-finding"}
+
+    # Partial, case-insensitive -- a manager typing "inventory" alone
+    # should still find "Inventory team", not require an exact retype.
+    partial = await main.management_actions(owner="inventory")
+    assert {a["finding_id"] for a in partial["items"]} == {"controls-finding"}

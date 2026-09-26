@@ -9,21 +9,26 @@ import {
 import Badge, { toneForPriority } from "../design/Badge";
 import Button from "../design/Button";
 import { caseStatusMeta } from "../design/caseStatus";
-import { DOMAIN_LABEL } from "../design/domains";
+import { DOMAIN_META } from "../design/domains";
 import { evidenceHasChanged, latestObservationForFinding } from "../design/evidenceFreshness";
 import { caseEvolutionStages } from "../design/caseEvolution";
 import { OUTCOME_STATUS_META, OUTCOME_VERDICT_META, RESOLUTION_VERDICT_TEXT } from "../design/outcomeStatus";
 import {
-  additionalObservationsText, baselineVolatilityCaution, decisionPromptText, evidenceRollupText,
-  financialImpactText, headlineFor, metricSnapshotText, negativeStockText,
+  additionalObservationsText, baselineVolatilityCaution, controlsExecutiveText, controlsResolutionText,
+  decisionPromptText, evidenceRollupText, financialImpactText, headlineFor, metricSnapshotText, negativeStockText,
 } from "../design/plainLanguage";
 import InventoryInvestigationPanel from "../design/InventoryInvestigationPanel";
 import RevenueInvestigationPanel from "../design/RevenueInvestigationPanel";
 import StockCountInvestigationPanel from "../design/StockCountInvestigationPanel";
-import { CaseStatusPanel, EvidenceSummary, MetricSummaryCard, TechnicalDetails } from "../design/CaseVisuals";
+import ControlsInvestigationPanel from "../design/ControlsInvestigationPanel";
+import CompletedVarianceInvestigationPanel from "../design/CompletedVarianceInvestigationPanel";
+import IncidentInvestigationPanel from "../design/IncidentInvestigationPanel";
+import SupplierInvestigationPanel from "../design/SupplierInvestigationPanel";
+import { BusinessBrief, CaseStatusPanel, EvidenceKnowledge, PrimaryMetricStrip, TechnicalDetails } from "../design/CaseVisuals";
+import { primaryMetricsFor } from "../design/caseTemplates";
 import { ActionTracker, SEVERITY_TAG_META } from "../design/SignalCard";
 import TrendChart from "../charts/TrendChart";
-import { formatByUnit, formatConfirmPeriod, formatCurrency, formatNumber, formatPct, moveToneClass } from "../format";
+import { formatByUnit, formatConfirmPeriod } from "../format";
 
 const HORIZON_LABEL = { monthly: "Monthly", weekly: "Weekly (trailing 7 days)", snapshot: "Point-in-time snapshot" };
 
@@ -128,30 +133,19 @@ function Section({ title, children, className = "" }) {
  * IS a direct, confirmed measurement (a real stock count, not a guess) --
  * exactly the "do not treat the measured finding as nonexistent evidence"
  * instruction. */
+// Case Detail V3: was a 2-part layout ("Established observations" text +
+// EvidenceSummary's old 4-column confirmed/possible/unknown grid) -- now
+// one EvidenceKnowledge call. measuredText/observationsText (what was
+// directly measured, not a root_cause check) fold into "What we know"
+// alongside any confirmed/concentration checks, instead of sitting in
+// their own separate block above the checks grid.
 function EvidenceSections({ latest, metricId }) {
   const measuredText = metricSnapshotText(latest, metricId)
     ?? (latest?.confirm ? `${formatByUnit(latest.confirm.current, latest.confirm.unit)} as of ${formatConfirmPeriod(latest.confirm.period)}.` : null);
   const observationsText = additionalObservationsText(latest);
   const checks = latest?.root_cause?.checks;
 
-  return (
-    <div className="space-y-4">
-      {/* Phase 2's "Established observations" group: what was directly
-          measured, not a root_cause check -- kept as its own block (not
-          folded into EvidenceSummary) since these are always real,
-          unconditional facts about the finding itself, never a verdict
-          that could come back "unknown". */}
-      <div>
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Established observations</span>
-        <p className="mt-1.5 text-sm text-foreground">{measuredText ?? "No measurement recorded for this case yet."}</p>
-        <p className="mt-1.5 text-sm text-foreground-subtle">{observationsText ?? "No additional supporting observations recorded."}</p>
-      </div>
-
-      <div className="border-t border-border pt-3">
-        <EvidenceSummary checks={checks} />
-      </div>
-    </div>
-  );
+  return <EvidenceKnowledge measuredText={measuredText} observationsText={observationsText} checks={checks} />;
 }
 
 /** 4-stage visual stepper (Detected/Evidence/Action/Outcome) derived
@@ -364,7 +358,7 @@ function ExistingCaseAction({
  *    manager takes in that tracker. `hasRecordedAction` switches the
  *    link's label once a real row exists, so it reads as "go see it"
  *    rather than "start one" (Task 4: "a clear link to it"). */
-function RecommendationCard({ rec, accepted, hasRecordedAction, findingId, onAccept }) {
+function RecommendationCard({ rec, accepted, hasRecordedAction, findingId, onAccept, affectedRecordCount }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -389,9 +383,18 @@ function RecommendationCard({ rec, accepted, hasRecordedAction, findingId, onAcc
       <div className="mt-1.5 text-xs text-foreground-subtle">Owner: {rec.owner ?? "Unassigned"}</div>
       {rec.expected_benefit && (
         <div className="mt-1.5 text-xs text-foreground-subtle">
-          <strong className="font-medium text-foreground">Potential benefit -- </strong>
+          <strong className="font-medium text-foreground">Expected result -- </strong>
           {rec.expected_benefit}
         </div>
+      )}
+      {/* Case Detail V3: points at the affected-record table already shown
+          in the investigation panel above, instead of listing the records
+          again in this card's own text (the exact "product names embedded
+          in the recommendation prose" complaint this redesign fixes). */}
+      {affectedRecordCount != null && (
+        <a href="#control-investigation" className="mt-1.5 block text-xs font-medium text-accent hover:underline">
+          {affectedRecordCount} affected record{affectedRecordCount === 1 ? "" : "s"} &rarr; view above
+        </a>
       )}
       {error && (
         <p role="alert" className="mt-2 text-xs text-critical">{error}</p>
@@ -607,32 +610,24 @@ export default function CaseDetail() {
   const sortedHistory = [...(history || [])].sort((a, b) => (a.at < b.at ? 1 : -1));
   const trendPoints = (performanceHistory || []).map((p) => ({ month: p.scan_run_id, value: p.current, is_partial: false }));
 
-  // Executive conclusion: composed from fields already fetched and already
-  // shown elsewhere on this page (headline, negative-stock flag, scope
-  // status, evidence rollup, impact, and what decision is pending) -- not
-  // a new computation, not an LLM call. See plainLanguage.js.
-  // Visual Investigation V2, Phase 2: SCOPE_STATUS_TEXT dropped from this
-  // array -- it duplicated what the corrected evidenceRollupText() already
-  // says ("...confirms where this is concentrated..."), exactly the kind
-  // of repetition this milestone's own opening complaint named. Still
-  // shown once, in the "Where and when" card, not lost entirely. Keeps
-  // the typical case (no negative-stock flag, no baseline-volatility
-  // caution) to 4 sentences: what/why-uncertain/impact/next-decision.
-  const executiveConclusion = latest
-    ? [
-        headline,
-        negativeStockText(latest),
-        evidenceRollupText(latest.root_cause),
-        baselineVolatilityCaution(latest.confirm),
-        financialImpactText(latest.impact),
-        decisionPromptText(c.status),
-      ]
+  // Case Detail V3's Business Brief: split into two pieces a manager reads
+  // separately -- the brief paragraph (what happened, why uncertain,
+  // impact) and a standalone "Next decision" line, instead of one run-on
+  // sentence ending in a generic decision prompt. SCOPE_STATUS_TEXT stays
+  // out of the brief (duplicates evidenceRollupText -- shown once, in the
+  // collapsed technical details). controlsExecText (below) overrides the
+  // brief for a controls case; the generic chain is the fallback for
+  // everything else, including an unrecognized controls metric_id.
+  const genericBrief = latest
+    ? [headline, negativeStockText(latest), evidenceRollupText(latest.root_cause), baselineVolatilityCaution(latest.confirm), financialImpactText(latest.impact)]
         .filter(Boolean)
         .join(" ")
     : null;
+  // The concrete next step (a real recommendation) is more useful than the
+  // generic "review the evidence" prompt whenever one exists; the prompt
+  // is still the fallback for a case with no recommendations yet.
+  const nextDecision = latest?.recommendations?.[0]?.action ?? decisionPromptText(c.status);
   const evolutionStages = caseEvolutionStages(c, actions, observations);
-  const hasBaselineComparison = latest?.confirm && (latest.confirm.baseline != null || latest.confirm.pct_change != null);
-  const snapshotText = latest?.confirm && !hasBaselineComparison ? metricSnapshotText(latest, c.metric_id) : null;
   // Whether a REAL finding_actions row exists for latest.finding_id
   // (TODAY's evidence snapshot) -- distinct from actions[0], which is the
   // OLDEST row across the case's whole lifetime (get_actions_for_case
@@ -652,65 +647,34 @@ export default function CaseDetail() {
       .map((e) => parseJSON(e.detail, {}).recommendation?.action)
       .filter(Boolean),
   );
+  // Frontend Intelligence Integration, Phase 1: layered routing -- a
+  // metric-specific panel first (a finding shape richer than its domain
+  // implies), then a domain-level panel, then the generic trend-or-nothing
+  // fallback. Metric-specific still wins over domain so a future domain
+  // panel never accidentally shadows one of these three.
   const isInventoryStockOut = c.metric_id === "top_seller_stock";
   const isRevenueCase = c.metric_id === "revenue";
   const isStuckStockCount = c.metric_id === "stuck_stock_count";
+  const isCompletedVarianceCase = c.metric_id === "completed_stock_count_variance";
+  // incident_engine synthesizes a scope-specific metric_id per store/
+  // product/hour (incident_s{store_id}_p{product_id}_h{hour}) -- never a
+  // fixed string, so it can't be matched like the ones above.
+  const isIncidentCase = typeof c.metric_id === "string" && c.metric_id.startsWith("incident_");
+  const isControlsCase = c.domain === "controls";
+  const isSupplierCase = c.domain === "supplier";
+  // Business Controls cases (a data-control gap, not a trend anomaly) read
+  // as generic through the default sentence chain -- see plainLanguage.js's
+  // controlsExecutiveText/controlsResolutionText docstrings for why. Both
+  // return null for anything they don't specifically recognize, so the
+  // existing generic text is always the fallback, never silently blank.
+  const controlsExecText = isControlsCase ? controlsExecutiveText(latest) : null;
+  const controlsResText = isControlsCase ? controlsResolutionText(latest, c.status) : null;
 
-  // Visual Investigation V2, Phase 2 Section 3 ("Situation at a glance"):
-  // 4 real, case-relevant KPIs. stuck_stock_count gets the exact 4 this
-  // milestone specifies (real structured fields, no invented ones -- an
-  // unavailable value renders as "—", never a fabricated 0). Every other
-  // case falls back to a smaller, genuinely-available set rather than
-  // forcing the same 4 onto a metric shape that doesn't have them.
-  let situationCards = [];
-  if (isStuckStockCount && latest) {
-    // Incident Investigation, Phase 2/3: latest.sessions can be absent on
-    // an older, already-persisted observation (a schema field added after
-    // that snapshot was captured -- see the empty-panel root-cause finding
-    // in StockCountInvestigationPanel.jsx) without breakdowns/confirm/impact
-    // being absent too, since those existed before sessions did. So each
-    // card degrades independently to "—" rather than the whole block
-    // collapsing just because the newest field is missing.
-    const sessions = latest.sessions ?? [];
-    const outletBreakdown = (latest.breakdowns ?? []).find((b) => b.dimension === "store");
-    const largest = outletBreakdown?.top_contributors?.[0];
-    const oldest = sessions.length > 0 ? Math.max(...sessions.map((s) => s.days_stuck)) : null;
-    // Final Stock-Count Financial Disclosure, item 1: coverage shown right
-    // beside the headline figure, not buried in an expander -- and never
-    // phrased as "small" or as if the valued lines establish full coverage.
-    const coverage = latest.impact?.valuation_coverage;
-    situationCards = [
-      { label: "Unfinished count sessions", value: formatNumber(latest.confirm?.current) },
-      {
-        label: "Estimated value of unscanned lines",
-        value: formatCurrency(latest.impact?.financial_impact_rs),
-        caption: coverage
-          ? `Covers ${coverage.source_cost_lines + coverage.catalog_estimate_lines} of ${coverage.total_unscanned_lines} unscanned lines -- ${coverage.no_cost_data_lines} unpriced, value unknown`
-          : "Not confirmed inventory loss",
-      },
-      { label: "Largest affected outlet", value: largest?.name ?? "—", caption: largest ? formatCurrency(largest.current) : undefined },
-      { label: "Oldest unfinished session", value: Number.isFinite(oldest) ? `${oldest.toFixed(0)} days` : "—" },
-    ];
-  } else if (latest) {
-    // hasBaselineComparison/formatPct/moveToneClass restore the "+X% vs
-    // baseline" badge the old "What happened" section showed -- folded
-    // into this card's caption instead of its own removed section, not
-    // dropped.
-    const baselineCaption = hasBaselineComparison
-      ? `${formatPct(latest.confirm.pct_change)} vs baseline`
-      : latest.confirm?.period ? `As of ${formatConfirmPeriod(latest.confirm.period)}` : undefined;
-    situationCards = [
-      {
-        label: "Current measurement",
-        value: latest.confirm ? formatByUnit(latest.confirm.current, latest.confirm.unit ?? latest.metric?.unit) : "—",
-        caption: baselineCaption,
-        valueClassName: hasBaselineComparison ? moveToneClass(latest.confirm.pct_change, latest.metric?.direction) : undefined,
-      },
-      { label: "Financial impact", value: latest.impact?.financial_impact_rs != null ? formatCurrency(latest.impact.financial_impact_rs) : "Not quantified" },
-      { label: "Internal impact score", value: c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "—" },
-      { label: "Case status", value: statusMeta.label },
-    ];
-  }
+  // Case Detail V3's Primary Metric Strip: one finding-type-specific KPI
+  // row (design/caseTemplates.js) instead of a fixed 4-card shape forced
+  // onto every metric -- see that file for what each type gets. Empty for
+  // a controls case (its own panel already has this row -- see below).
+  const primaryMetrics = primaryMetricsFor({ c, latest, statusLabel: statusMeta.label });
 
   return (
     <div className="workspace-page case-detail-page">
@@ -729,7 +693,7 @@ export default function CaseDetail() {
       <div className="mt-6">
         <CaseStatusPanel
           title={title}
-          domainLabel={DOMAIN_LABEL[c.domain] ?? c.domain}
+          domainLabel={DOMAIN_META[c.domain]?.label ?? c.domain}
           statusBadge={<Badge tone={statusMeta.tone}>{statusMeta.label}</Badge>}
           severityBadge={severityMeta && <Badge tone={toneForPriority(latest.priority)}>{severityMeta.label}</Badge>}
           lastObservedLabel={`Last observed ${fmtDateTime(c.last_seen_at)}`}
@@ -756,91 +720,86 @@ export default function CaseDetail() {
         />
       </div>
 
-      {/* 2. Executive summary -- composed from fields already fetched and
-          shown elsewhere on this page (see the executiveConclusion
-          computation above), never a new computation or an LLM call. */}
-      {executiveConclusion && (
+      {/* 2. Business brief -- what happened, why uncertain, impact, and a
+          standalone next-decision line. controlsExecText overrides the
+          generic sentence chain for a controls case (see plainLanguage.js);
+          nextDecision is the same for every case type (a real
+          recommendation when one exists, else the generic decision
+          prompt). */}
+      {(controlsExecText || genericBrief) && (
         <div className="mt-4">
-          <Section title="Executive summary">
-            <p className="max-w-[68ch] text-sm text-foreground">{executiveConclusion}</p>
+          <Section title="Business brief">
+            <BusinessBrief brief={controlsExecText || genericBrief} nextDecision={nextDecision} />
           </Section>
         </div>
       )}
 
-      {/* 3. Situation at a glance -- 4 real KPIs, never a duplicated count
-          from another section, never a fabricated 0 for an unavailable one. */}
-      {situationCards.length > 0 && (
-        <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {situationCards.map((card) => (
-            <MetricSummaryCard key={card.label} {...card} />
-          ))}
+      {/* 3. Primary metrics -- one finding-type-specific KPI row (see
+          design/caseTemplates.js), empty for a controls case since its own
+          panel below already has one. */}
+      {primaryMetrics.length > 0 && (
+        <div className="mt-4">
+          <PrimaryMetricStrip cards={primaryMetrics} />
         </div>
       )}
 
-      {/* 4. Visual investigation -- only for a finding shape a dedicated
-          panel actually understands (see Inventory/Revenue/StockCount
-          InvestigationPanel). Other case shapes fall back to the one
-          generic trend chart already computed above, never forced into a
-          mismatched visualization. */}
-      <div className="mt-4">
-        <Section title="Visual investigation">
-          {isStuckStockCount ? (
-            <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
-          ) : isInventoryStockOut ? (
-            <InventoryInvestigationPanel latest={latest} asOfDate={latest?.confirm?.period} />
-          ) : isRevenueCase ? (
-            <RevenueInvestigationPanel latest={latest} casePeriod={latest?.confirm?.period} />
-          ) : trendPoints.length > 1 ? (
-            <div>
-              <p className="mb-2 text-xs text-foreground-subtle">Recorded observations over time (real scan history, never interpolated).</p>
-              <TrendChart data={trendPoints} formatValue={(v) => formatByUnit(v, latest?.confirm?.unit)} stroke="var(--accent)" gridStroke="var(--border)" axisStroke="var(--text-subtle)" />
-            </div>
-          ) : (
-            <p className="text-sm text-foreground-subtle">No dedicated visualization is available for this metric yet.</p>
-          )}
-        </Section>
-      </div>
+      {/* 4. Investigation content -- rendered directly, no "Visual
+          investigation" heading over an empty section. Only a dedicated
+          panel or a real multi-point trend renders anything at all; a
+          metric with neither renders nothing here rather than an empty
+          labeled box. */}
+      {(isStuckStockCount || isInventoryStockOut || isRevenueCase || isCompletedVarianceCase || isIncidentCase
+        || isControlsCase || isSupplierCase || trendPoints.length > 1) && (
+        <div className="mt-4">
+          <Section title={isControlsCase ? "Control investigation" : "Investigation"}>
+            {isStuckStockCount ? (
+              <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
+            ) : isInventoryStockOut ? (
+              <InventoryInvestigationPanel latest={latest} asOfDate={latest?.confirm?.period} />
+            ) : isRevenueCase ? (
+              <RevenueInvestigationPanel latest={latest} casePeriod={latest?.confirm?.period} />
+            ) : isCompletedVarianceCase ? (
+              <CompletedVarianceInvestigationPanel latest={latest} />
+            ) : isIncidentCase ? (
+              <IncidentInvestigationPanel latest={latest} />
+            ) : isControlsCase ? (
+              <ControlsInvestigationPanel latest={latest} statusLabel={statusMeta.label} />
+            ) : isSupplierCase ? (
+              <SupplierInvestigationPanel latest={latest} />
+            ) : (
+              <div>
+                <p className="mb-2 text-xs text-foreground-subtle">Recorded observations over time (real scan history, never interpolated).</p>
+                <TrendChart data={trendPoints} formatValue={(v) => formatByUnit(v, latest?.confirm?.unit)} stroke="var(--accent)" gridStroke="var(--border)" axisStroke="var(--text-subtle)" />
+              </div>
+            )}
+          </Section>
+        </div>
+      )}
 
-      {/* 5. Evidence and uncertainty. */}
-      <div className="mt-4">
-        <Section title="What the evidence establishes">
-          <EvidenceSections latest={latest} metricId={c.metric_id} />
-        </Section>
-      </div>
+      {/* 5. Evidence -- "What we know / may be related / don't know".
+          Skipped for a controls case: ControlsInvestigationPanel already
+          has its own Established/Not-established block, built with
+          domain knowledge (e.g. "what the correct replacement cost should
+          be") a generic checks-only bucketing can't know. */}
+      {!isControlsCase && (
+        <div className="mt-4">
+          <Section title="Evidence">
+            <EvidenceSections latest={latest} metricId={c.metric_id} />
+          </Section>
+        </div>
+      )}
 
-      {/* 6. Business impact -- three distinct concepts, never the finding
-          headline restated as "impact". */}
+      {/* 6. Priority details -- the internal ranking score, demoted to a
+          small secondary line rather than an equally-weighted card next to
+          the actual business numbers (which now live in the primary
+          metric strip / investigation panel above, not repeated here). */}
       <div className="mt-4">
-        <Section title="Business impact">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            <div>
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Operational magnitude</span>
-              <p className="mt-1.5 text-sm text-foreground">
-                {snapshotText
-                  ?? (latest?.confirm ? `${formatByUnit(latest.confirm.current, latest.confirm.unit)} as of ${formatConfirmPeriod(latest.confirm.period)}.` : "Not measured.")}
-              </p>
-            </div>
-            <div>
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Internal impact score</span>
-              {c.business_impact_score != null ? (
-                <>
-                  <p className="mt-1.5 text-sm text-foreground">
-                    <span className="font-semibold tabular-nums text-foreground-strong">{Number(c.business_impact_score).toFixed(1)}</span>
-                  </p>
-                  <p className="mt-1 text-xs text-foreground-subtle">
-                    Severity &times; persistence &times; whether impact was quantified (severity weights: critical=3, high=2,
-                    medium=1, worth_pursuing=1) -- a prioritization ranking, not a probability or a currency figure.
-                  </p>
-                </>
-              ) : (
-                <p className="mt-1.5 text-sm text-foreground-subtle">Not scored.</p>
-              )}
-            </div>
-            <div>
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Financial impact</span>
-              <p className="mt-1.5 text-sm text-foreground">{financialImpactText(latest?.impact)}</p>
-            </div>
-          </div>
+        <Section title="Priority details">
+          <p className="text-sm text-foreground-subtle">
+            Internal priority score: {c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "not scored"} --
+            severity &times; persistence &times; whether impact was quantified, for Celeste's own case ranking only, never a
+            currency figure or a probability.
+          </p>
         </Section>
       </div>
 
@@ -858,6 +817,7 @@ export default function CaseDetail() {
                   hasRecordedAction={hasRecordedAction}
                   findingId={latest.finding_id}
                   onAccept={(r) => handleAcceptRecommendation(latest.finding_id, r.action)}
+                  affectedRecordCount={isControlsCase ? latest.products?.length : undefined}
                 />
               ))}
             </div>
@@ -913,63 +873,25 @@ export default function CaseDetail() {
         </Section>
       </div>
 
-      {/* Case metadata: where/when, and the resolution verdict -- kept
-          alongside case evolution/history rather than up top, since these
-          are supplementary to (not part of) the investigation itself. */}
-      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Section title="Where and when">
-          <dl className="space-y-2 text-sm">
-            <div className="flex justify-between gap-3">
-              <dt className="text-foreground-subtle">Reporting scope</dt>
-              <dd className="text-foreground-strong">{HORIZON_LABEL[c.horizon] ?? c.horizon}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-foreground-subtle">Opened</dt>
-              <dd className="text-foreground-strong">{fmtDateTime(c.opened_at)}</dd>
-            </div>
-            <div className="flex justify-between gap-3">
-              <dt className="text-foreground-subtle">Last observed</dt>
-              <dd className="text-foreground-strong">{fmtDateTime(c.last_seen_at)}</dd>
-            </div>
-            {c.closed_at && (
-              <div className="flex justify-between gap-3">
-                <dt className="text-foreground-subtle">Closed</dt>
-                <dd className="text-foreground-strong">{fmtDateTime(c.closed_at)}</dd>
-              </div>
-            )}
-          </dl>
-          <div className="mt-3 flex items-start gap-2 border-t border-border pt-3 text-sm">
-            <MapPin className="mt-0.5 h-3.5 w-3.5 flex-none text-foreground-subtle" strokeWidth={2} />
-            <div>
-              <p className="text-foreground">{SCOPE_STATUS_TEXT[c.scope_status] ?? "Unknown scope."}</p>
-              {scopeSegments.length > 0 && (
-                <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  {scopeSegments.map((s, i) => (
-                    <span key={i} className="rounded-md border border-border bg-surface-sunken px-2 py-0.5 text-xs text-foreground-strong">
-                      {s.segment_name} <span className="text-foreground-subtle">({s.dimension})</span>
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-          {c.dismissed_reason && (
-            <p className="mt-3 border-t border-border pt-3 text-sm text-foreground-subtle">
-              <span className="font-medium text-foreground">Dismissed:</span> {c.dismissed_reason}
-            </p>
-          )}
-        </Section>
-
-        <Section title="Resolution status">
+      {/* 9. Resolution -- stays visible (this is part of "was it resolved",
+          not audit trail); the business objective and any recurrence
+          relationship are decision-relevant context, so they stay here too
+          rather than moving into the collapsed technical section below. */}
+      <div className="mt-4">
+        <Section title="Resolution">
           <p className="text-sm text-foreground">
-            {c.status === "resolved" && RESOLUTION_VERDICT_TEXT[c.resolution_verdict] ? RESOLUTION_VERDICT_TEXT[c.resolution_verdict] :
-              c.status === "resolved" && `Verified resolved -- clean for ${resolutionPolicy?.verification_window ?? 2} consecutive periods with no fresh anomaly.`}
-            {c.status === "verification_pending" &&
-              `Recovering, not yet confirmed -- clean for ${c.verification_progress} of ${resolutionPolicy?.verification_window ?? 2} required periods. `
-              + "If a relevant, approved action's outcome is still awaiting measurement, closure is held until that's known, even once the metric itself has cleared."}
-            {c.status === "open" && "Still active. Celeste has not yet seen this clear its own anomaly threshold."}
-            {c.status === "reopened" && "Reopened -- a matching problem reappeared after this case was closed."}
-            {c.status === "dismissed" && "Dismissed -- not verified as resolved, marked as not a real problem."}
+            {controlsResText ? controlsResText : (
+              <>
+                {c.status === "resolved" && RESOLUTION_VERDICT_TEXT[c.resolution_verdict] ? RESOLUTION_VERDICT_TEXT[c.resolution_verdict] :
+                  c.status === "resolved" && `Verified resolved -- clean for ${resolutionPolicy?.verification_window ?? 2} consecutive periods with no fresh anomaly.`}
+                {c.status === "verification_pending" &&
+                  `Recovering, not yet confirmed -- clean for ${c.verification_progress} of ${resolutionPolicy?.verification_window ?? 2} required periods. `
+                  + "If a relevant, approved action's outcome is still awaiting measurement, closure is held until that's known, even once the metric itself has cleared."}
+                {c.status === "open" && "Still active. Celeste has not yet seen this clear its own anomaly threshold."}
+                {c.status === "reopened" && "Reopened -- a matching problem reappeared after this case was closed."}
+                {c.status === "dismissed" && "Dismissed -- not verified as resolved, marked as not a real problem."}
+              </>
+            )}
           </p>
 
           {c.objective_metric_id && (
@@ -1015,17 +937,65 @@ export default function CaseDetail() {
               })}
             </ul>
           )}
+
+          {c.dismissed_reason && (
+            <p className="mt-3 border-t border-border pt-3 text-sm text-foreground-subtle">
+              <span className="font-medium text-foreground">Dismissed:</span> {c.dismissed_reason}
+            </p>
+          )}
         </Section>
       </div>
 
-      {/* 9. History and technical details -- Case evolution stays visible
-          (a compact, quick-glance progress indicator), but the full audit
-          trail/observation timeline sits behind a clearly-labeled expander,
-          per this milestone's own instruction. Nothing here is removed --
-          only what's expanded by default changes. */}
+      {/* 10. History and technical details, collapsed by default -- case
+          evolution, where/when/scope, full audit log, and observation
+          policy all move here (were previously always-visible), matching
+          the "these are important for auditability, but don't belong in
+          the main reading path" instruction. */}
       <div className="mt-4">
         <Section title="History and technical details">
-          <CaseEvolutionStepper stages={evolutionStages} />
+          <TechnicalDetails summary="Case evolution">
+            <div className="mt-2">
+              <CaseEvolutionStepper stages={evolutionStages} />
+            </div>
+          </TechnicalDetails>
+
+          <TechnicalDetails summary="Where and when">
+            <dl className="mt-2 space-y-2">
+              <div className="flex justify-between gap-3">
+                <dt className="text-foreground-subtle">Reporting scope</dt>
+                <dd className="text-foreground-strong">{HORIZON_LABEL[c.horizon] ?? c.horizon}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-foreground-subtle">Opened</dt>
+                <dd className="text-foreground-strong">{fmtDateTime(c.opened_at)}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-foreground-subtle">Last observed</dt>
+                <dd className="text-foreground-strong">{fmtDateTime(c.last_seen_at)}</dd>
+              </div>
+              {c.closed_at && (
+                <div className="flex justify-between gap-3">
+                  <dt className="text-foreground-subtle">Closed</dt>
+                  <dd className="text-foreground-strong">{fmtDateTime(c.closed_at)}</dd>
+                </div>
+              )}
+            </dl>
+            <div className="mt-2 flex items-start gap-2 border-t border-border pt-2">
+              <MapPin className="mt-0.5 h-3.5 w-3.5 flex-none text-foreground-subtle" strokeWidth={2} />
+              <div>
+                <p className="text-foreground">{SCOPE_STATUS_TEXT[c.scope_status] ?? "Unknown scope."}</p>
+                {scopeSegments.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {scopeSegments.map((s, i) => (
+                      <span key={i} className="rounded-md border border-border bg-surface-sunken px-2 py-0.5 text-xs text-foreground-strong">
+                        {s.segment_name} <span className="text-foreground-subtle">({s.dimension})</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </TechnicalDetails>
 
           <TechnicalDetails summary={`Case history (${sortedHistory.length} event${sortedHistory.length === 1 ? "" : "s"})`}>
             <ul className="space-y-3">

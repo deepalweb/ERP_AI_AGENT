@@ -417,8 +417,11 @@ def test_main_restock_recommendation_does_not_claim_confirmed_unavailability(mon
 # backend.app.services.data_controls (monkeypatched here), never query
 # reporting directly -- that's what test_data_controls.py already covers.
 
-def _negative_stock_result(count, total_value, products=None):
-    return {"as_of_date": "2026-09-22", "count": count, "total_value_rs": total_value, "products": products or []}
+def _negative_stock_result(count, total_value, products=None, by_outlet=None):
+    return {
+        "as_of_date": "2026-09-22", "count": count, "total_value_rs": total_value,
+        "products": products or [], "by_outlet": by_outlet or [],
+    }
 
 
 def _cost_coverage_result(total, no_cost, has_direct=0, fallback=0, coverage_pct=None, uncosted=None):
@@ -454,6 +457,31 @@ def test_negative_stock_finding_fires_with_real_priority_tiers_and_honest_wordin
     assert finding["products"] == products
 
 
+def test_negative_stock_finding_carries_outlet_breakdown_as_a_second_evidence_breakdown(monkeypatch):
+    """Frontend Intelligence Integration: by_outlet must reach the finding
+    dict (it's what gets persisted as the case snapshot the Controls panel
+    reads from) both as its own detail field and as a second breakdown fed
+    into evidence_engine, alongside the existing product breakdown."""
+    products = [{"name": "A", "sku": "A1", "qty": -1.0, "value_rs": 100.0}]
+    by_outlet = [{"outlet": "Ethul Kotte", "product_count": 28}, {"outlet": "Outlet B", "product_count": 14}]
+    monkeypatch.setattr(sf.data_controls, "get_negative_stock", lambda: _negative_stock_result(1, 100.0, products, by_outlet))
+    finding = sf._negative_stock_control_finding()
+    assert finding["by_outlet"] == by_outlet
+    dims = [b["dimension"] for b in finding["breakdowns"]]
+    assert dims == ["product", "store"]
+    store_breakdown = finding["breakdowns"][1]
+    assert store_breakdown["total"] == 42  # 28 + 14
+    assert store_breakdown["top_contributors"][0] == {"name": "Ethul Kotte", "current": 28, "delta": 28}
+
+
+def test_negative_stock_finding_has_one_breakdown_when_no_outlet_data(monkeypatch):
+    products = [{"name": "A", "sku": "A1", "qty": -1.0, "value_rs": 100.0}]
+    monkeypatch.setattr(sf.data_controls, "get_negative_stock", lambda: _negative_stock_result(1, 100.0, products))
+    finding = sf._negative_stock_control_finding()
+    assert finding["by_outlet"] == []
+    assert [b["dimension"] for b in finding["breakdowns"]] == ["product"]
+
+
 def test_negative_stock_finding_priority_scales_with_count(monkeypatch):
     _stub_snapshot_evidence(monkeypatch)
     for count, expected in [(5, "medium"), (20, "high"), (99, "high"), (100, "critical")]:
@@ -486,6 +514,11 @@ def test_cost_coverage_finding_never_implies_other_products_are_wrong(monkeypatc
     assert "does not affect" in detail.lower()
     assert "7211" in detail  # the untouched remainder, named explicitly
     assert finding["products"] == uncosted
+    # Frontend Intelligence Integration: these must be real fields, not
+    # only baked into impact.detail's prose -- a panel shouldn't have to
+    # regex-parse a sentence to get the coverage percentage.
+    assert finding["total_products"] == 7218
+    assert finding["coverage_pct"] == 99.9
 
 
 def test_build_controls_findings_returns_only_firing_findings(monkeypatch):

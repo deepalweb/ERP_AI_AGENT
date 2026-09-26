@@ -1,12 +1,5 @@
 import { formatCurrency, formatNumber } from "../format";
-
-const LIFECYCLE_LABEL = {
-  new: "New", active: "Active", due: "Due to reorder", lapsing: "Lapsing",
-  churned: "Churned", dormant: "Dormant", win_back: "Win-back", excluded: "Unscored",
-};
-
-const NEXT_BASKET_LABEL = { overdue: "Overdue", due: "Due", on_track: "On track" };
-const VALUE_TIER_LABEL = { high: "High value", mid: "Mid value", low: "Low value" };
+import { LIFECYCLE_LABEL, NEXT_BASKET_LABEL, VALUE_TIER_LABEL } from "../design/customerVocabulary";
 
 /** Customer Lookup Design, Phase A: renders customer_lookup.get_customer_lookup()'s
  * raw result. Never renders a raw phone/email -- the backend never returns them to

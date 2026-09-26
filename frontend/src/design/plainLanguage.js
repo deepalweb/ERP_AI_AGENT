@@ -214,6 +214,70 @@ export function decisionPromptText(status) {
  * side to decide significance. Fires only when the percentage rule alone
  * triggered significance and the z-score rule did not; returns null
  * (no caution) whenever both agree, or when either value is missing. */
+/** A Business Controls case (data-control gap, not a trend anomaly) reads
+ * as generic/understated through the default executiveConclusion sentence
+ * chain (headline + evidenceRollupText + financialImpactText, etc.) --
+ * "Detected in today's snapshot -- worth keeping an eye on" doesn't say
+ * WHAT's missing, WHICH records, or WHAT that breaks downstream, and
+ * financialImpactText always falls back to "not quantified" for these
+ * (they're record counts, not priced findings). One purpose-built sentence
+ * per known control metric_id, built entirely from fields already on the
+ * finding (total_products/coverage_pct for cost coverage, products.length
+ * for negative stock -- same fields ControlsInvestigationPanel already
+ * renders) -- never a generic fallback for an unrecognized controls
+ * metric_id, since a made-up sentence would be worse than none. */
+export function controlsExecutiveText(latest) {
+  if (!latest) return null;
+  if (latest.metric_id === "cost_coverage_control") {
+    const noCost = latest.products?.length ?? latest.confirm?.current;
+    const coveragePct = latest.coverage_pct;
+    if (noCost == null) return null;
+    const plural = noCost !== 1;
+    return `Cost coverage is ${coveragePct != null ? `${coveragePct}%` : "nearly complete"}, but `
+      + `${formatNumber(noCost)} product${plural ? "s" : ""} still ${plural ? "have" : "has"} no usable cost value. `
+      + `Any inventory-value or margin analysis involving ${plural ? "those products" : "that product"} can be `
+      + `incomplete until ${plural ? "their" : "its"} cost data is corrected.`;
+  }
+  if (latest.metric_id === "negative_stock_control") {
+    const count = latest.products?.length ?? latest.confirm?.current;
+    if (count == null) return null;
+    const plural = count !== 1;
+    return `${formatNumber(count)} product${plural ? "s" : ""} currently show negative recorded stock company-wide `
+      + `-- a data-integrity condition, not confirmed loss. Stock availability and inventory valuation involving `
+      + `${plural ? "these records" : "this record"} may be unreliable until reconciled.`;
+  }
+  return null;
+}
+
+/** The generic "Celeste has not yet seen this clear its own anomaly
+ * threshold" resolution line is accurate but says nothing case-specific
+ * for a controls case -- a manager wants to know WHAT still needs fixing,
+ * not that a threshold hasn't cleared. Overrides only the still-open
+ * states (open/reopened); other statuses (resolved/verification_pending/
+ * dismissed) already have their own specific text in CaseDetail.jsx and
+ * aren't touched here. Returns null for any other metric_id, or if the
+ * count itself isn't available -- caller falls back to the generic text. */
+export function controlsResolutionText(latest, status) {
+  if (status !== "open" && status !== "reopened") return null;
+  if (latest?.metric_id === "cost_coverage_control") {
+    const noCost = latest.products?.length ?? latest.confirm?.current;
+    if (noCost == null) return null;
+    const plural = noCost !== 1;
+    return `Still open -- ${formatNumber(noCost)} product${plural ? "s" : ""} still lack${plural ? "" : "s"} usable `
+      + `cost data. The case can move toward resolution once the affected products have valid cost records and a `
+      + `later scan confirms the gap has cleared.`;
+  }
+  if (latest?.metric_id === "negative_stock_control") {
+    const count = latest.products?.length ?? latest.confirm?.current;
+    if (count == null) return null;
+    const plural = count !== 1;
+    return `Still open -- ${formatNumber(count)} product${plural ? "s" : ""} still show negative recorded stock. `
+      + `The case can move toward resolution once the affected products are reconciled and a later scan confirms `
+      + `the gap has cleared.`;
+  }
+  return null;
+}
+
 export function baselineVolatilityCaution(confirm) {
   const Z_THRESHOLD = 1.5;
   const PCT_THRESHOLD = 15;

@@ -104,6 +104,11 @@ def get_stock_alerts():
     # out of stock". Callers that want the latter (state_findings.py's
     # headline count) need this separately.
     distinct_out_of_stock_products = len({i["sku"] for i in out_of_stock_items})
+    # Same reasoning as distinct_out_of_stock_products above -- top_low_stock
+    # is truncated to TOP_N and segments_by_outlet's low_stock counts are
+    # per (outlet, product), so neither answers "how many distinct products
+    # are low on stock" on its own.
+    distinct_low_stock_products = len({i["sku"] for i in low_stock_items})
 
     return {
         "as_of_date": as_of_date.date().isoformat(),
@@ -112,6 +117,7 @@ def get_stock_alerts():
         "top_low_stock": low_stock_items[:TOP_N],
         "low_stock_threshold_days": LOW_STOCK_DAYS,
         "distinct_out_of_stock_products": distinct_out_of_stock_products,
+        "distinct_low_stock_products": distinct_low_stock_products,
     }
 
 

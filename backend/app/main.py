@@ -507,6 +507,23 @@ async def customer_search(name: str | None = None, phone: str | None = None, ema
         return {"status": "error", "detail": "Could not search customers."}
 
 
+@app.get("/customers/{partner_id}/profile")
+async def customer_profile(partner_id: int):
+    """Frontend Intelligence Integration: the Customers page's detail
+    view for an already-resolved customer -- lifecycle category, value
+    tier, lifetime activity, and recent-vs-prior deterioration signals.
+    Same masking and access logging as Ask Celeste's get_customer_lookup
+    tool -- see backend/app/services/customer_lookup.py."""
+    try:
+        result = await anyio.to_thread.run_sync(customer_lookup.get_customer_profile, partner_id)
+        if result is None:
+            return {"status": "not_found"}
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("customer profile failed")
+        return {"status": "error", "detail": "Could not load this customer's profile."}
+
+
 @app.get("/customers/{partner_id}/next-basket")
 async def customer_next_basket(partner_id: int, top_n: int = 8):
     """Which of this customer's own repeat products are due for reorder,
@@ -906,10 +923,11 @@ async def management_summary():
 
 @app.get("/management/actions")
 async def management_actions(status: str | None = None, outcome_status: str | None = None,
-                             relevant: bool | None = None, limit: int = 20, offset: int = 0):
+                             relevant: bool | None = None, domain: str | None = None,
+                             owner: str | None = None, limit: int = 20, offset: int = 0):
     try:
         result = await anyio.to_thread.run_sync(
-            management.list_actions, status, outcome_status, relevant, limit, offset
+            management.list_actions, status, outcome_status, relevant, domain, owner, limit, offset
         )
         return {"status": "ok", **result}
     except Exception:
@@ -924,6 +942,7 @@ async def finding_case(finding_id: str):
 
 @app.get("/cases")
 async def list_cases(status: str | None = None, metric_id: str | None = None, domain: str | None = None,
+                      priority: str | None = None, sort: str | None = None,
                       limit: int = 50, offset: int = 0):
     """Persistent business cases (Phase 2a/2b Case Store) — filterable,
     stably ordered (last_seen_at desc, case_id as a tiebreaker), paginated.
@@ -941,7 +960,7 @@ async def list_cases(status: str | None = None, metric_id: str | None = None, do
     one; see finding_actions.has_outstanding_action_for_cases)."""
     try:
         result = await anyio.to_thread.run_sync(
-            case_engine.list_cases, status, metric_id, domain, limit, offset
+            case_engine.list_cases, status, metric_id, domain, priority, sort, limit, offset
         )
         case_ids = [item["case_id"] for item in result["items"]]
         actions_by_case = await anyio.to_thread.run_sync(finding_actions.get_latest_action_for_cases, case_ids)
