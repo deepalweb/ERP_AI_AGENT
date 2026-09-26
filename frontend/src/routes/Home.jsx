@@ -378,7 +378,7 @@ function lastComplete(months) {
   const idx = months.indexOf(list[list.length - 1]);
   return [list[list.length - 1], idx > 0 ? months[idx - 1] : null];
 }
-function KpiCard({ label, value, delta, deltaUnit = "pct", direction = "higher_is_good", trendData, trendValueKey }) {
+function KpiCard({ label, value, delta, deltaUnit = "pct", direction = "higher_is_good", trendData, trendValueKey, sparkColor = "var(--hp-accent)" }) {
   const hasDelta = delta != null;
   const hasTrend = trendData && trendData.length > 1;
   return (
@@ -395,7 +395,7 @@ function KpiCard({ label, value, delta, deltaUnit = "pct", direction = "higher_i
       )}
       {hasTrend && (
         <div className="hp-kpi-spark">
-          <TrendChart data={trendData} xKey="month" valueKey={trendValueKey} compact />
+          <TrendChart data={trendData} xKey="month" valueKey={trendValueKey} compact fill stroke={sparkColor} />
         </div>
       )}
     </div>
@@ -446,6 +446,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             delta={sales.revenue_growth_pct}
             trendData={sales.months}
             trendValueKey="revenue"
+            sparkColor="#06b6d4"
           />
           <KpiCard
             label="Orders"
@@ -453,6 +454,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             delta={sales.orders_growth_pct}
             trendData={sales.months}
             trendValueKey="sale_orders"
+            sparkColor="#10b981"
           />
           <KpiCard
             label="Average order value"
@@ -460,6 +462,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             delta={aovDelta}
             trendData={aovSeries}
             trendValueKey="aov"
+            sparkColor="#3b82f6"
           />
           <KpiCard
             label="Estimated margin"
@@ -467,6 +470,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             delta={marginAnomaly?.pct_change_vs_baseline}
             trendData={marginTrend}
             trendValueKey="value"
+            sparkColor="#10b981"
           />
           <KpiCard
             label="Cancellation rate"
@@ -476,6 +480,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             direction="higher_is_bad"
             trendData={sales.months}
             trendValueKey="cancellation_rate_pct"
+            sparkColor="#06b6d4"
           />
           <KpiCard
             label="Customer retention"
@@ -483,6 +488,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             delta={retentionAnomaly?.pct_change_vs_baseline}
             trendData={retentionTrend}
             trendValueKey="value"
+            sparkColor="#ef4444"
           />
         </div>
       )}
