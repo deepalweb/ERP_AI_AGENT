@@ -221,7 +221,11 @@
 .hp-snapshot {
   position: relative;
   display: grid;
-  grid-template-columns: 1fr 1.2fr;
+  /* Hero density follow-up: 3 real zones now -- score (auto-width, just
+     fits the gauge), executive message (the middle zone that used to be
+     empty, now 1fr so it takes the freed-up space), and the metadata
+     chips (still capped so they don't stretch into empty space). */
+  grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px);
   border: 1px solid var(--hp-edge);
   border-radius: 12px;
   background: var(--hp-panel);
@@ -239,13 +243,44 @@
   z-index: 0;
 }
 .hp-health,
+.hp-health-message,
 .hp-counts {
   position: relative;
   z-index: 1;
-  padding: 26px 28px;
+  padding: 16px 20px;
 }
 .hp-health {
   border-right: 1px solid var(--hp-edge);
+}
+.hp-health-message {
+  border-right: 1px solid var(--hp-edge);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+}
+.hp-health-supporting {
+  margin: 0;
+  color: var(--hp-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.hp-hero-domain-strip {
+  margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--hp-muted);
+}
+.hp-hero-domain-item strong {
+  color: var(--hp-ink);
+  font-weight: 700;
+}
+.hp-hero-domain-sep {
+  margin-right: 8px;
+  opacity: 0.5;
 }
 .hp-health-head {
   display: flex;
@@ -296,8 +331,7 @@
 .hp-health-gauge {
   display: flex;
   align-items: center;
-  gap: 24px;
-  margin: 0 0 24px;
+  margin: 10px 0 0;
 }
 .hp-gauge-unavailable {
   width: 128px;
@@ -342,6 +376,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  margin-top: 10px;
   font-size: 12.5px;
   color: var(--hp-muted);
   width: fit-content;
@@ -638,38 +673,46 @@
   margin-top: 2px;
   height: 32px;
 }
-.hp-trend-panel,
-.hp-outlet-panel {
-  border: 1px solid var(--hp-edge);
-  background: var(--hp-panel);
-  border-radius: 12px;
-  padding: 16px;
-}
 .hp-panel-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 .hp-panel-head h3 {
   font-size: 13.5px;
   font-weight: 600;
   color: var(--hp-ink);
 }
+/* Recent trend / Outlet performance panels: title + explicit period label
+   directly under it, so "Feb-Sep 2026" and "Aug 2026" never read as the
+   same question answered twice. */
+.hp-panel-period {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--hp-muted);
+}
+.hp-panel-takeaway {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--hp-ink);
+  line-height: 1.5;
+}
 .hp-metric-switch {
   display: flex;
-  padding: 3px;
+  padding: 2px;
   border: 1px solid var(--hp-edge);
-  border-radius: 8px;
+  border-radius: 7px;
+  flex-shrink: 0;
 }
 .hp-metric-switch button {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
-  padding: 7px 14px;
+  padding: 5px 10px;
   color: var(--hp-muted);
-  border-radius: 6px;
+  border-radius: 5px;
 }
 .hp-metric-switch button[aria-pressed="true"] {
   background: var(--hp-accent);
@@ -1198,7 +1241,20 @@
   font-size: 10.5px;
   margin-top: 4px;
 }
-.hp-register summary > strong {
+.hp-register-value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+.hp-register-value small {
+  color: var(--hp-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.hp-register-value strong {
   font:
     500 15px "IBM Plex Mono",
     monospace;
@@ -1467,5 +1523,600 @@
 @media (max-width: 760px) {
   .hp-follow-content.has-opportunity {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Home rebuild (hierarchy reference: Home mockup) -- everything below is
+   new. Reuses the page's own --hp-* tokens throughout, never global
+   Tailwind utility classes, so it stays visually consistent with the
+   sections above rather than introducing a second styling language. */
+
+/* Hero: headline + at-a-glance metadata list */
+.hp-health-headline {
+  font:
+    600 19px/1.35 "Plus Jakarta Sans",
+    sans-serif;
+  letter-spacing: -0.3px;
+  margin: 2px 0 6px;
+}
+/* Density pass: the hero's right panel is now 3 chips + one collapsed
+   disclosure instead of a always-visible metadata list -- see the JSX
+   comment at the hero for exactly what moved where. */
+.hp-counts-compact {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+}
+.hp-hero-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hp-hero-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--hp-edge);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  font-size: 11.5px;
+  color: var(--hp-muted);
+  white-space: nowrap;
+}
+.hp-count-pill {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  font-weight: 700;
+  height: auto;
+  min-width: 0;
+}
+.hp-hero-more {
+  font-size: 11.5px;
+}
+.hp-hero-more summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--hp-muted);
+  cursor: pointer;
+  list-style: none;
+}
+.hp-hero-more summary::-webkit-details-marker {
+  display: none;
+}
+.hp-hero-more[open] summary .hp-details-chevron {
+  transform: rotate(90deg);
+}
+.hp-hero-more .hp-meta-list {
+  margin-top: 10px;
+}
+.hp-hero-more .hp-summary-row {
+  margin-top: 8px;
+}
+.hp-meta-list {
+  margin: 14px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.hp-meta-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+.hp-meta-list dt {
+  color: var(--hp-muted);
+}
+.hp-meta-list dd {
+  margin: 0;
+  font-weight: 600;
+  color: var(--hp-ink);
+}
+.hp-count-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+}
+.hp-count-critical {
+  background: var(--status-critical);
+}
+.hp-count-warning {
+  background: var(--status-warning);
+  color: #2a1e05;
+}
+
+/* 03 / Key metrics */
+.hp-key-metrics {
+  /* .hp-composition already applies a 24px grid gap between sections --
+     this margin-top was stacking on top of that (52px total, the "too
+     much dead space" the hero->KPI gap complaint was about); trimmed to
+     land the combined gap around 40px, roughly the requested 20-25%
+     tighter rather than doubling up. */
+  margin-top: 16px;
+}
+/* The hero should stay the strongest section on the page -- scoped down
+   just the KPI heading (not every section's, which share this same
+   Heading component) so it doesn't visually compete with the hero
+   directly above it, and pull it closer to its own cards. */
+.hp-key-metrics .hp-section-title {
+  margin-bottom: 10px;
+}
+.hp-key-metrics .hp-section-title h2 {
+  font-size: 19px;
+}
+.hp-kpi-grid-6 {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+/* Density pass: 6 cards is tight -- shrink everything but the headline
+   value (label/delta/sparkline), so the number a manager actually needs
+   still dominates the card instead of shrinking along with it. */
+.hp-kpi-grid-6 .hp-kpi-card {
+  padding: 11px 12px;
+  gap: 3px;
+}
+.hp-kpi-grid-6 .hp-kpi-label {
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hp-kpi-grid-6 .hp-kpi-value {
+  font-size: 21px;
+}
+.hp-kpi-grid-6 .hp-kpi-delta {
+  font-size: 10.5px;
+}
+.hp-kpi-grid-6 .hp-kpi-spark {
+  height: 18px;
+  margin-top: 0;
+}
+@media (max-width: 1199px) {
+  .hp-kpi-grid-6 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 639px) {
+  .hp-kpi-grid-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Shared block wrapper for the new paired sections -- same recipe as the
+   page's existing .hp-domain-card / snapshot panels (--hp-panel/--hp-edge),
+   not the global .panel utility, so it matches this page's own palette. */
+.hp-panel-block {
+  border: 1px solid var(--hp-edge);
+  background: var(--hp-panel);
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+.hp-panel-title {
+  font:
+    600 15px "Plus Jakarta Sans",
+    sans-serif;
+  margin: 0 0 14px;
+}
+
+/* 04 / What needs attention: issue cards + findings-by-domain */
+/* Density pass: Top Issues should be the strongest section on the page,
+   not competing evenly with the domain chart beside it -- widen the ratio
+   and cap the domain panel's width so it reads as a supporting sidebar. */
+.hp-attention-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2.4fr) minmax(240px, 320px);
+  gap: 20px;
+  align-items: start;
+  margin-top: 32px;
+}
+.hp-issue-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.hp-issue-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--hp-edge);
+  border-left: 3px solid var(--hp-edge);
+  border-radius: 10px;
+  background: var(--surface-sunken);
+}
+.hp-issue-critical {
+  border-left-color: var(--status-critical);
+}
+.hp-issue-high {
+  border-left-color: var(--status-warning);
+}
+.hp-issue-medium {
+  border-left-color: var(--status-warning);
+}
+.hp-issue-positive {
+  border-left-color: var(--hp-accent);
+}
+.hp-issue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.hp-issue-domain {
+  font-size: 10.5px;
+  color: var(--hp-muted);
+}
+.hp-issue-title {
+  font:
+    700 13px/1.4 "Plus Jakarta Sans",
+    sans-serif;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hp-issue-evidence {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--hp-muted);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hp-issue-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hp-edge);
+  font-size: 11px;
+}
+.hp-issue-asof {
+  color: var(--hp-muted);
+  white-space: nowrap;
+}
+.hp-issue-footer a,
+.hp-issue-footer button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--hp-accent);
+  font-weight: 600;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* Findings by domain -- stacked bar */
+.hp-domain-bar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 14px;
+  font-size: 11px;
+  color: var(--hp-muted);
+}
+.hp-domain-bar-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.hp-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.hp-legend-critical {
+  background: var(--status-critical);
+}
+.hp-legend-high {
+  background: var(--status-serious);
+}
+.hp-legend-medium {
+  background: var(--status-warning);
+}
+.hp-legend-positive {
+  background: var(--hp-accent);
+}
+.hp-domain-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.hp-domain-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.hp-domain-bar-label {
+  width: 110px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--hp-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hp-domain-bar-track-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.hp-domain-bar-track {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0;
+  height: 20px;
+  border-radius: 5px;
+  overflow: hidden;
+  min-width: 24px;
+}
+.hp-domain-bar-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  border-radius: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  min-width: 10px;
+}
+.hp-domain-bar-seg-critical {
+  background: var(--status-critical);
+}
+.hp-domain-bar-seg-high {
+  background: var(--status-serious);
+}
+.hp-domain-bar-seg-medium {
+  background: var(--status-warning);
+  color: #2a1e05;
+}
+.hp-domain-bar-seg-positive {
+  background: var(--hp-accent);
+  color: #06281f;
+}
+.hp-domain-bar-total {
+  width: 20px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--hp-ink);
+}
+
+/* 05 / Business domain health + trends */
+/* Density pass: stacked full-width, not a 2-column grid -- see the JSX
+   comment at this section for why (the strip is thin now, so the trend
+   chart no longer needs to share a column with it). */
+.hp-domainhealth-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 32px;
+}
+.hp-domain-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.hp-domain-strip-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--hp-edge);
+  border-radius: 10px;
+  background: var(--surface-sunken);
+  font-size: 12px;
+  color: var(--hp-muted);
+  cursor: default;
+}
+.hp-domain-strip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.hp-domain-strip-label {
+  color: var(--hp-ink);
+  font-weight: 500;
+}
+.hp-domain-strip-score {
+  font:
+    700 13px "Plus Jakarta Sans",
+    sans-serif;
+  color: var(--hp-ink);
+}
+.hp-domain-strip-count {
+  font-size: 11px;
+}
+.hp-domain-card-scale {
+  font-size: 11px;
+  color: var(--hp-muted);
+}
+.hp-domain-status {
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.hp-domain-status-good {
+  color: var(--hp-accent-ink);
+  background: var(--hp-accent-soft);
+}
+.hp-domain-status-warning {
+  color: #f2ce8e;
+  background: #332b1f;
+}
+.hp-domain-status-critical {
+  color: #ffa9b5;
+  background: #30202b;
+}
+.hp-domain-card-driver {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--hp-muted);
+}
+.hp-domain-card-note {
+  margin: 8px 0 0;
+  font-size: 10px;
+  font-style: italic;
+  color: var(--hp-muted);
+  opacity: 0.8;
+}
+.hp-domain-card-status {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+/* Bottom modules (Opportunities / Actions / Outcomes / Data quality) */
+/* Density pass: two rows of two (Opportunities+Actions, then Outcomes+
+   Controls) instead of 4 modules crammed across in one row -- the DOM
+   order (Opportunities, Actions, Outcomes, Data quality) already matches,
+   so this is just the column count. */
+.hp-bottom-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  /* Cards default to stretching to match the tallest one in their row --
+     Opportunities (3 items) next to Actions (2 small stat tiles) left
+     Actions looking like an oversized, mostly-empty box. Let each module
+     size to its own content instead. */
+  align-items: start;
+  gap: 16px;
+}
+.hp-bottom-module {
+  border: 1px solid var(--hp-edge);
+  background: var(--hp-panel);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.hp-bottom-module-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.hp-bottom-module-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font:
+    700 13px "Plus Jakarta Sans",
+    sans-serif;
+}
+.hp-bottom-module-head a {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--hp-accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.hp-bottom-item {
+  padding: 10px;
+  border: 1px solid var(--hp-edge);
+  border-radius: 9px;
+  background: var(--surface-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+}
+.hp-bottom-item strong {
+  font-size: 12.5px;
+  color: var(--hp-ink);
+}
+.hp-bottom-item-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--hp-accent-ink);
+}
+.hp-bottom-item-link {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  color: var(--hp-accent);
+  font-weight: 600;
+}
+.hp-bottom-stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(70px, 1fr));
+  gap: 8px;
+}
+.hp-bottom-stat {
+  padding: 10px 8px;
+  border: 1px solid var(--hp-edge);
+  border-radius: 9px;
+  background: var(--surface-sunken);
+  text-align: center;
+}
+.hp-bottom-stat strong {
+  display: block;
+  font:
+    700 20px "Plus Jakarta Sans",
+    sans-serif;
+  color: var(--hp-ink);
+}
+.hp-bottom-stat span {
+  font-size: 10px;
+  color: var(--hp-muted);
+}
+.hp-bottom-stat-critical strong {
+  color: #ffa9b5;
+}
+.hp-bottom-stat-warning strong {
+  color: #f2ce8e;
+}
+.hp-bottom-stat-good strong {
+  color: var(--hp-accent-ink);
+}
+
+@media (max-width: 1023px) {
+  .hp-attention-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 639px) {
+  .hp-issue-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hp-bottom-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hp-domain-bar-label {
+    width: 76px;
   }
 }

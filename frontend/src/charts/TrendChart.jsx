@@ -18,6 +18,7 @@ export default function TrendChart({
   formatValue = String,
   formatX = String,
   compact = false,
+  height = 220,
   stroke = "var(--series-1)",
   gridStroke = "var(--chart-gridline)",
   axisStroke = "var(--chart-ink-muted)",
@@ -41,7 +42,7 @@ export default function TrendChart({
   }
 
   return (
-    <ResponsiveContainer width="100%" height={220}>
+    <ResponsiveContainer width="100%" height={height}>
       <ComposedChart data={merged} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
         <CartesianGrid stroke={gridStroke} vertical={false} />
         <XAxis dataKey={xKey} tickFormatter={formatX} stroke={axisStroke} fontSize={12} />

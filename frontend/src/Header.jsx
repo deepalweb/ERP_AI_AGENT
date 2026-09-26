@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
+import { Search } from "lucide-react";
 import NotificationsBell from "./design/NotificationsBell";
 import { formatCurrency, formatNumber, monthLabel } from "./format";
 
@@ -9,7 +10,7 @@ const NAV_ITEMS = [
   { to: "/actions", label: "Actions" },
   { to: "/outcomes", label: "Outcomes" },
   { to: "/dashboard", label: "Dashboard" },
-  { to: "/customers/predictions", label: "Next Order" },
+  { to: "/customers/predictions", label: "Customers" },
 ];
 
 function ScopeChip({ stores }) {
@@ -41,7 +42,17 @@ function ScopeChip({ stores }) {
   );
 }
 
-export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCount = 0, onSignOut }) {
+export default function Header({ kpis, storeScope, onAskCeleste, onAskCelesteQuestion, newCriticalCount = 0, onSignOut }) {
+  const [question, setQuestion] = useState("");
+
+  function submitQuestion(e) {
+    e.preventDefault();
+    const text = question.trim();
+    if (!text) return;
+    (onAskCelesteQuestion || onAskCeleste)?.(text);
+    setQuestion("");
+  }
+
   return (
     <header className="original-header border-b border-border bg-background">
       <div className="flex items-center justify-between px-6 py-3">
@@ -52,6 +63,19 @@ export default function Header({ kpis, storeScope, onAskCeleste, newCriticalCoun
             <span className="text-xs text-foreground/60">Business Briefing</span>
           </div>
         </div>
+
+        {/* Opens the same Ask Celeste overlay every other entry point uses
+            (App.jsx's askCeleste()) -- never a second chat implementation. */}
+        <form onSubmit={submitQuestion} className="relative hidden max-w-md flex-1 md:block">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground/40" strokeWidth={2} />
+          <input
+            type="text"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            placeholder="Ask a question about your business…"
+            className="w-full rounded-lg border border-border bg-surface-sunken py-2 pl-9 pr-3 text-sm text-foreground-strong placeholder:text-foreground/40 focus:border-accent-border focus:outline-none"
+          />
+        </form>
 
         <nav aria-label="Main navigation" className="flex flex-wrap items-center gap-1">
           {NAV_ITEMS.map((item) => (

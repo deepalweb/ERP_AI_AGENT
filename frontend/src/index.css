@@ -56,38 +56,61 @@
   --font-briefing-mono: var(--briefing-mono);
 }
 
+/* Frontend Rebuild Phase 0: the ONE deliberate token set. Previously this
+   file stacked two entire palettes (a "new" purple dark theme, and an
+   "original pre-redesign" teal theme with its own `@media (prefers-color-
+   scheme: dark)` override) plus a small unconditional patch block to
+   reconcile them -- four layers deep, resolved only by CSS cascade order.
+   The purple theme never actually rendered for any realistic user (every
+   variable it set that mattered was overridden by later blocks); this
+   teal palette is what's actually been on screen throughout this project,
+   confirmed against every real screenshot -- now made the one intentional
+   theme instead of an accident of declaration order. Fixed two real bugs
+   that accidental cascade produced: (1) `--display`/`--sans` were being
+   silently overridden back to system-ui, so Inter/Plus Jakarta Sans (both
+   already loaded in index.html) never rendered anywhere despite dozens of
+   components' class names assuming they were; (2) `--text-subtle`/
+   `--border-strong` collapsed to the exact same values as `--text`/
+   `--border`, so "subtle" text and "strong" borders were visually
+   identical to their plain counterparts everywhere they were used. */
 :root {
   color-scheme: dark;
-  --bg: #070c1b;
-  --surface: #0d1428;
-  --surface-sunken: #101a31;
-  --border: #222d49;
-  --border-strong: #3d4b70;
-  --text-h: #eff2ff;
-  --text: #c2cbe2;
-  --text-subtle: #94a1bf;
-  --code-bg: #131e36;
-  --accent: #a78bfa;
-  --accent-bg: #251b49;
-  --accent-border: #5c3a98;
-  --social-bg: #131e36;
-  --shadow: 0 8px 28px rgba(22, 49, 36, 0.05);
-  --series-1: #8854f6;
-  --series-2: #4694ff;
-  --series-3: #f2b745;
+
+  --bg: #16171d;
+  --surface: #1b1e27;
+  --surface-sunken: #20232e;
+  --code-bg: #1f2028;
+  --border: #2e303a;
+  --border-strong: #454858;
+
+  --text-h: #f3f4f6;
+  --text: #9ca3af;
+  --text-subtle: #6b7280;
+
+  --accent: #69c6b4;
+  --accent-bg: rgba(105, 198, 180, 0.15);
+  --accent-border: rgba(105, 198, 180, 0.5);
+  --social-bg: rgba(47, 48, 58, 0.5);
+  --shadow: rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
   --chart-surface: var(--surface);
   --chart-ink-muted: var(--text-subtle);
   --chart-gridline: var(--border);
   --chart-baseline: var(--border-strong);
-  --status-good: #43d6a0;
-  --status-warning: #f7bd54;
-  --status-serious: #fb9961;
-  --status-critical: #fb7185;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
   --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --display: "Plus Jakarta Sans", "Inter", system-ui, sans-serif;
-  --heading: var(--display);
-  --mono: "IBM Plex Mono", ui-monospace, monospace;
-  /* Existing analytical cards share the foundation while retaining their contracts. */
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+
+  /* Existing analytical (chat) cards share the same foundation. */
   --briefing-bg: var(--bg);
   --briefing-surface: var(--surface);
   --briefing-surface-2: var(--surface-sunken);
@@ -100,16 +123,16 @@
   --briefing-accent-soft: var(--accent-bg);
   --briefing-accent-border: var(--accent-border);
   --briefing-critical: var(--status-critical);
-  --briefing-critical-soft: #351b30;
+  --briefing-critical-soft: color-mix(in srgb, var(--status-critical) 10%, var(--bg));
   --briefing-high: var(--status-serious);
   --briefing-medium: var(--status-warning);
   --briefing-positive: var(--status-good);
-  --briefing-positive-soft: #10332e;
+  --briefing-positive-soft: color-mix(in srgb, var(--status-good) 10%, var(--bg));
   --briefing-display: var(--display);
   --briefing-sans: var(--sans);
   --briefing-mono: var(--mono);
+
   font: 16px/1.5 var(--sans);
-  color-scheme: light;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
@@ -120,9 +143,14 @@
 body {
   margin: 0;
 }
+/* This whole app is the dashboard now (no separate centered landing view),
+   so #root is always full width, full height, and a flex column. */
 #root {
   width: 100%;
   min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
 }
 button,
 summary {
@@ -132,12 +160,12 @@ button:disabled {
   cursor: not-allowed;
 }
 :focus-visible {
-  outline: 3px solid #a78bfa;
+  outline: 3px solid var(--accent);
   outline-offset: 4px;
 }
 ::selection {
-  background: #553995;
-  color: #f2edff;
+  background: var(--accent-bg);
+  color: var(--text-h);
 }
 select {
   max-width: 100%;
@@ -161,236 +189,13 @@ select {
 .skip-link:focus {
   top: 12px;
 }
-.workspace-sidebar {
-  position: fixed;
-  inset: 0 auto 0 0;
-  z-index: 60;
-  width: 236px;
-  display: flex;
-  flex-direction: column;
-  background: #080f21;
-  color: #aebbd6;
-  padding: 30px 18px 0;
-}
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  color: #fff;
-  padding: 0 12px;
-  font: 650 30px/1.1 var(--display);
-  letter-spacing: -1.5px;
-}
-.brand-symbol {
-  color: #aa82ff;
-}
-.brand-descriptor {
-  display: block;
-  margin-top: 8px;
-  font: 500 8px/1.5 var(--sans);
-  letter-spacing: 1.75px;
-  color: #7e8cac;
-}
-.workspace-identity {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 34px 2px 26px;
-  padding: 13px 9px;
-  border-top: 1px solid #202b44;
-  border-bottom: 1px solid #202b44;
-}
-.workspace-avatar,
-.account-avatar {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
-  border-radius: 10px;
-  background: #232044;
-  color: #d5c6ff;
-  font-size: 11px;
-  font-weight: 700;
-}
-.workspace-identity strong,
-.sidebar-account strong {
-  display: block;
-  font-size: 12px;
-  font-weight: 550;
-  color: #ecedff;
-}
-.workspace-identity span:not(.workspace-avatar),
-.sidebar-account div span {
-  display: block;
-  font-size: 10px;
-  color: #8b9bbc;
-  margin-top: 3px;
-}
-.navigation-group {
-  margin-bottom: 30px;
-}
-.navigation-group > p {
-  padding: 0 14px;
-  margin-bottom: 12px;
-  font-size: 9px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1.6px;
-  color: #7f8eaf;
-}
-.navigation-item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 13px;
-  margin: 4px 0;
-  border-radius: 8px;
-  font-size: 12px;
-  transition: background 0.15s;
-}
-.navigation-item:hover {
-  background: #141d36;
-  color: white;
-}
-.navigation-item.active {
-  background: #2a2055;
-  color: #d6c6ff;
-  font-weight: 650;
-}
-.nav-dot {
-  margin-left: auto;
-  height: 5px;
-  width: 5px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.sidebar-bottom {
-  margin-top: auto;
-}
-.sidebar-ask {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  border: 1px solid #443767;
-  border-radius: 9px;
-  padding: 12px;
-  color: #d7cdff;
-  font-size: 12px;
-}
-.sidebar-ask span {
-  flex: 1;
-  text-align: left;
-}
-.sidebar-ask:hover {
-  background: #1d2440;
-}
-.sidebar-bottom > p {
-  margin: 13px 0 26px;
-  text-align: center;
-  color: #8292b3;
-  font-size: 10px;
-}
-.sidebar-account {
-  margin: 0 -18px;
-  border-top: 1px solid #202b44;
-  padding: 20px 18px;
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.sidebar-account button {
-  margin-left: auto;
-  color: #9caece;
-}
-.account-avatar {
-  border-radius: 50%;
-  background: #50417c;
-  color: white;
-}
-.workspace-topbar {
-  height: 72px;
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  margin-left: 236px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-  padding: 0 40px;
-  border-bottom: 1px solid var(--border);
-  background: #0a1022ed;
-  backdrop-filter: blur(14px);
-}
-.topbar-workspace,
-.topbar-page {
-  font-size: 12px;
-  white-space: nowrap;
-}
-.topbar-workspace {
-  color: var(--text-subtle);
-}
-.topbar-page {
-  font-weight: 550;
-  color: var(--text-h);
-}
-.topbar-ask {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 12px;
-  font-size: 11px;
-  color: var(--text-h);
-}
-.scope-menu {
-  position: relative;
-}
-.scope-menu summary {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  list-style: none;
-  font-size: 11px;
-}
-.scope-menu summary::-webkit-details-marker {
-  display: none;
-}
-.scope-menu > div {
-  position: absolute;
-  top: 34px;
-  right: 0;
-  width: 250px;
-  padding: 18px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-  font-size: 12px;
-}
-.scope-menu p {
-  margin: 8px 0;
-  color: var(--text-subtle);
-  font-size: 11px;
-}
-.scope-menu li {
-  padding: 4px 0;
-}
-.mobile-menu-button {
-  display: none;
-}
 .workspace-main {
-  margin-left: 236px;
-  min-height: calc(100svh - 72px);
+  margin-left: 0;
+  min-height: 0;
 }
 .workspace-page {
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: 36px 40px 28px;
+  max-width: none;
+  padding: 24px;
 }
 .eyebrow {
   color: var(--text-subtle);
@@ -437,7 +242,7 @@ select {
   margin-top: 11px;
 }
 .today-intro h1 span {
-  color: #a78bfa;
+  color: var(--accent);
 }
 .today-intro p:not(.eyebrow) {
   margin-top: 11px;
@@ -446,7 +251,7 @@ select {
 }
 .inline-divider {
   margin: 0 9px;
-  color: #4b5979;
+  color: var(--border-strong);
 }
 .primary-link {
   display: inline-flex;
@@ -462,7 +267,7 @@ select {
   font-weight: 550;
 }
 .primary-link:hover {
-  background: #6d3ad4;
+  filter: brightness(0.9);
 }
 .freshness-strip {
   display: flex;
@@ -473,7 +278,7 @@ select {
   margin-bottom: 23px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #0b1326;
+  background: var(--surface-sunken);
   font-size: 10px;
   color: var(--text-subtle);
 }
@@ -530,16 +335,16 @@ select {
   border-radius: 8px;
 }
 .stat-icon.green {
-  background: #152b2a;
-  color: #55d9b0;
+  background: color-mix(in srgb, var(--status-good) 20%, var(--bg));
+  color: var(--status-good);
 }
 .stat-icon.amber {
-  background: #302619;
-  color: #f4bc50;
+  background: color-mix(in srgb, var(--status-warning) 20%, var(--bg));
+  color: var(--status-warning);
 }
 .stat-icon.rose {
-  background: #301d32;
-  color: #fb88ac;
+  background: color-mix(in srgb, var(--status-critical) 20%, var(--bg));
+  color: var(--status-critical);
 }
 .management-stat > strong {
   display: block;
@@ -594,17 +399,17 @@ select {
   border-bottom: 0;
 }
 .case-row:hover {
-  background: #121d35;
+  background: var(--surface-sunken);
 }
 .case-marker {
   width: 4px;
   height: 38px;
   flex-shrink: 0;
   border-radius: 3px;
-  background: #f4b854;
+  background: var(--status-warning);
 }
 .case-marker.positive {
-  background: #47cfa5;
+  background: var(--status-good);
 }
 .case-row h3 {
   color: var(--text-h);
@@ -622,26 +427,26 @@ select {
   color: var(--text-subtle);
   font-size: 10px;
   border-top: 1px solid var(--border);
-  background: #0a1225;
+  background: var(--surface-sunken);
 }
 .today-aside {
   padding-top: 56px;
 }
 .next-step-card {
-  background: #171630;
-  border: 1px solid #423366;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-strong);
   padding: 23px;
   border-radius: 13px;
-  color: #c5bde3;
+  color: var(--text);
 }
 .next-step-card > svg {
   margin-bottom: 20px;
 }
 .next-step-card .eyebrow {
-  color: #a496c5;
+  color: var(--text-subtle);
 }
 .next-step-card h2 {
-  color: #eee7ff;
+  color: var(--text-h);
   font: 550 23px/1.4 var(--display);
   letter-spacing: -0.7px;
   margin: 10px 0;
@@ -656,11 +461,11 @@ select {
   align-items: center;
   justify-content: space-between;
   padding: 11px 13px;
-  background: #29204b;
-  border: 1px solid #4d387b;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
   margin: 22px 0 11px;
-  color: #d8c8ff;
+  color: var(--text-h);
   font-size: 12px;
   font-weight: 600;
 }
@@ -668,7 +473,7 @@ select {
   display: block;
   font-size: 9px;
   line-height: 1.65;
-  color: #a49bbc;
+  color: var(--text-subtle);
 }
 .customer-shortcut {
   display: flex;
@@ -738,7 +543,7 @@ select {
   padding: 28px;
   border: 1px dashed var(--border-strong);
   border-radius: 12px;
-  background: #0b1326;
+  background: var(--surface);
   color: var(--text-subtle);
   font-size: 12px;
   text-align: center;
@@ -786,14 +591,14 @@ select {
 .outcome-explainer {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  background: #141b32;
-  border: 1px solid #283351;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
   border-radius: 13px;
   overflow: hidden;
 }
 .outcome-explainer > div {
   padding: 23px;
-  border-right: 1px solid #283351;
+  border-right: 1px solid var(--border);
 }
 .outcome-explainer > div:last-child {
   border: 0;
@@ -808,6 +613,13 @@ select {
   font-size: 12px;
   color: var(--text-subtle);
 }
+.original-header > div:first-child {
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.original-header > div:last-child {
+  flex-wrap: wrap;
+}
 @media (min-width: 1600px) {
   .workspace-page {
     padding-top: 44px;
@@ -816,9 +628,6 @@ select {
 @media (max-width: 1199px) {
   .workspace-page {
     padding: 28px 24px;
-  }
-  .workspace-topbar {
-    padding: 0 24px;
   }
   .management-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -831,52 +640,17 @@ select {
     font-size: 37px;
   }
 }
-@media (max-width: 1023px) {
-  .workspace-sidebar {
-    display: none;
-    top: 72px;
-    width: 268px;
-    padding-top: 22px;
-    box-shadow: 8px 15px 35px #16302630;
-    overflow-y: auto;
-  }
-  .workspace-sidebar.is-open {
-    display: flex;
-  }
-  .workspace-topbar,
-  .workspace-main {
-    margin-left: 0;
-  }
-  .mobile-menu-button {
-    display: block;
-  }
-  .workspace-identity {
-    margin: 22px 2px;
-  }
-}
 @media (max-width: 639px) {
   .workspace-page {
     padding: 26px 18px;
   }
-  .workspace-topbar {
-    height: 64px;
-    padding: 0 16px;
-    gap: 8px;
+  .original-header nav {
+    order: 3;
+    width: 100%;
   }
-  .workspace-sidebar {
-    top: 64px;
-  }
-  .topbar-workspace,
-  .topbar-ask span,
-  .scope-menu summary span {
-    display: none;
-  }
-  .topbar-page {
-    font-size: 11px;
-    white-space: normal;
-  }
-  .topbar-ask {
-    padding: 8px;
+  .original-header > div {
+    padding-left: 16px;
+    padding-right: 16px;
   }
   .today-intro {
     align-items: flex-start;
@@ -955,7 +729,7 @@ select {
   }
   .outcome-explainer > div {
     border-right: 0;
-    border-bottom: 1px solid #283351;
+    border-bottom: 1px solid var(--border);
     padding: 18px;
   }
   .section-heading {
@@ -983,8 +757,8 @@ select {
   transition: border-color 0.15s;
 }
 .investigation-row:hover {
-  border-color: #7353b7;
-  box-shadow: 0 4px 15px #173d2607;
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow);
 }
 .case-detail-heading {
   padding-bottom: 25px;
@@ -1005,7 +779,7 @@ select {
   margin: 0 -5px 10px;
   border: 1px solid var(--border);
   border-radius: 10px;
-  background: #0b1326;
+  background: var(--surface);
 }
 .case-detail-page [id^="action-"]:target {
   border-color: var(--accent);
@@ -1036,7 +810,7 @@ select {
   overflow: hidden;
 }
 .ask-dialog::backdrop {
-  background: #132b2566;
+  background: rgba(10, 12, 20, 0.4);
   backdrop-filter: blur(3px);
 }
 .ask-dialog-panel {
@@ -1079,129 +853,4 @@ select {
   .chat-welcome h3 {
     font-size: 25px;
   }
-}
-
-/* Original pre-redesign palette and document layout. */
-:root {
-  --text: #59636e;
-  --text-h: #17212b;
-  --bg: #f7f8f8;
-  --border: #dfe3e6;
-  --code-bg: #eef1f2;
-  --accent: #176b5b;
-  --accent-bg: rgba(23, 107, 91, 0.1);
-  --accent-border: rgba(23, 107, 91, 0.45);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
-
-  --series-1: #2a78d6;
-  --series-2: #eb6834;
-  --series-3: #1baf7a;
-  --chart-surface: #fcfcfb;
-  --chart-ink-muted: #898781;
-  --chart-gridline: #e1e0d9;
-  --chart-baseline: #c3c2b7;
-  --status-good: #0ca30c;
-  --status-warning: #fab219;
-  --status-serious: #ec835a;
-  --status-critical: #d03b3b;
-
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
-
-  font: 18px/145% var(--sans);
-  letter-spacing: 0;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #69c6b4;
-    --accent-bg: rgba(105, 198, 180, 0.15);
-    --accent-border: rgba(105, 198, 180, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-
-    --series-1: #3987e5;
-    --series-2: #d95926;
-    --series-3: #199e70;
-    --chart-surface: #1a1a19;
-    --chart-ink-muted: #898781;
-    --chart-gridline: #2c2c2a;
-    --chart-baseline: #383835;
-    --status-good: #0ca30c;
-    --status-warning: #fab219;
-    --status-serious: #ec835a;
-    --status-critical: #d03b3b;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-body {
-  margin: 0;
-}
-
-/* This whole app is the dashboard now (no separate centered landing view),
-   so #root is always full width — the old fixed 1126px/centered/
-   border-inline box (toggled off only via a body.view-dashboard class the
-   pre-rebuild App.jsx used to set) no longer applies to anything. */
-#root {
-  width: 100%;
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-}
-
-/* The old landing-page's h1/h2/p/code element-selector overrides (56px
-   headings, zeroed paragraph margins, etc.) lived here and were unlayered
-   CSS — which always beats Tailwind's @layer-wrapped utilities regardless
-   of source order, so every <h1>/<h2> in the new Tailwind-based components
-   was silently rendering at the old landing page's giant font size no
-   matter what text-* utility class was applied. Removed: nothing in the
-   current app (grepped, no <code>/.counter usage either) relies on them,
-   and every new component sets its own typography via Tailwind classes.
-   Tailwind's own base reset (from @import "tailwindcss" above) now governs
-   default heading/paragraph styling instead. */
-
-
-:root { --surface: var(--chart-surface); --surface-sunken: var(--code-bg); --text-subtle: var(--text); --border-strong: var(--border); --display: var(--heading); --briefing-critical-soft: color-mix(in srgb,var(--status-critical) 10%,var(--bg)); --briefing-positive-soft: color-mix(in srgb,var(--status-good) 10%,var(--bg)); }
-.workspace-main { margin-left: 0; min-height: 0; }
-.original-header > div:first-child { flex-wrap: wrap; gap: 16px; }
-.original-header > div:last-child { flex-wrap: wrap; }
-.workspace-page { max-width: none; padding: 24px; }
-.panel,.work-item,.investigation-row,.customer-shortcut,.empty-state,.case-detail-page [id^="action-"],.chat-welcome button { background: var(--surface); }
-.case-row:hover,.panel-footnote,.outcome-explainer { background: var(--surface-sunken); }
-.outcome-explainer,.outcome-explainer > div { border-color: var(--border); }
-.primary-link { background: var(--accent); }
-::selection { background: var(--accent-bg); color: var(--text-h); }
-:focus-visible { outline-color: var(--accent); }
-@media(max-width:639px) {
- .original-header nav { order: 3; width: 100%; }
- .original-header > div { padding-left: 16px; padding-right: 16px; }
- .original-briefing { padding: 20px 16px; }
- .original-briefing .w-28 { width: 70px; }
- .original-briefing .w-24 { display: none; }
- .original-briefing .w-36 { width: 110px; }
 }

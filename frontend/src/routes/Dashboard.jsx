@@ -9,7 +9,7 @@ import {
   fetchOperationsSummary,
   fetchOrdersByHour,
 } from "../api";
-import Section from "../design/Section";
+import Section from "../design/Card";
 import Pill, { pillTone } from "../design/Pill";
 import RankedBarChart from "../charts/RankedBarChart";
 import DonutChart from "../charts/DonutChart";

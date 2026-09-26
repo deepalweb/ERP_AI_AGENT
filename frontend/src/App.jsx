@@ -37,12 +37,13 @@ export default function App({ onSignOut }) {
       <Header
         storeScope={storeScope}
         onAskCeleste={() => setOverlayOpen(true)}
+        onAskCelesteQuestion={askCeleste}
         onSignOut={onSignOut}
       />
 
       <main id="main-content" tabIndex={-1} className="workspace-main">
         <Routes>
-          <Route path="/" element={<Home onAskCeleste={askCeleste} />} />
+          <Route path="/" element={<Home />} />
           <Route path="/actions" element={<Actions />} />
           <Route path="/investigate" element={<Investigate />} />
           <Route path="/investigate/:caseId" element={<CaseDetail />} />

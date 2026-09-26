@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchCustomerLifecycle,
   fetchCustomerNextBasket,
   fetchCustomerOrderForecastChart,
+  fetchCustomerProfile,
   fetchCustomerSearch,
   fetchCustomerOutletBehavior,
   fetchCustomerPredictions,
@@ -12,10 +13,11 @@ import {
   fetchStockAlerts,
   fetchTopProductStockCoverage,
 } from "../api";
-import Section from "../design/Section";
+import Section from "../design/Card";
 import Pill from "../design/Pill";
 import DonutChart from "../charts/DonutChart";
 import OrderForecastChart from "../charts/OrderForecastChart";
+import { LIFECYCLE_LABEL, VALUE_TIER_LABEL } from "../design/customerVocabulary";
 import { formatCurrency, formatDate, formatNumber } from "../format";
 
 const STATUS_TABS = [
@@ -48,6 +50,23 @@ const SORT_OPTIONS = [
 ];
 
 const PAGE_SIZE = 25;
+
+/** True once `isLoading` has been true for longer than delayMs -- lets a
+ * slow section say something more honest than a silently-frozen skeleton
+ * (a real UX complaint: this page's summary query can take 20+ seconds and
+ * previously gave no sign it was still working). */
+function useSlowFlag(isLoading, delayMs = 6000) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!isLoading) {
+      setSlow(false);
+      return undefined;
+    }
+    const t = setTimeout(() => setSlow(true), delayMs);
+    return () => clearTimeout(t);
+  }, [isLoading, delayMs]);
+  return slow;
+}
 
 function ExecutiveTile({ label, value, sub, tone }) {
   const toneClass = tone === "critical" ? "text-critical" : tone === "warning" ? "text-warning" : tone === "good" ? "text-good" : "text-foreground-strong";
@@ -176,6 +195,81 @@ function NextBasketSection({ partnerId, enabled }) {
  * "773000003"). Name search can return several people (names aren't
  * unique here), so more than one match shows a picker instead of
  * guessing which person was meant. */
+/** Frontend Intelligence Integration, Phase 2 (second half): the Customer
+ * Lookup Design Phase A/B work (masked search, lifecycle category, value
+ * tier, recent-vs-prior deterioration) existed only inside Ask Celeste's
+ * CustomerLookupCard until now -- this is the same GET /customers/{id}/
+ * profile call, rendered on the Customers page itself. No raw phone/
+ * email anywhere; no churn score; no blended deterioration verdict, same
+ * discipline as the chat card. */
+function CustomerProfileSection({ partnerId }) {
+  const profile = useQuery({
+    queryKey: ["customerProfile", partnerId],
+    queryFn: () => fetchCustomerProfile(partnerId),
+    enabled: Boolean(partnerId),
+  });
+
+  if (profile.isLoading) return <p className="mt-3 text-sm text-foreground/50">Loading profile…</p>;
+  if (profile.data?.status !== "ok") return null;
+
+  const c = profile.data.customer;
+  const d = c.deterioration;
+
+  return (
+    <div className="mt-3 space-y-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <ProfileStat label="Lifecycle" value={LIFECYCLE_LABEL[c.lifecycle_category] ?? "—"} />
+        <ProfileStat label="Value tier" value={VALUE_TIER_LABEL[c.value_tier] ?? "—"} />
+        <ProfileStat label="Lifetime orders" value={formatNumber(c.order_count)} />
+        <ProfileStat label="Lifetime revenue" value={formatCurrency(c.lifetime_revenue)} />
+      </div>
+
+      {d && (
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-foreground/50">
+            Recent vs. prior activity ({d.window_days}d windows)
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-border p-3">
+              <div className="text-xs text-foreground/50">Recent {d.window_days}d</div>
+              <div className="mt-1 text-foreground-strong">{formatNumber(d.recent.orders)} orders</div>
+              <div className="text-foreground-strong">{formatCurrency(d.recent.revenue)}</div>
+              <div className="text-xs text-foreground/50">
+                {d.recent.avg_order_value != null ? `${formatCurrency(d.recent.avg_order_value)} AOV` : "no AOV"}
+              </div>
+            </div>
+            <div className="rounded-lg border border-border p-3">
+              <div className="text-xs text-foreground/50">Prior {d.window_days}d</div>
+              <div className="mt-1 text-foreground-strong">{formatNumber(d.prior.orders)} orders</div>
+              <div className="text-foreground-strong">{formatCurrency(d.prior.revenue)}</div>
+              <div className="text-xs text-foreground/50">
+                {d.prior.avg_order_value != null ? `${formatCurrency(d.prior.avg_order_value)} AOV` : "no AOV"}
+              </div>
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-foreground/50">
+            {d.days_since_last_order != null ? `Last order ${d.days_since_last_order}d ago` : "No last-order date available"}
+            {d.historical_reorder_interval_days != null && ` — historically orders about every ${d.historical_reorder_interval_days}d`}
+            {d.cadence_ratio != null && ` (${d.cadence_ratio}× normal cadence)`}
+            . Raw comparison only — not a churn score or a flagged risk.
+          </p>
+        </div>
+      )}
+
+      <p className="text-xs text-foreground/40">Data through {profile.data.as_of ?? "unknown"}</p>
+    </div>
+  );
+}
+
+function ProfileStat({ label, value }) {
+  return (
+    <div>
+      <div className="text-xs text-foreground/50">{label}</div>
+      <div className="text-sm font-medium text-foreground-strong">{value}</div>
+    </div>
+  );
+}
+
 function CustomerLookupSection() {
   const [form, setForm] = useState({ name: "", email: "", phone: "" });
   const [searching, setSearching] = useState(false);
@@ -203,7 +297,7 @@ function CustomerLookupSection() {
   const selected = results?.find((r) => r.partner_id === selectedId) ?? null;
 
   return (
-    <Section title="Find a customer" note="Look up one customer and generate their predicted next order">
+    <Section title="Find a customer" note="Search by name, phone, or email — masked results only, never a raw phone or email">
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <input
           type="text"
@@ -289,6 +383,7 @@ function CustomerLookupSection() {
               </button>
             )}
           </div>
+          <CustomerProfileSection partnerId={selected.partner_id} />
           <NextBasketSection partnerId={selected.partner_id} enabled={true} />
         </div>
       )}
@@ -774,6 +869,7 @@ export default function CustomerPredictions() {
     queryFn: () => fetchOutletOrderForecast(5),
   });
   const lifecycle = useQuery({ queryKey: ["customerLifecycle"], queryFn: fetchCustomerLifecycle });
+  const summarySlow = useSlowFlag(summary.isLoading);
 
   function changeStatus(next) {
     setStatus(next);
@@ -787,27 +883,20 @@ export default function CustomerPredictions() {
     setExpandedId(null);
   }
 
-  if (summary.isLoading) {
-    return (
-      <div className="px-6 py-6">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-24 animate-pulse rounded-xl border border-border bg-chart-surface" />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (summary.data?.status !== "ok") {
-    return <div className="px-6 py-6 text-sm text-foreground/60">Couldn&rsquo;t load customer predictions.</div>;
-  }
-
-  const s = summary.data;
+  // Previously this whole page waited behind `if (summary.isLoading) return
+  // <skeleton>` before ANY section mounted -- every section below already
+  // has its own independent loading/error state, but they never got the
+  // chance to render while that one (often slow) query was pending. Now the
+  // page shell and every summary-independent section render immediately;
+  // only the two sections that actually need `summary`'s data (Executive
+  // summary, Purchase pattern) wait on it, and do so visibly.
+  const s = summary.data?.status === "ok" ? summary.data : null;
   const rows = list.data?.status === "ok" ? list.data.results : [];
   const total = list.data?.status === "ok" ? list.data.total : 0;
-  const pattern = s.pattern_distribution;
-  const patternTotal = (pattern.ten_plus ?? 0) + (pattern.three_to_nine ?? 0) + (pattern.one_to_two ?? 0) + (pattern.excluded ?? 0);
+  const pattern = s?.pattern_distribution;
+  const patternTotal = pattern
+    ? (pattern.ten_plus ?? 0) + (pattern.three_to_nine ?? 0) + (pattern.one_to_two ?? 0) + (pattern.excluded ?? 0)
+    : 0;
 
   return (
     <div className="px-6 py-6">
@@ -819,7 +908,7 @@ export default function CustomerPredictions() {
             business-wide average.
           </p>
         </div>
-        {s.as_of_date && <span className="text-xs text-foreground/60">Data through {formatDate(s.as_of_date)}</span>}
+        {s?.as_of_date && <span className="text-xs text-foreground/60">Data through {formatDate(s.as_of_date)}</span>}
       </div>
 
       {/* Find a customer */}
@@ -899,57 +988,89 @@ export default function CustomerPredictions() {
 
       {/* Executive summary */}
       <Section title="Executive summary">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          <ExecutiveTile label="Customers analyzed" value={formatNumber(s.total_customers)} />
-          <ExecutiveTile
-            label="With a usable pattern"
-            value={formatNumber(s.predictable_customers)}
-            sub={`${((s.predictable_customers / s.total_customers) * 100).toFixed(0)}% of all customers`}
-          />
-          <ExecutiveTile label="Approaching / due" value={formatNumber(s.due.count)} tone="warning" />
-          <ExecutiveTile label="Overdue" value={formatNumber(s.overdue.count)} tone="critical" />
-          <ExecutiveTile label="Expected orders" value={formatNumber(s.expected_orders)} />
-          <ExecutiveTile
-            label="Expected revenue"
-            value={formatCurrency(s.expected_revenue)}
-            sub={`${formatCurrency(s.high_confidence_expected_revenue)} high-confidence`}
-          />
-        </div>
-        <p className="mt-3 text-xs text-foreground/50">
-          &ldquo;Customers analyzed&rdquo; is everyone who has ever ordered. &ldquo;With a usable pattern&rdquo; is
-          the smaller group (3+ orders with a consistent gap) Celeste can actually predict for — most of the rest
-          have only 1&ndash;2 orders and don&rsquo;t have an individual pattern yet. Expected revenue is the
-          typical size of each customer&rsquo;s next order, not a business-wide forecast.
-        </p>
+        {summary.isLoading && (
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              {Array.from({ length: 6 }).map((_, i) => (
+                <div key={i} className="h-16 animate-pulse rounded-lg border border-border bg-chart-surface" />
+              ))}
+            </div>
+            <p className="mt-2 text-sm text-foreground/50">
+              {summarySlow
+                ? "This is taking longer than usual. You can keep using the rest of the page while this loads."
+                : "Loading…"}
+            </p>
+          </>
+        )}
+        {!summary.isLoading && !s && (
+          <p className="text-sm text-foreground/60">
+            Couldn&rsquo;t load the executive summary.{" "}
+            <button type="button" onClick={() => summary.refetch()} className="text-accent underline">
+              Try again
+            </button>
+          </p>
+        )}
+        {s && (
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <ExecutiveTile label="Customers analyzed" value={formatNumber(s.total_customers)} />
+              <ExecutiveTile
+                label="With a usable pattern"
+                value={formatNumber(s.predictable_customers)}
+                sub={`${((s.predictable_customers / s.total_customers) * 100).toFixed(0)}% of all customers`}
+              />
+              <ExecutiveTile label="Approaching / due" value={formatNumber(s.due.count)} tone="warning" />
+              <ExecutiveTile label="Overdue" value={formatNumber(s.overdue.count)} tone="critical" />
+              <ExecutiveTile label="Expected orders" value={formatNumber(s.expected_orders)} />
+              <ExecutiveTile
+                label="Expected revenue"
+                value={formatCurrency(s.expected_revenue)}
+                sub={`${formatCurrency(s.high_confidence_expected_revenue)} high-confidence`}
+              />
+            </div>
+            <p className="mt-3 text-xs text-foreground/50">
+              &ldquo;Customers analyzed&rdquo; is everyone who has ever ordered. &ldquo;With a usable pattern&rdquo; is
+              the smaller group (3+ orders with a consistent gap) Celeste can actually predict for — most of the rest
+              have only 1&ndash;2 orders and don&rsquo;t have an individual pattern yet. Expected revenue is the
+              typical size of each customer&rsquo;s next order, not a business-wide forecast.
+            </p>
+          </>
+        )}
       </Section>
 
       {/* Purchase pattern */}
-      <Section title="Purchase pattern" note={`${formatNumber(s.predictable_customers)} predictable`}>
-        <div className="flex flex-wrap items-center gap-8">
-          <div className="w-56 flex-shrink-0">
-            <DonutChart
-              data={PATTERN_ROWS.map((r) => ({ name: r.label, value: pattern[r.id] }))}
-              colors={PATTERN_ROWS.map((r) => r.color)}
-              formatValue={(v) => formatNumber(v)}
-              showLegend={false}
-            />
-          </div>
-          <div className="flex flex-col gap-3">
-            {PATTERN_ROWS.map((r) => (
-              <div key={r.id} className="flex items-center gap-2 text-sm">
-                <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: r.color }} />
-                <span className="font-medium text-foreground-strong">{r.label}</span>
-                <span className="text-foreground/50">
-                  {formatNumber(pattern[r.id])} ({patternTotal ? Math.round((pattern[r.id] / patternTotal) * 100) : 0}%)
-                </span>
+      <Section title="Purchase pattern" note={s ? `${formatNumber(s.predictable_customers)} predictable` : undefined}>
+        {summary.isLoading && <p className="text-sm text-foreground/50">Loading&hellip;</p>}
+        {!summary.isLoading && !s && <p className="text-sm text-foreground/60">Couldn&rsquo;t load purchase pattern.</p>}
+        {s && (
+          <>
+            <div className="flex flex-wrap items-center gap-8">
+              <div className="w-56 flex-shrink-0">
+                <DonutChart
+                  data={PATTERN_ROWS.map((r) => ({ name: r.label, value: pattern[r.id] }))}
+                  colors={PATTERN_ROWS.map((r) => r.color)}
+                  formatValue={(v) => formatNumber(v)}
+                  showLegend={false}
+                />
               </div>
-            ))}
-          </div>
-        </div>
-        <p className="mt-3 text-xs text-foreground/50">
-          Excluded: orders far more often than a real shopper would — likely an internal or staff account, not
-          an individual customer.
-        </p>
+              <div className="flex flex-col gap-3">
+                {PATTERN_ROWS.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 text-sm">
+                    <span className="h-2.5 w-2.5 flex-shrink-0 rounded-full" style={{ backgroundColor: r.color }} />
+                    <span className="font-medium text-foreground-strong">{r.label}</span>
+                    <span className="text-foreground/50">
+                      {formatNumber(pattern[r.id])} ({patternTotal ? Math.round((pattern[r.id] / patternTotal) * 100) : 0}%)
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <p className="mt-3 text-xs text-foreground/50">
+              Excluded: orders far more often than a real shopper would — likely an internal or staff account, not
+              an individual customer.
+            </p>
+          </>
+        )}
       </Section>
 
       {/* Overdue severity breakdown moved into Customer lifecycle below
@@ -1026,6 +1147,7 @@ export default function CustomerPredictions() {
               ))}
             </tbody>
           </table>
+          {list.isLoading && <p className="py-6 text-center text-sm text-foreground/50">Loading customers&hellip;</p>}
           {rows.length === 0 && !list.isLoading && (
             <p className="py-6 text-center text-sm text-foreground/50">No customers in this view.</p>
           )}
