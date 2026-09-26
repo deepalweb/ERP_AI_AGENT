@@ -5,10 +5,32 @@
   --hp-edge: #263050;
   --hp-ink: #edf1fa;
   --hp-muted: #94a3bb;
-  --hp-accent: #2dd4a8;
-  --hp-accent-soft: rgba(45, 212, 168, 0.14);
-  --hp-accent-border: rgba(45, 212, 168, 0.32);
-  --hp-accent-ink: #a9f0da;
+  /* Design-review follow-up: brand/interactive color and "this is a good
+     result" color were the same teal, the exact collision flagged in an
+     earlier review ("clickable" and "this is good" looked identical).
+     Cyan now owns interactive/brand (links, buttons, active states,
+     focus rings); a separate emerald owns positive/good semantics
+     (opportunity findings, "good" domain status, resolved/improved
+     stats) -- see the 7 selectors below switched to --hp-positive*. */
+  --hp-accent: #06b6d4;
+  --hp-accent-soft: rgba(6, 182, 212, 0.14);
+  --hp-accent-border: rgba(6, 182, 212, 0.32);
+  --hp-accent-ink: #67e8f9;
+  --hp-positive: #10b981;
+  --hp-positive-soft: rgba(16, 185, 129, 0.14);
+  --hp-positive-border: rgba(16, 185, 129, 0.32);
+  --hp-positive-ink: #6ee7b7;
+  --hp-mono: "JetBrains Mono", ui-monospace, monospace;
+  /* One card recipe for the whole page (design-review follow-up): every
+     "card" surface -- hero, panel blocks, KPI cards, issue cards, bottom
+     modules -- previously had its own slightly different border-radius
+     (9/10/12/14px) and NO shadow anywhere, which is exactly what reads as
+     flat/generated rather than a considered system. Two-layer elevation
+     (a tight contact shadow + a soft ambient spread) is the standard
+     "real depth, not flat" recipe; kept subtle since this is a dense
+     dashboard, not a marketing page. */
+  --hp-card-radius: 12px;
+  --hp-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 20px -6px rgba(0, 0, 0, 0.35);
   background: var(--hp-bg);
   color: var(--hp-ink);
   padding: 24px 40px 44px;
@@ -227,9 +249,35 @@
      chips (still capped so they don't stretch into empty space). */
   grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px);
   border: 1px solid var(--hp-edge);
-  border-radius: 12px;
+  border-radius: var(--hp-card-radius);
+  box-shadow: var(--hp-shadow-card);
   background: var(--hp-panel);
   overflow: hidden;
+}
+.hp-snapshot::before,
+.hp-snapshot::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  border-radius: 50%;
+  filter: blur(60px);
+  pointer-events: none;
+}
+.hp-snapshot::before {
+  top: -90px;
+  left: 8%;
+  width: 280px;
+  height: 280px;
+  background: var(--hp-accent);
+  opacity: 0.1;
+}
+.hp-snapshot::after {
+  bottom: -110px;
+  right: 4%;
+  width: 320px;
+  height: 320px;
+  background: var(--hp-positive);
+  opacity: 0.08;
 }
 .hp-snapshot-decor {
   position: absolute;
@@ -361,8 +409,7 @@
 }
 .hp-health-figure {
   font:
-    600 38px "Plus Jakarta Sans",
-    sans-serif;
+    600 38px var(--hp-mono);
   letter-spacing: -1px;
   margin: 2px 0;
 }
@@ -643,12 +690,17 @@
 .hp-kpi-card {
   border: 1px solid var(--hp-edge);
   background: var(--surface-sunken);
-  border-radius: 12px;
+  border-radius: var(--hp-card-radius);
+  box-shadow: var(--hp-shadow-card);
   padding: 16px;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  transition: border-color 0.15s ease;
+}
+.hp-kpi-card:hover {
+  border-color: var(--hp-accent-border);
 }
 .hp-kpi-label {
   font-size: 12px;
@@ -656,9 +708,7 @@
   color: var(--hp-muted);
 }
 .hp-kpi-value {
-  font:
-    700 26px "Plus Jakarta Sans",
-    sans-serif;
+  font: 700 26px var(--hp-mono);
   color: var(--hp-ink);
 }
 .hp-kpi-delta {
@@ -957,9 +1007,9 @@
 }
 .hp-positive .hp-badge,
 .hp-badge.hp-positive {
-  color: var(--hp-accent-ink);
-  border-color: var(--hp-accent-border);
-  background: var(--hp-accent-soft);
+  color: var(--hp-positive-ink);
+  border-color: var(--hp-positive-border);
+  background: var(--hp-positive-soft);
 }
 .hp-priority h3 {
   font:
@@ -1113,7 +1163,7 @@
   border-radius: 12px;
 }
 .hp-opportunity {
-  border-left: 3px solid var(--hp-accent);
+  border-left: 3px solid var(--hp-positive);
 }
 .hp-opportunity h3 {
   font:
@@ -1568,6 +1618,7 @@
 .hp-count-pill {
   border-radius: 999px;
   padding: 6px 10px;
+  font-family: var(--hp-mono);
   font-size: 11.5px;
   font-weight: 700;
   height: auto;
@@ -1614,6 +1665,7 @@
 }
 .hp-meta-list dd {
   margin: 0;
+  font-family: var(--hp-mono);
   font-weight: 600;
   color: var(--hp-ink);
 }
@@ -1700,7 +1752,8 @@
 .hp-panel-block {
   border: 1px solid var(--hp-edge);
   background: var(--hp-panel);
-  border-radius: 14px;
+  border-radius: var(--hp-card-radius);
+  box-shadow: var(--hp-shadow-card);
   padding: 16px 18px;
 }
 .hp-panel-title {
@@ -1731,14 +1784,19 @@
   flex-direction: column;
   justify-content: space-between;
   gap: 10px;
-  padding: 14px;
+  padding: 16px;
   border: 1px solid var(--hp-edge);
   border-left: 3px solid var(--hp-edge);
-  border-radius: 10px;
+  border-radius: var(--hp-card-radius);
+  box-shadow: var(--hp-shadow-card);
   background: var(--surface-sunken);
+  transition: border-color 0.15s ease;
 }
 .hp-issue-critical {
   border-left-color: var(--status-critical);
+}
+.hp-issue-critical:hover {
+  border-color: color-mix(in srgb, var(--status-critical) 45%, var(--hp-edge));
 }
 .hp-issue-high {
   border-left-color: var(--status-warning);
@@ -1746,8 +1804,15 @@
 .hp-issue-medium {
   border-left-color: var(--status-warning);
 }
+.hp-issue-high:hover,
+.hp-issue-medium:hover {
+  border-color: color-mix(in srgb, var(--status-warning) 45%, var(--hp-edge));
+}
 .hp-issue-positive {
-  border-left-color: var(--hp-accent);
+  border-left-color: var(--hp-positive);
+}
+.hp-issue-positive:hover {
+  border-color: var(--hp-positive-border);
 }
 .hp-issue-head {
   display: flex;
@@ -1790,6 +1855,7 @@
 }
 .hp-issue-asof {
   color: var(--hp-muted);
+  font-family: var(--hp-mono);
   white-space: nowrap;
 }
 .hp-issue-footer a,
@@ -1834,7 +1900,7 @@
   background: var(--status-warning);
 }
 .hp-legend-positive {
-  background: var(--hp-accent);
+  background: var(--hp-positive);
 }
 .hp-domain-bars {
   display: flex;
@@ -1890,7 +1956,7 @@
   color: #2a1e05;
 }
 .hp-domain-bar-seg-positive {
-  background: var(--hp-accent);
+  background: var(--hp-positive);
   color: #06281f;
 }
 .hp-domain-bar-total {
@@ -1940,9 +2006,7 @@
   font-weight: 500;
 }
 .hp-domain-strip-score {
-  font:
-    700 13px "Plus Jakarta Sans",
-    sans-serif;
+  font: 700 13px var(--hp-mono);
   color: var(--hp-ink);
 }
 .hp-domain-strip-count {
@@ -1961,8 +2025,8 @@
   text-transform: uppercase;
 }
 .hp-domain-status-good {
-  color: var(--hp-accent-ink);
-  background: var(--hp-accent-soft);
+  color: var(--hp-positive-ink);
+  background: var(--hp-positive-soft);
 }
 .hp-domain-status-warning {
   color: #f2ce8e;
@@ -2009,7 +2073,8 @@
 .hp-bottom-module {
   border: 1px solid var(--hp-edge);
   background: var(--hp-panel);
-  border-radius: 14px;
+  border-radius: var(--hp-card-radius);
+  box-shadow: var(--hp-shadow-card);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -2101,7 +2166,7 @@
   color: #f2ce8e;
 }
 .hp-bottom-stat-good strong {
-  color: var(--hp-accent-ink);
+  color: var(--hp-positive-ink);
 }
 
 @media (max-width: 1023px) {
