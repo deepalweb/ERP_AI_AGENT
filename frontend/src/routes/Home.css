@@ -1,17 +1,16 @@
 /* Selected executive briefing layout; scoped to the live Home page. */
 .home-briefing {
-  --hp-bg: #0b0f1a;
-  --hp-panel: #121a2c;
-  --hp-edge: #263050;
-  --hp-ink: #edf1fa;
-  --hp-muted: #94a3bb;
-  /* Design-review follow-up: brand/interactive color and "this is a good
-     result" color were the same teal, the exact collision flagged in an
-     earlier review ("clickable" and "this is good" looked identical).
-     Cyan now owns interactive/brand (links, buttons, active states,
-     focus rings); a separate emerald owns positive/good semantics
-     (opportunity findings, "good" domain status, resolved/improved
-     stats) -- see the 7 selectors below switched to --hp-positive*. */
+  /* Token values matched directly against the approved "Celeste
+     Intelligence -- Executive Business Briefing" reference (Tailwind
+     config: midnight/surface/accent scale) rather than hand-picked --
+     the earlier passes recolored this page's own pre-existing palette,
+     which is why they kept reading as "not quite it". */
+  --hp-bg: #070b12;
+  --hp-panel: #0d1527;
+  --hp-panel-inset: #090f1c;
+  --hp-edge: #1e293b;
+  --hp-ink: #e2e8f0;
+  --hp-muted: #94a3b8;
   --hp-accent: #06b6d4;
   --hp-accent-soft: rgba(6, 182, 212, 0.14);
   --hp-accent-border: rgba(6, 182, 212, 0.32);
@@ -20,23 +19,33 @@
   --hp-positive-soft: rgba(16, 185, 129, 0.14);
   --hp-positive-border: rgba(16, 185, 129, 0.32);
   --hp-positive-ink: #6ee7b7;
+  /* "High" severity and "warning" domain status get their own amber
+     token, distinct from critical (rose) -- the reference's own legend
+     ("Critical" rose / "High" amber / "Medium" cyan / "Positive"
+     emerald) uses 4 genuinely different hues, not 2 hues reused. */
+  --hp-warning: #f59e0b;
+  --hp-warning-soft: rgba(245, 158, 11, 0.14);
+  --hp-warning-border: rgba(245, 158, 11, 0.32);
+  --hp-warning-ink: #fcd34d;
+  --hp-critical: #ef4444;
+  --hp-critical-soft: rgba(239, 68, 68, 0.14);
+  --hp-critical-border: rgba(239, 68, 68, 0.32);
+  --hp-critical-ink: #fca5a5;
   --hp-mono: "JetBrains Mono", ui-monospace, monospace;
-  /* One card recipe for the whole page (design-review follow-up): every
-     "card" surface -- hero, panel blocks, KPI cards, issue cards, bottom
-     modules -- previously had its own slightly different border-radius
-     (9/10/12/14px) and NO shadow anywhere, which is exactly what reads as
-     flat/generated rather than a considered system. Two-layer elevation
-     (a tight contact shadow + a soft ambient spread) is the standard
-     "real depth, not flat" recipe; kept subtle since this is a dense
-     dashboard, not a marketing page. */
   --hp-card-radius: 12px;
+  --hp-card-radius-lg: 16px;
   --hp-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 20px -6px rgba(0, 0, 0, 0.35);
+  /* Local overrides so this page's cards read in the reference's exact
+     rose/amber/emerald semantics without touching the site-wide status
+     tokens other pages rely on. */
+  --status-critical: var(--hp-critical);
+  --status-warning: var(--hp-warning);
+  --status-serious: var(--hp-warning);
+  --status-good: var(--hp-positive);
   background: var(--hp-bg);
   color: var(--hp-ink);
   padding: 24px 40px 44px;
-  font:
-    14.5px/1.6 "Inter",
-    sans-serif;
+  font: 14.5px/1.6 "Inter", sans-serif;
   min-height: 100vh;
 }
 .home-briefing button,
@@ -80,17 +89,14 @@
   padding: 26px 0 22px;
 }
 .hp-kicker {
-  font-size: 10.5px;
-  font-weight: 600;
+  font: 600 10.5px var(--hp-mono);
   letter-spacing: 1.6px;
   text-transform: uppercase;
   color: var(--hp-muted);
 }
 .hp-orientation h1 {
-  font:
-    700 40px/1.2 "Plus Jakarta Sans",
-    sans-serif;
-  letter-spacing: -1.4px;
+  font: 800 32px/1.2 "Inter", sans-serif;
+  letter-spacing: -0.8px;
   margin: 10px 0;
 }
 .hp-orientation h1 span {
@@ -249,9 +255,9 @@
      chips (still capped so they don't stretch into empty space). */
   grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px);
   border: 1px solid var(--hp-edge);
-  border-radius: var(--hp-card-radius);
-  box-shadow: var(--hp-shadow-card);
-  background: var(--hp-panel);
+  border-radius: var(--hp-card-radius-lg);
+  box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.5);
+  background: linear-gradient(to right, #0c1426, #0f1a30, #0c1527);
   overflow: hidden;
 }
 .hp-snapshot::before,
@@ -260,24 +266,25 @@
   position: absolute;
   z-index: 0;
   border-radius: 50%;
-  filter: blur(60px);
+  filter: blur(64px);
   pointer-events: none;
 }
 .hp-snapshot::before {
-  top: -120px;
-  left: 6%;
-  width: 380px;
-  height: 380px;
+  top: -80px;
+  right: -80px;
+  left: auto;
+  width: 320px;
+  height: 320px;
   background: var(--hp-accent);
-  opacity: 0.22;
+  opacity: 0.1;
 }
 .hp-snapshot::after {
-  bottom: -140px;
-  right: 2%;
-  width: 420px;
-  height: 420px;
+  bottom: -80px;
+  left: -80px;
+  width: 320px;
+  height: 320px;
   background: var(--hp-positive);
-  opacity: 0.16;
+  opacity: 0.1;
 }
 .hp-snapshot-decor {
   position: absolute;
@@ -337,9 +344,7 @@
   gap: 12px;
 }
 .hp-health-title {
-  font:
-    700 19px/1.3 "Plus Jakarta Sans",
-    sans-serif;
+  font: 700 18px/1.3 "Inter", sans-serif;
   margin: 10px 0 4px;
 }
 .hp-health-subtitle {
@@ -391,9 +396,7 @@
   justify-content: center;
   flex-shrink: 0;
   color: var(--hp-muted);
-  font:
-    600 15px "Plus Jakarta Sans",
-    sans-serif;
+  font: 600 15px "Inter", sans-serif;
 }
 .hp-health-summary {
   display: flex;
@@ -703,8 +706,9 @@
   border-color: var(--hp-accent-border);
 }
 .hp-kpi-label {
-  font-size: 12px;
-  font-weight: 600;
+  font: 500 11px var(--hp-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
   color: var(--hp-muted);
 }
 .hp-kpi-value {
@@ -933,10 +937,8 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  font:
-    700 24px/1.3 "Plus Jakarta Sans",
-    sans-serif;
-  letter-spacing: -0.5px;
+  font: 700 21px/1.3 "Inter", sans-serif;
+  letter-spacing: -0.3px;
   margin-top: 6px;
 }
 .hp-section-icon {
@@ -991,19 +993,31 @@
   align-items: center;
   width: fit-content;
   padding: 3px 9px;
-  border: 1px solid #71603b;
+  border: 1px solid var(--hp-warning-border);
   border-radius: 5px;
-  color: #f2ce8e;
-  background: #332b1f;
-  font-size: 10.5px;
-  font-weight: 600;
+  color: var(--hp-warning-ink);
+  background: var(--hp-warning-soft);
+  font: 700 10px var(--hp-mono);
+  text-transform: uppercase;
   white-space: nowrap;
 }
 .hp-critical .hp-badge,
 .hp-badge.hp-critical {
-  color: #ffa9b5;
-  border-color: #693846;
-  background: #30202b;
+  color: var(--hp-critical-ink);
+  border-color: var(--hp-critical-border);
+  background: var(--hp-critical-soft);
+}
+.hp-high .hp-badge,
+.hp-badge.hp-high {
+  color: var(--hp-warning-ink);
+  border-color: var(--hp-warning-border);
+  background: var(--hp-warning-soft);
+}
+.hp-medium .hp-badge,
+.hp-badge.hp-medium {
+  color: var(--hp-accent-ink);
+  border-color: var(--hp-accent-border);
+  background: var(--hp-accent-soft);
 }
 .hp-positive .hp-badge,
 .hp-badge.hp-positive {
@@ -1364,7 +1378,7 @@
 
 .home-briefing {
   --surface: var(--hp-panel);
-  --surface-sunken: #182238;
+  --surface-sunken: var(--hp-panel-inset);
   --text-h: var(--hp-ink);
   --text: var(--hp-muted);
   --text-subtle: var(--hp-muted);
@@ -1472,6 +1486,12 @@
     grid-template-columns: 1fr;
   }
   .hp-domain-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .hp-domainhealth-section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hp-domain-cards-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .hp-severity-grid {
@@ -1583,10 +1603,8 @@
 
 /* Hero: headline + at-a-glance metadata list */
 .hp-health-headline {
-  font:
-    600 19px/1.35 "Plus Jakarta Sans",
-    sans-serif;
-  letter-spacing: -0.3px;
+  font: 700 18px/1.35 "Inter", sans-serif;
+  letter-spacing: -0.2px;
   margin: 2px 0 6px;
 }
 /* Density pass: the hero's right panel is now 3 chips + one collapsed
@@ -1716,17 +1734,19 @@
    value (label/delta/sparkline), so the number a manager actually needs
    still dominates the card instead of shrinking along with it. */
 .hp-kpi-grid-6 .hp-kpi-card {
-  padding: 11px 12px;
-  gap: 3px;
+  padding: 14px;
+  gap: 4px;
 }
 .hp-kpi-grid-6 .hp-kpi-label {
-  font-size: 10px;
+  font: 500 10px var(--hp-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .hp-kpi-grid-6 .hp-kpi-value {
-  font-size: 21px;
+  font-size: 19px;
 }
 .hp-kpi-grid-6 .hp-kpi-delta {
   font-size: 10.5px;
@@ -1757,10 +1777,14 @@
   padding: 16px 18px;
 }
 .hp-panel-title {
-  font:
-    600 15px "Plus Jakarta Sans",
-    sans-serif;
+  font: 700 15px "Inter", sans-serif;
+  letter-spacing: -0.1px;
   margin: 0 0 14px;
+}
+.hp-panel-total {
+  font: 500 11px var(--hp-mono);
+  color: var(--hp-muted);
+  white-space: nowrap;
 }
 
 /* 04 / What needs attention: issue cards + findings-by-domain */
@@ -1825,9 +1849,7 @@
   color: var(--hp-muted);
 }
 .hp-issue-title {
-  font:
-    700 13px/1.4 "Plus Jakarta Sans",
-    sans-serif;
+  font: 700 13px/1.4 "Inter", sans-serif;
   margin: 0;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -1891,13 +1913,13 @@
   display: inline-block;
 }
 .hp-legend-critical {
-  background: var(--status-critical);
+  background: var(--hp-critical);
 }
 .hp-legend-high {
-  background: var(--status-serious);
+  background: var(--hp-warning);
 }
 .hp-legend-medium {
-  background: var(--status-warning);
+  background: var(--hp-accent);
 }
 .hp-legend-positive {
   background: var(--hp-positive);
@@ -1946,14 +1968,15 @@
   min-width: 10px;
 }
 .hp-domain-bar-seg-critical {
-  background: var(--status-critical);
+  background: var(--hp-critical);
 }
 .hp-domain-bar-seg-high {
-  background: var(--status-serious);
+  background: var(--hp-warning);
+  color: #2a1e05;
 }
 .hp-domain-bar-seg-medium {
-  background: var(--status-warning);
-  color: #2a1e05;
+  background: var(--hp-accent);
+  color: #062028;
 }
 .hp-domain-bar-seg-positive {
   background: var(--hp-positive);
@@ -1968,91 +1991,103 @@
   color: var(--hp-ink);
 }
 
-/* 05 / Business domain health + trends */
-/* Density pass: stacked full-width, not a 2-column grid -- see the JSX
-   comment at this section for why (the strip is thin now, so the trend
-   chart no longer needs to share a column with it). */
+/* 05 / Business domain health + trends -- domain health and Recent trend
+   sit side by side as the reference shows (each takes half the row);
+   Outlet performance is extra real functionality the reference doesn't
+   have a slot for, so it gets its own full-width row underneath rather
+   than being dropped. */
 .hp-domainhealth-section {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
   margin-top: 32px;
 }
-.hp-domain-strip {
+.hp-domainhealth-section > .hp-panel-block:last-child {
+  grid-column: 1 / -1;
+}
+.hp-domain-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.hp-domain-health-card {
+  border: 1px solid var(--hp-edge);
+  background: var(--surface-sunken);
+  border-radius: var(--hp-card-radius);
+  padding: 12px;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.hp-domain-health-critical {
+  border-color: var(--hp-critical-border);
+}
+.hp-domain-health-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
-.hp-domain-strip-item {
-  display: inline-flex;
+.hp-domain-health-label {
+  display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 12px;
-  border: 1px solid var(--hp-edge);
-  border-radius: 10px;
-  background: var(--surface-sunken);
-  font-size: 12px;
-  color: var(--hp-muted);
-  cursor: default;
-}
-.hp-domain-strip-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.hp-domain-strip-label {
+  font-size: 11px;
+  font-weight: 600;
   color: var(--hp-ink);
-  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.hp-domain-strip-score {
-  font: 700 13px var(--hp-mono);
+.hp-domain-health-score {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.hp-domain-health-score strong {
+  font: 700 20px var(--hp-mono);
   color: var(--hp-ink);
 }
-.hp-domain-strip-count {
-  font-size: 11px;
+.hp-domain-health-critical .hp-domain-health-score strong {
+  color: var(--hp-critical-ink);
 }
-.hp-domain-card-scale {
-  font-size: 11px;
+.hp-domain-health-score span {
+  font: 500 10px var(--hp-mono);
   color: var(--hp-muted);
+}
+.hp-domain-health-driver {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--hp-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 .hp-domain-status {
-  margin-left: auto;
   padding: 2px 7px;
   border-radius: 5px;
-  font-size: 9.5px;
-  font-weight: 700;
+  font: 700 9px var(--hp-mono);
   text-transform: uppercase;
+  white-space: nowrap;
 }
 .hp-domain-status-good {
   color: var(--hp-positive-ink);
   background: var(--hp-positive-soft);
 }
 .hp-domain-status-warning {
-  color: #f2ce8e;
-  background: #332b1f;
+  color: var(--hp-warning-ink);
+  background: var(--hp-warning-soft);
 }
 .hp-domain-status-critical {
-  color: #ffa9b5;
-  background: #30202b;
+  color: var(--hp-critical-ink);
+  background: var(--hp-critical-soft);
 }
-.hp-domain-card-driver {
-  margin: 8px 0 0;
-  font-size: 11px;
-  line-height: 1.5;
+.hp-domain-status-unscored {
   color: var(--hp-muted);
-}
-.hp-domain-card-note {
-  margin: 8px 0 0;
-  font-size: 10px;
-  font-style: italic;
-  color: var(--hp-muted);
-  opacity: 0.8;
-}
-.hp-domain-card-status {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
+  background: var(--hp-edge);
 }
 
 /* Bottom modules (Opportunities / Actions / Outcomes / Data quality) */
@@ -2092,9 +2127,7 @@
   align-items: center;
   gap: 6px;
   margin: 0;
-  font:
-    700 13px "Plus Jakarta Sans",
-    sans-serif;
+  font: 700 13px "Inter", sans-serif;
 }
 .hp-bottom-module-head a {
   font-size: 10.5px;
@@ -2142,30 +2175,52 @@
   gap: 8px;
 }
 .hp-bottom-stat {
-  padding: 10px 8px;
+  padding: 10px;
   border: 1px solid var(--hp-edge);
   border-radius: 9px;
   background: var(--surface-sunken);
-  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hp-bottom-stat-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font: 700 9px var(--hp-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--hp-muted);
 }
 .hp-bottom-stat strong {
   display: block;
-  font:
-    700 20px "Plus Jakarta Sans",
-    sans-serif;
+  font: 700 20px var(--hp-mono);
   color: var(--hp-ink);
 }
-.hp-bottom-stat span {
+.hp-bottom-stat span:not(.hp-bottom-stat-label) {
   font-size: 10px;
   color: var(--hp-muted);
 }
-.hp-bottom-stat-critical strong {
-  color: #ffa9b5;
+.hp-bottom-stat-critical {
+  border-color: var(--hp-critical-border);
 }
-.hp-bottom-stat-warning strong {
-  color: #f2ce8e;
+.hp-bottom-stat-critical strong,
+.hp-bottom-stat-critical .hp-bottom-stat-label {
+  color: var(--hp-critical-ink);
 }
-.hp-bottom-stat-good strong {
+.hp-bottom-stat-warning {
+  border-color: var(--hp-warning-border);
+}
+.hp-bottom-stat-warning strong,
+.hp-bottom-stat-warning .hp-bottom-stat-label {
+  color: var(--hp-warning-ink);
+}
+.hp-bottom-stat-good {
+  border-color: var(--hp-positive-border);
+}
+.hp-bottom-stat-good strong,
+.hp-bottom-stat-good .hp-bottom-stat-label {
   color: var(--hp-positive-ink);
 }
 

@@ -233,36 +233,62 @@ function Heading({ number, label, title, icon: Icon, children }) {
     </div>
   );
 }
-// Business domain health -- density pass: a compact horizontal status
-// strip instead of 6 full cards. Each real scored domain (health.py) shows
-// its status dot + score; Suppliers/Controls (no computed score) show an
-// honest open-finding count instead of a fabricated 0-100 number. A
-// domain's own real driver sentence is still available on hover rather
-// than always-visible, since this is a glance-and-move-on strip, not a
-// detail view (the detail lives in Investigate).
-function DomainHealthStrip({ domains, supplierStatus, controlsStatus }) {
+// Business domain health -- compact card grid (reverted from the earlier
+// thin strip to match the approved executive-briefing reference, which
+// shows each domain as its own small card rather than an inline chip
+// list). Each real scored domain (health.py) shows its status badge,
+// score/100, and its own real driver sentence; Suppliers/Controls (no
+// computed score -- health.py only scores Sales/Operations/Inventory/
+// Customers) show an honest open-finding count instead of a fabricated
+// number. No per-card sparkline: there's no real per-domain time series
+// to draw one from, and a decorative fake trend shape would violate this
+// page's own no-fabrication rule.
+function DomainHealthCards({ domains, supplierStatus, controlsStatus }) {
   return (
-    <div className="hp-domain-strip">
+    <div className="hp-domain-cards-grid">
       {domains.map((item) => {
         const Icon = DOMAIN_ICON[item.id] || BarChart3;
+        const status = item.status || "good";
+        const driver = (item.drivers || [])[0];
         return (
-          <div className="hp-domain-strip-item" key={item.id} title={(item.drivers || [])[0] || "No notable drivers reported."}>
-            <span className={`hp-domain-strip-dot hp-domain-bar-${item.status || "good"}`} />
-            <Icon size={12} />
-            <span className="hp-domain-strip-label">{item.label}</span>
-            <strong className="hp-domain-strip-score">{count(item.score)}</strong>
+          <div className={`hp-domain-health-card hp-domain-health-${status}`} key={item.id}>
+            <div className="hp-domain-health-head">
+              <span className="hp-domain-health-label">
+                <Icon size={12} /> {item.label}
+              </span>
+              <span className={`hp-domain-status hp-domain-status-${status}`}>{status}</span>
+            </div>
+            <div className="hp-domain-health-score">
+              <strong>{count(item.score)}</strong>
+              <span>/100</span>
+            </div>
+            {driver && <p className="hp-domain-health-driver">{driver}</p>}
           </div>
         );
       })}
-      <div className="hp-domain-strip-item" title="No health score computed for this domain yet.">
-        <Truck size={12} />
-        <span className="hp-domain-strip-label">Suppliers</span>
-        <span className="hp-domain-strip-count">{supplierStatus.count} finding{supplierStatus.count === 1 ? "" : "s"}</span>
+      <div className="hp-domain-health-card hp-domain-health-unscored">
+        <div className="hp-domain-health-head">
+          <span className="hp-domain-health-label">
+            <Truck size={12} /> Suppliers
+          </span>
+          <span className="hp-domain-status hp-domain-status-unscored">No score</span>
+        </div>
+        <div className="hp-domain-health-score">
+          <strong>{supplierStatus.count}</strong>
+          <span>finding{supplierStatus.count === 1 ? "" : "s"} open</span>
+        </div>
       </div>
-      <div className="hp-domain-strip-item" title="No health score computed for this domain yet.">
-        <ShieldCheck size={12} />
-        <span className="hp-domain-strip-label">Controls</span>
-        <span className="hp-domain-strip-count">{controlsStatus.count} finding{controlsStatus.count === 1 ? "" : "s"}</span>
+      <div className="hp-domain-health-card hp-domain-health-unscored">
+        <div className="hp-domain-health-head">
+          <span className="hp-domain-health-label">
+            <ShieldCheck size={12} /> Controls
+          </span>
+          <span className="hp-domain-status hp-domain-status-unscored">No score</span>
+        </div>
+        <div className="hp-domain-health-score">
+          <strong>{controlsStatus.count}</strong>
+          <span>finding{controlsStatus.count === 1 ? "" : "s"} open</span>
+        </div>
       </div>
     </div>
   );
@@ -643,14 +669,18 @@ function ActionsModule({ outstanding, blocked }) {
       </div>
       <div className="hp-bottom-stat-row">
         <div className={`hp-bottom-stat ${outstanding.data?.total > 0 ? "hp-bottom-stat-warning" : ""}`}>
+          <span className="hp-bottom-stat-label">
+            Outstanding <Clock3 size={11} />
+          </span>
           <strong>{count(outstanding.data?.total)}</strong>
-          <span>Outstanding</span>
         </div>
         {/* Zero blocked is good news, not a critical state -- only color
             it as an alarm when there's actually something to flag. */}
         <div className={`hp-bottom-stat ${blocked.data?.total > 0 ? "hp-bottom-stat-critical" : ""}`}>
+          <span className="hp-bottom-stat-label">
+            Blocked verification <ShieldCheck size={11} />
+          </span>
           <strong>{count(blocked.data?.total)}</strong>
-          <span>Blocked verification</span>
         </div>
       </div>
     </div>
@@ -667,16 +697,16 @@ function OutcomesModule({ outcomes, outcomesSummary }) {
       {s && (
         <div className="hp-bottom-stat-row">
           <div className="hp-bottom-stat hp-bottom-stat-good">
+            <span className="hp-bottom-stat-label">Resolved</span>
             <strong>{count(s.resolved)}</strong>
-            <span>resolved</span>
           </div>
           <div className="hp-bottom-stat">
+            <span className="hp-bottom-stat-label">Pending</span>
             <strong>{count(s.pending)}</strong>
-            <span>pending</span>
           </div>
           <div className="hp-bottom-stat hp-bottom-stat-good">
+            <span className="hp-bottom-stat-label">Improved</span>
             <strong>{count(s.verdicts?.improved)}</strong>
-            <span>improved</span>
           </div>
         </div>
       )}
@@ -717,12 +747,16 @@ function DataQualityModule({ findings, stockAlerts }) {
       {stock && (
         <div className="hp-bottom-stat-row">
           <div className="hp-bottom-stat hp-bottom-stat-critical">
+            <span className="hp-bottom-stat-label">
+              Out of stock <Package size={11} />
+            </span>
             <strong>{formatNumber(stock.distinct_out_of_stock_products)}</strong>
-            <span>out of stock</span>
           </div>
           <div className="hp-bottom-stat hp-bottom-stat-warning">
+            <span className="hp-bottom-stat-label">
+              Low stock <AlertTriangle size={11} />
+            </span>
             <strong>{formatNumber(stock.distinct_low_stock_products)}</strong>
-            <span>low stock</span>
           </div>
         </div>
       )}
@@ -1158,7 +1192,10 @@ export default function Home() {
                 )}
               </div>
               <div className="hp-attention-domains hp-panel-block">
-                <h2 className="hp-panel-title">Findings by domain</h2>
+                <div className="hp-panel-head">
+                  <h2 className="hp-panel-title">Findings by domain</h2>
+                  <span className="hp-panel-total">Total: {findings.length}</span>
+                </div>
                 <div className="hp-domain-bar-legend">
                   {SEVERITY_TIERS.map((t) => (
                     <span key={t}><i className={`hp-legend-dot hp-legend-${SEVERITY_BAR_TONE[t]}`} />{t}</span>
@@ -1178,7 +1215,7 @@ export default function Home() {
               <div className="hp-panel-block">
                 <h2 className="hp-panel-title">Business domain health</h2>
                 {health?.domains?.length > 0 ? (
-                  <DomainHealthStrip domains={health.domains} supplierStatus={supplierStatus} controlsStatus={controlsStatus} />
+                  <DomainHealthCards domains={health.domains} supplierStatus={supplierStatus} controlsStatus={controlsStatus} />
                 ) : (
                   <p className="hp-muted">Domain scores are unavailable.</p>
                 )}
