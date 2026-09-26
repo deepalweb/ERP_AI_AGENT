@@ -264,20 +264,20 @@
   pointer-events: none;
 }
 .hp-snapshot::before {
-  top: -90px;
-  left: 8%;
-  width: 280px;
-  height: 280px;
+  top: -120px;
+  left: 6%;
+  width: 380px;
+  height: 380px;
   background: var(--hp-accent);
-  opacity: 0.1;
+  opacity: 0.22;
 }
 .hp-snapshot::after {
-  bottom: -110px;
-  right: 4%;
-  width: 320px;
-  height: 320px;
+  bottom: -140px;
+  right: 2%;
+  width: 420px;
+  height: 420px;
   background: var(--hp-positive);
-  opacity: 0.08;
+  opacity: 0.16;
 }
 .hp-snapshot-decor {
   position: absolute;
