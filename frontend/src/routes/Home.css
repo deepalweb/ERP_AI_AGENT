@@ -48,7 +48,7 @@
      mx-auto container -- without that cap, every space-between row
      (header, hero) stretches to the full monitor width and leaves a
      dead gap in the middle on anything wider than a laptop screen. */
-  max-width: 1700px;
+  max-width: 1360px;
   margin: 0 auto;
   padding: 24px 40px 44px;
   font: 14.5px/1.6 "Inter", sans-serif;
@@ -87,11 +87,17 @@
 
 /* Header */
 .hp-orientation {
+  /* Was justify-content: space-between -- on a wide monitor that forces
+     the title and the metadata chips to the two far edges regardless of
+     how narrow the page's own max-width is, leaving a dead gap between
+     them (flagged directly in a screenshot). flex-start + a real gap
+     keeps them a fixed distance apart instead of stretching to fill
+     whatever room exists. */
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: flex-start;
   flex-wrap: wrap;
-  gap: 24px;
+  gap: 56px;
   padding: 26px 0 22px;
 }
 .hp-kicker {
@@ -255,11 +261,14 @@
 .hp-snapshot {
   position: relative;
   display: grid;
-  /* Hero density follow-up: 3 real zones now -- score (auto-width, just
-     fits the gauge), executive message (the middle zone that used to be
-     empty, now 1fr so it takes the freed-up space), and the metadata
-     chips (still capped so they don't stretch into empty space). */
-  grid-template-columns: auto minmax(0, 1fr) minmax(240px, 300px);
+  /* Message column was minmax(0, 1fr) -- on a wide screen that stretches
+     it to fill whatever space is left between the gauge and the chips,
+     and since the real headline/supporting-line/domain-strip content is
+     only ~500-550px wide, the extra width just sat empty in the middle
+     of the card (flagged directly in a screenshot). Capping it means
+     any leftover space lands after the last column (the card's right
+     edge) instead of inside the readable content. */
+  grid-template-columns: auto minmax(0, 560px) minmax(240px, 300px);
   border: 1px solid var(--hp-edge);
   border-radius: var(--hp-card-radius-lg);
   box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.5);
