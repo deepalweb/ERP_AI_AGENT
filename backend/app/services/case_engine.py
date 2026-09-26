@@ -1323,6 +1323,16 @@ def _summarize_snapshot(snapshot: dict) -> dict:
     )
     return {
         "title": snapshot.get("title"),
+        # Real, pre-existing bug found while rebuilding Case Detail (2026-09-26):
+        # ControlsInvestigationPanel.jsx and plainLanguage.js's controlsExecutiveText/
+        # controlsResolutionText all branch on `latest.metric_id`, but this whitelist
+        # never included it -- every controls case silently fell through to the
+        # generic panel-less/brief-less fallback (an empty "Control investigation"
+        # card, generic brief text) even though the purpose-built copy for it already
+        # existed and was correct. `metric_id` is a real, stable field on every
+        # finding snapshot (state_findings.py/investigation.py both set it) -- not
+        # new data, just never surfaced past this summarizer.
+        "metric_id": snapshot.get("metric_id"),
         "category": snapshot.get("category"),
         "severity": snapshot.get("severity"),
         "priority": snapshot.get("priority"),

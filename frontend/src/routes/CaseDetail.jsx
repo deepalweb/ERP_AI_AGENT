@@ -743,207 +743,212 @@ export default function CaseDetail() {
         </div>
       )}
 
-      {/* 4. Investigation content -- rendered directly, no "Visual
-          investigation" heading over an empty section. Only a dedicated
-          panel or a real multi-point trend renders anything at all; a
-          metric with neither renders nothing here rather than an empty
-          labeled box. */}
-      {(isStuckStockCount || isInventoryStockOut || isRevenueCase || isCompletedVarianceCase || isIncidentCase
-        || isControlsCase || isSupplierCase || trendPoints.length > 1) && (
-        <div className="mt-4">
-          <Section title={isControlsCase ? "Control investigation" : "Investigation"}>
-            {isStuckStockCount ? (
-              <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
-            ) : isInventoryStockOut ? (
-              <InventoryInvestigationPanel latest={latest} asOfDate={latest?.confirm?.period} />
-            ) : isRevenueCase ? (
-              <RevenueInvestigationPanel latest={latest} casePeriod={latest?.confirm?.period} />
-            ) : isCompletedVarianceCase ? (
-              <CompletedVarianceInvestigationPanel latest={latest} />
-            ) : isIncidentCase ? (
-              <IncidentInvestigationPanel latest={latest} />
-            ) : isControlsCase ? (
-              <ControlsInvestigationPanel latest={latest} statusLabel={statusMeta.label} />
-            ) : isSupplierCase ? (
-              <SupplierInvestigationPanel latest={latest} />
+      {/* Investigation + decision, side by side: what happened/what we
+          know on the left (the reading half), what management decides on
+          the right (the deciding half) -- Case Detail V4's management-
+          flow layout, replacing the earlier equal-weighted vertical stack
+          of same-width cards. */}
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
+        <div className="flex flex-col gap-4 lg:col-span-8">
+          {/* Investigation content -- rendered directly, no "Visual
+              investigation" heading over an empty section. Only a
+              dedicated panel or a real multi-point trend renders anything
+              at all; a metric with neither renders nothing here rather
+              than an empty labeled box. */}
+          {(isStuckStockCount || isInventoryStockOut || isRevenueCase || isCompletedVarianceCase || isIncidentCase
+            || isControlsCase || isSupplierCase || trendPoints.length > 1) && (
+            <Section title={isControlsCase ? "Control investigation" : "Investigation"}>
+              {isStuckStockCount ? (
+                <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
+              ) : isInventoryStockOut ? (
+                <InventoryInvestigationPanel latest={latest} asOfDate={latest?.confirm?.period} />
+              ) : isRevenueCase ? (
+                <RevenueInvestigationPanel latest={latest} casePeriod={latest?.confirm?.period} />
+              ) : isCompletedVarianceCase ? (
+                <CompletedVarianceInvestigationPanel latest={latest} />
+              ) : isIncidentCase ? (
+                <IncidentInvestigationPanel latest={latest} />
+              ) : isControlsCase ? (
+                <ControlsInvestigationPanel latest={latest} statusLabel={statusMeta.label} />
+              ) : isSupplierCase ? (
+                <SupplierInvestigationPanel latest={latest} />
+              ) : (
+                <div>
+                  <p className="mb-2 text-xs text-foreground-subtle">Recorded observations over time (real scan history, never interpolated).</p>
+                  <TrendChart data={trendPoints} formatValue={(v) => formatByUnit(v, latest?.confirm?.unit)} stroke="var(--accent)" gridStroke="var(--border)" axisStroke="var(--text-subtle)" />
+                </div>
+              )}
+            </Section>
+          )}
+
+          {/* Evidence -- "What we know / may be related / don't know".
+              Skipped for a controls case: ControlsInvestigationPanel
+              already has its own Established/Not-established block, built
+              with domain knowledge (e.g. "what the correct replacement
+              cost should be") a generic checks-only bucketing can't know. */}
+          {!isControlsCase && (
+            <Section title="Evidence">
+              <EvidenceSections latest={latest} metricId={c.metric_id} />
+            </Section>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-4 lg:col-span-4">
+          <Section title="Proposed by Celeste">
+            {latest?.recommendations?.length > 0 && latest?.finding_id ? (
+              <div className="space-y-3">
+                {latest.recommendations.map((rec, i) => (
+                  <RecommendationCard
+                    key={i}
+                    rec={rec}
+                    accepted={acceptedRecommendationTexts.has(rec.action)}
+                    hasRecordedAction={hasRecordedAction}
+                    findingId={latest.finding_id}
+                    onAccept={(r) => handleAcceptRecommendation(latest.finding_id, r.action)}
+                    affectedRecordCount={isControlsCase ? latest.products?.length : undefined}
+                  />
+                ))}
+              </div>
             ) : (
-              <div>
-                <p className="mb-2 text-xs text-foreground-subtle">Recorded observations over time (real scan history, never interpolated).</p>
-                <TrendChart data={trendPoints} formatValue={(v) => formatByUnit(v, latest?.confirm?.unit)} stroke="var(--accent)" gridStroke="var(--border)" axisStroke="var(--text-subtle)" />
+              <p className="text-sm text-foreground-subtle">No recommendations generated for this case yet.</p>
+            )}
+          </Section>
+
+          {/* Was "Actions taken (N)" -- a manager's own next step, not a
+              log entry; relabeled to read as a follow-up prompt. */}
+          <Section title="Management follow-up">
+            {actions?.length > 0 ? (
+              <div className="space-y-4">
+                {actions.map((action) => (
+                  <ExistingCaseAction
+                    key={action.finding_id}
+                    action={action}
+                    staleWarning={staleWarning}
+                    onUpdate={handleUpdateAction}
+                    metrics={metricsQuery.data?.metrics ?? []}
+                    caseId={caseId}
+                    onDesignateObjective={handleDesignateObjective}
+                    confirmStaleSave={confirmStaleSave}
+                    reviewFreshEvidence={reviewFreshEvidence}
+                  />
+                ))}
+              </div>
+            ) : latest?.finding_id ? (
+              // A brand-new case has no finding_actions row for anything yet
+              // -- without this, there was no way to record a FIRST action
+              // on a case at all (found via the Phase 2e post-acceptance
+              // browser test). latest.finding_id is the most recent
+              // evidence's own finding id (see case_engine._summarize_
+              // snapshot), the same id an action save would resolve to this
+              // case through (case_engine.get_case_id_for_finding). Routed
+              // through the same ExistingCaseAction as a real row (not a
+              // bare ActionTracker) so the stale-evidence banner -- which
+              // only that wrapper renders -- still works on a first save;
+              // an earlier version of this fallback used ActionTracker
+              // directly and silently dropped that warning (also found via
+              // the browser test).
+              <ExistingCaseAction
+                action={{ ...DEFAULT_NEW_ACTION, finding_id: latest.finding_id }}
+                staleWarning={staleWarning}
+                onUpdate={handleUpdateAction}
+                metrics={metricsQuery.data?.metrics ?? []}
+                caseId={caseId}
+                onDesignateObjective={handleDesignateObjective}
+                confirmStaleSave={confirmStaleSave}
+                reviewFreshEvidence={reviewFreshEvidence}
+              />
+            ) : (
+              <p className="text-sm text-foreground-subtle">No action recorded yet.</p>
+            )}
+          </Section>
+
+          {/* Resolution -- stays visible (this is part of "was it
+              resolved", not audit trail); the business objective and any
+              recurrence relationship are decision-relevant context, so
+              they stay here too rather than moving into the collapsed
+              technical section below. */}
+          <Section title="Resolution">
+            <p className="text-sm text-foreground">
+              {controlsResText ? controlsResText : (
+                <>
+                  {c.status === "resolved" && RESOLUTION_VERDICT_TEXT[c.resolution_verdict] ? RESOLUTION_VERDICT_TEXT[c.resolution_verdict] :
+                    c.status === "resolved" && `Verified resolved -- clean for ${resolutionPolicy?.verification_window ?? 2} consecutive periods with no fresh anomaly.`}
+                  {c.status === "verification_pending" &&
+                    `Recovering, not yet confirmed -- clean for ${c.verification_progress} of ${resolutionPolicy?.verification_window ?? 2} required periods. `
+                    + "If a relevant, approved action's outcome is still awaiting measurement, closure is held until that's known, even once the metric itself has cleared."}
+                  {c.status === "open" && "Still active. Celeste has not yet seen this clear its own anomaly threshold."}
+                  {c.status === "reopened" && "Reopened -- a matching problem reappeared after this case was closed."}
+                  {c.status === "dismissed" && "Dismissed -- not verified as resolved, marked as not a real problem."}
+                </>
+              )}
+            </p>
+
+            {c.objective_metric_id && (
+              <div className="mt-3 border-t border-border pt-3 text-sm">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Business objective</span>
+                <p className="mt-1 text-foreground">
+                  {c.objective_metric_id} {c.objective_comparison} {c.objective_target_value}
+                  {c.objective_unit === "percent" ? "%" : c.objective_unit === "currency" ? " Rs" : ""}
+                  {c.objective_baseline_relative ? " (relative to baseline)" : ""}
+                  {c.objective_source_finding_id && (
+                    <span className="text-foreground-subtle"> -- designated from action {c.objective_source_finding_id}</span>
+                  )}
+                </p>
               </div>
             )}
-          </Section>
-        </div>
-      )}
 
-      {/* 5. Evidence -- "What we know / may be related / don't know".
-          Skipped for a controls case: ControlsInvestigationPanel already
-          has its own Established/Not-established block, built with
-          domain knowledge (e.g. "what the correct replacement cost should
-          be") a generic checks-only bucketing can't know. */}
-      {!isControlsCase && (
-        <div className="mt-4">
-          <Section title="Evidence">
-            <EvidenceSections latest={latest} metricId={c.metric_id} />
-          </Section>
-        </div>
-      )}
-
-      {/* 6. Priority details -- the internal ranking score, demoted to a
-          small secondary line rather than an equally-weighted card next to
-          the actual business numbers (which now live in the primary
-          metric strip / investigation panel above, not repeated here). */}
-      <div className="mt-4">
-        <Section title="Priority details">
-          <p className="text-sm text-foreground-subtle">
-            Internal priority score: {c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "not scored"} --
-            severity &times; persistence &times; whether impact was quantified, for Celeste's own case ranking only, never a
-            currency figure or a probability.
-          </p>
-        </Section>
-      </div>
-
-      {/* 7. Recommendations and management decisions, plus 8. actions and
-          outcome verification. */}
-      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Section title="Proposed by Celeste">
-          {latest?.recommendations?.length > 0 && latest?.finding_id ? (
-            <div className="space-y-3">
-              {latest.recommendations.map((rec, i) => (
-                <RecommendationCard
-                  key={i}
-                  rec={rec}
-                  accepted={acceptedRecommendationTexts.has(rec.action)}
-                  hasRecordedAction={hasRecordedAction}
-                  findingId={latest.finding_id}
-                  onAccept={(r) => handleAcceptRecommendation(latest.finding_id, r.action)}
-                  affectedRecordCount={isControlsCase ? latest.products?.length : undefined}
-                />
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-foreground-subtle">No recommendations generated for this case yet.</p>
-          )}
-        </Section>
-
-        <Section title={`Actions taken (${actions?.length ?? 0})`}>
-          {actions?.length > 0 ? (
-            <div className="space-y-4">
-              {actions.map((action) => (
-                <ExistingCaseAction
-                  key={action.finding_id}
-                  action={action}
-                  staleWarning={staleWarning}
-                  onUpdate={handleUpdateAction}
-                  metrics={metricsQuery.data?.metrics ?? []}
-                  caseId={caseId}
-                  onDesignateObjective={handleDesignateObjective}
-                  confirmStaleSave={confirmStaleSave}
-                  reviewFreshEvidence={reviewFreshEvidence}
-                />
-              ))}
-            </div>
-          ) : latest?.finding_id ? (
-            // A brand-new case has no finding_actions row for anything yet
-            // -- without this, there was no way to record a FIRST action
-            // on a case at all (found via the Phase 2e post-acceptance
-            // browser test). latest.finding_id is the most recent
-            // evidence's own finding id (see case_engine._summarize_
-            // snapshot), the same id an action save would resolve to this
-            // case through (case_engine.get_case_id_for_finding). Routed
-            // through the same ExistingCaseAction as a real row (not a
-            // bare ActionTracker) so the stale-evidence banner -- which
-            // only that wrapper renders -- still works on a first save;
-            // an earlier version of this fallback used ActionTracker
-            // directly and silently dropped that warning (also found via
-            // the browser test).
-            <ExistingCaseAction
-              action={{ ...DEFAULT_NEW_ACTION, finding_id: latest.finding_id }}
-              staleWarning={staleWarning}
-              onUpdate={handleUpdateAction}
-              metrics={metricsQuery.data?.metrics ?? []}
-              caseId={caseId}
-              onDesignateObjective={handleDesignateObjective}
-              confirmStaleSave={confirmStaleSave}
-              reviewFreshEvidence={reviewFreshEvidence}
-            />
-          ) : (
-            <p className="text-sm text-foreground-subtle">No actions recorded against this case yet.</p>
-          )}
-        </Section>
-      </div>
-
-      {/* 9. Resolution -- stays visible (this is part of "was it resolved",
-          not audit trail); the business objective and any recurrence
-          relationship are decision-relevant context, so they stay here too
-          rather than moving into the collapsed technical section below. */}
-      <div className="mt-4">
-        <Section title="Resolution">
-          <p className="text-sm text-foreground">
-            {controlsResText ? controlsResText : (
-              <>
-                {c.status === "resolved" && RESOLUTION_VERDICT_TEXT[c.resolution_verdict] ? RESOLUTION_VERDICT_TEXT[c.resolution_verdict] :
-                  c.status === "resolved" && `Verified resolved -- clean for ${resolutionPolicy?.verification_window ?? 2} consecutive periods with no fresh anomaly.`}
-                {c.status === "verification_pending" &&
-                  `Recovering, not yet confirmed -- clean for ${c.verification_progress} of ${resolutionPolicy?.verification_window ?? 2} required periods. `
-                  + "If a relevant, approved action's outcome is still awaiting measurement, closure is held until that's known, even once the metric itself has cleared."}
-                {c.status === "open" && "Still active. Celeste has not yet seen this clear its own anomaly threshold."}
-                {c.status === "reopened" && "Reopened -- a matching problem reappeared after this case was closed."}
-                {c.status === "dismissed" && "Dismissed -- not verified as resolved, marked as not a real problem."}
-              </>
+            {relationships?.length > 0 && (
+              <ul className="mt-3 space-y-1.5 border-t border-border pt-3 text-sm">
+                {relationships.map((r, i) => {
+                  const isSource = r.case_id === c.case_id;
+                  const otherId = isSource ? r.related_case_id : r.case_id;
+                  return (
+                    <li key={i} className="text-foreground-subtle">
+                      {r.relationship_type === "recurrence_of" && isSource && (
+                        <>
+                          This is a recurrence of{" "}
+                          <Link to={`/investigate/${encodeURIComponent(otherId)}`} className="font-medium text-accent hover:underline">
+                            an earlier, resolved case
+                          </Link>
+                          .
+                        </>
+                      )}
+                      {r.relationship_type === "recurrence_of" && !isSource && (
+                        <>
+                          <Link to={`/investigate/${encodeURIComponent(otherId)}`} className="font-medium text-accent hover:underline">
+                            A later case
+                          </Link>{" "}
+                          recurred from this one.
+                        </>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
             )}
-          </p>
 
-          {c.objective_metric_id && (
-            <div className="mt-3 border-t border-border pt-3 text-sm">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Business objective</span>
-              <p className="mt-1 text-foreground">
-                {c.objective_metric_id} {c.objective_comparison} {c.objective_target_value}
-                {c.objective_unit === "percent" ? "%" : c.objective_unit === "currency" ? " Rs" : ""}
-                {c.objective_baseline_relative ? " (relative to baseline)" : ""}
-                {c.objective_source_finding_id && (
-                  <span className="text-foreground-subtle"> -- designated from action {c.objective_source_finding_id}</span>
-                )}
+            {c.dismissed_reason && (
+              <p className="mt-3 border-t border-border pt-3 text-sm text-foreground-subtle">
+                <span className="font-medium text-foreground">Dismissed:</span> {c.dismissed_reason}
               </p>
-            </div>
-          )}
+            )}
+          </Section>
 
-          {relationships?.length > 0 && (
-            <ul className="mt-3 space-y-1.5 border-t border-border pt-3 text-sm">
-              {relationships.map((r, i) => {
-                const isSource = r.case_id === c.case_id;
-                const otherId = isSource ? r.related_case_id : r.case_id;
-                return (
-                  <li key={i} className="text-foreground-subtle">
-                    {r.relationship_type === "recurrence_of" && isSource && (
-                      <>
-                        This is a recurrence of{" "}
-                        <Link to={`/investigate/${encodeURIComponent(otherId)}`} className="font-medium text-accent hover:underline">
-                          an earlier, resolved case
-                        </Link>
-                        .
-                      </>
-                    )}
-                    {r.relationship_type === "recurrence_of" && !isSource && (
-                      <>
-                        <Link to={`/investigate/${encodeURIComponent(otherId)}`} className="font-medium text-accent hover:underline">
-                          A later case
-                        </Link>{" "}
-                        recurred from this one.
-                      </>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
-          {c.dismissed_reason && (
-            <p className="mt-3 border-t border-border pt-3 text-sm text-foreground-subtle">
-              <span className="font-medium text-foreground">Dismissed:</span> {c.dismissed_reason}
+          {/* Priority details -- the internal ranking score, demoted to a
+              small collapsed disclosure rather than an equally-weighted
+              card next to the actual business numbers (which live in the
+              investigation panel on the left). */}
+          <details className="rounded-xl border border-border bg-surface p-4">
+            <summary className="cursor-pointer text-sm font-medium text-foreground-strong">
+              Why this is {latest?.priority ? `${latest.priority.replace(/_/g, " ")} priority` : "unscored"}
+            </summary>
+            <p className="mt-2 text-sm text-foreground-subtle">
+              Internal priority score: {c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "not scored"} --
+              severity &times; persistence &times; whether impact was quantified, for Celeste's own case ranking only, never a
+              currency figure or a probability.
             </p>
-          )}
-        </Section>
+          </details>
+        </div>
       </div>
 
       {/* 10. History and technical details, collapsed by default -- case
