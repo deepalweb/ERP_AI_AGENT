@@ -1817,8 +1817,12 @@
   margin-top: 32px;
 }
 .hp-issue-grid {
+  /* auto-fit (not a fixed 2-up split, and not auto-fill) collapses any
+     column track that has no card to fill it, so the cards that do
+     exist stretch to fill the row -- 3 cards fill one row evenly
+     instead of wrapping to a 2-card row plus a lone half-empty row. */
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 12px;
 }
 .hp-issue-card {
