@@ -377,7 +377,7 @@ function lastComplete(months) {
   const idx = months.indexOf(list[list.length - 1]);
   return [list[list.length - 1], idx > 0 ? months[idx - 1] : null];
 }
-function KpiCard({ label, value, delta, deltaUnit = "pct", direction = "higher_is_good", trendData, trendValueKey, sparkColor = "var(--hp-accent)" }) {
+function KpiCard({ label, value, delta, deltaUnit = "pct", direction = "higher_is_good", trendData, trendValueKey, sparkColor = "var(--hp-accent)", caption }) {
   const hasDelta = delta != null;
   const hasTrend = trendData && trendData.length > 1;
   return (
@@ -392,6 +392,7 @@ function KpiCard({ label, value, delta, deltaUnit = "pct", direction = "higher_i
             : formatPct(delta)}
         </span>
       )}
+      {caption && <span className="hp-kpi-caption">{caption}</span>}
       {hasTrend && (
         <div className="hp-kpi-spark">
           <TrendChart data={trendData} xKey="month" valueKey={trendValueKey} compact fill stroke={sparkColor} />
@@ -488,6 +489,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             trendData={retentionTrend}
             trendValueKey="value"
             sparkColor="#ef4444"
+            caption="Raw period change, not anomaly-weighted"
           />
         </div>
       )}
@@ -777,20 +779,30 @@ function DataQualityModule({ findings, stockAlerts }) {
         <span className="hp-muted">Snapshot, no trend</span>
       </div>
       {stock && (
-        <div className="hp-bottom-stat-row">
-          <div className="hp-bottom-stat hp-bottom-stat-critical">
-            <span className="hp-bottom-stat-label">
-              Out of stock <Package size={11} />
-            </span>
-            <strong>{formatNumber(stock.distinct_out_of_stock_products)}</strong>
+        <>
+          <div className="hp-bottom-stat-row">
+            <div className="hp-bottom-stat hp-bottom-stat-critical">
+              <span className="hp-bottom-stat-label">
+                Out of stock <Package size={11} />
+              </span>
+              <strong>{formatNumber(stock.distinct_out_of_stock_products)}</strong>
+            </div>
+            <div className="hp-bottom-stat hp-bottom-stat-warning">
+              <span className="hp-bottom-stat-label">
+                Low stock <AlertTriangle size={11} />
+              </span>
+              <strong>{formatNumber(stock.distinct_low_stock_products)}</strong>
+            </div>
           </div>
-          <div className="hp-bottom-stat hp-bottom-stat-warning">
-            <span className="hp-bottom-stat-label">
-              Low stock <AlertTriangle size={11} />
-            </span>
-            <strong>{formatNumber(stock.distinct_low_stock_products)}</strong>
-          </div>
-        </div>
+          {/* Explicit scope note: this counts a product as out-of-stock if
+              it's zero at any single outlet, which is a different, larger
+              number than the company-wide "zero across all outlets
+              combined" figure the Business Health card shows for the same
+              underlying issue -- both real, but they answer different
+              questions, and looked like contradictory numbers on the same
+              page before this note existed. */}
+          <p className="hp-bottom-caption">At 1+ outlet — the health card above uses a stricter company-wide count.</p>
+        </>
       )}
       {!negativeStock && !costCoverage && <p className="hp-muted">No open data-control findings.</p>}
       {negativeStock && (

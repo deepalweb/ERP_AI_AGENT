@@ -65,15 +65,21 @@ async def _inventory_domain():
     score = 100.0
     drivers = []
 
+    # Scope called out explicitly: this sums a product's stock across all
+    # outlets first, then checks the company-wide total -- a smaller,
+    # different number than stock_alerts.py's per-outlet "out of stock
+    # somewhere" count (which the Data Quality panel shows). Both are real;
+    # leaving the scope unstated is what made them look like a
+    # contradiction when shown side by side on the same page.
     out_of_stock = inv["out_of_stock_count"]
     if out_of_stock:
         score -= min(50, out_of_stock * 5)
-        drivers.append(f"{out_of_stock} product(s) are completely out of stock")
+        drivers.append(f"{out_of_stock} product(s) are completely out of stock company-wide (zero units across all outlets combined)")
 
     low_stock = inv["low_stock_count"]
     if low_stock:
         score -= min(20, low_stock * 2)
-        drivers.append(f"{low_stock} product(s) are at or below the low-stock threshold ({inv['low_stock_threshold']} units)")
+        drivers.append(f"{low_stock} product(s) are at or below the low-stock threshold ({inv['low_stock_threshold']} units), company-wide")
 
     depth = await inventory_service.get_inventory_depth()
     segment_value = {s["id"]: s["value"] for s in depth["segments"]}
