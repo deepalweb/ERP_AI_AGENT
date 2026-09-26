@@ -35,10 +35,14 @@ export default function Badge({ tone = "neutral", variant = "pill", children, cl
 
 /** priority -> tone mapping shared by every caller that has a finding's
  * `priority` field (critical/high/medium/worth_pursuing -- see
- * mcp_server/tools/investigation.py's _priority_for). */
+ * mcp_server/tools/investigation.py's _priority_for). Matches Home's own
+ * 4-way severity palette (critical=rose, high=amber, medium=cyan,
+ * positive=emerald) -- medium used to share "warning" (amber) with high,
+ * losing the distinction Home already draws between them. */
 export function toneForPriority(priority) {
   if (priority === "critical") return "critical";
-  if (priority === "high" || priority === "medium") return "warning";
+  if (priority === "high") return "warning";
+  if (priority === "medium") return "accent";
   if (priority === "worth_pursuing") return "good";
   return "accent";
 }

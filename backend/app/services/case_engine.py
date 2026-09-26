@@ -1284,11 +1284,43 @@ def _summarize_snapshot(snapshot: dict) -> dict:
     # carries exactly that, just never surfaced past this summarizer
     # before. Not every finding has one (a plain trend metric with no
     # breakdown), so this is None rather than a fabricated placeholder.
+    # sku carried through when the raw contributor has one (state_findings.
+    # py's top_seller_stock puts a real SKU on each contributor) -- Investigate
+    # V3's card needs it to anchor a card in a real product, not just a name.
     breakdowns = snapshot.get("breakdowns") or []
     top_contributor = None
     if breakdowns and breakdowns[0].get("top_contributors"):
         c = breakdowns[0]["top_contributors"][0]
         top_contributor = {"dimension": breakdowns[0].get("dimension"), "name": c.get("name"), "value": c.get("current")}
+        if c.get("sku"):
+            top_contributor["sku"] = c["sku"]
+    # A second breakdown, when one exists, is usually a different real-world
+    # axis on the same finding (state_findings.py's negative_stock_control
+    # breaks down by product AND by outlet) -- same derivation as
+    # top_contributor, just the next breakdown in the list, so a card can
+    # show a second concentration fact ("Largest concentration: Ethul
+    # Kotte") without a metric_id-specific branch here.
+    secondary_contributor = None
+    if len(breakdowns) > 1 and breakdowns[1].get("top_contributors"):
+        c = breakdowns[1]["top_contributors"][0]
+        secondary_contributor = {"dimension": breakdowns[1].get("dimension"), "name": c.get("name"), "value": c.get("current")}
+    # Investigate V3: "what we know" / "what we don't know" for the case
+    # list, without shipping every check's full detail -- just the first
+    # established (confirmed/possible_contributor) and first still-open
+    # (unknown/no_evidence_found) check's own real sentence, generic across
+    # every finding shape since it reads root_cause.checks, not a
+    # metric_id-specific field.
+    root_cause = snapshot.get("root_cause") or {}
+    checks = root_cause.get("checks") or []
+    established = next((c["detail"] for c in checks if c.get("verdict") in ("confirmed", "possible_contributor") and c.get("detail")), None)
+    unknown = next((c["detail"] for c in checks if c.get("verdict") in ("unknown", "no_evidence_found") and c.get("detail")), None)
+    evidence_summary = {"established": established, "unknown": unknown} if (established or unknown) else None
+    impact = snapshot.get("impact") or {}
+    impact_summary = (
+        {"financial_impact_rs": impact.get("financial_impact_rs"), "detail": impact.get("detail")}
+        if impact.get("financial_impact_rs") is not None or impact.get("detail")
+        else None
+    )
     return {
         "title": snapshot.get("title"),
         "category": snapshot.get("category"),
@@ -1301,6 +1333,13 @@ def _summarize_snapshot(snapshot: dict) -> dict:
         "streak": snapshot.get("streak"),
         "finding_id": snapshot.get("id"),
         "top_contributor": top_contributor,
+        "secondary_contributor": secondary_contributor,
+        "evidence_summary": evidence_summary,
+        "impact_summary": impact_summary,
+        # Metric-specific, but a single well-justified passthrough (Investigate
+        # V3's cost-coverage card wants "99.9% cost coverage" alongside the
+        # affected count) rather than a generic field every finding would need.
+        "coverage_pct": snapshot.get("coverage_pct"),
     }
 
 

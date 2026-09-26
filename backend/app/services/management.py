@@ -105,6 +105,16 @@ def summary():
         "SELECT resolution_verdict, COUNT(*) AS n FROM business_cases "
         "WHERE status='resolved' AND resolution_verdict IS NOT NULL GROUP BY resolution_verdict"
     )}
+    # Investigate V3's compact summary strip needs "Critical 4 / High 6"
+    # as a real, global count, not derived from whatever page of results
+    # happens to be loaded client-side (case_engine.list_cases() paginates,
+    # so a client-side count would silently go wrong past one page).
+    # Scoped to still-active cases (open/reopened) -- a resolved or
+    # dismissed case's priority isn't "needs attention" anymore.
+    priorities = {r["priority"]: r["n"] for r in appdb.run_query(
+        "SELECT priority, COUNT(*) AS n FROM business_cases "
+        "WHERE status IN ('open','reopened') AND priority IS NOT NULL GROUP BY priority"
+    )}
     actions = appdb.run_query("""
         SELECT COUNT(*) AS total,
           COALESCE(SUM(CASE WHEN relevant=1 AND status IN ('not_started','in_progress') THEN 1 ELSE 0 END),0) AS outstanding,
@@ -113,7 +123,7 @@ def summary():
           COALESCE(SUM(CASE WHEN relevant=1 AND outcome_status='pending' THEN 1 ELSE 0 END),0) AS pending
         FROM finding_actions
     """)[0]
-    return {"cases": {**cases, **verdicts}, "case_total": sum(cases.values()), "actions": actions}
+    return {"cases": {**cases, **verdicts}, "case_total": sum(cases.values()), "case_priorities": priorities, "actions": actions}
 
 
 def finding_case_id(finding_id):
