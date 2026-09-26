@@ -44,6 +44,12 @@
   --status-good: var(--hp-positive);
   background: var(--hp-bg);
   color: var(--hp-ink);
+  /* The reference wraps its whole page in a capped max-w-[1700px]
+     mx-auto container -- without that cap, every space-between row
+     (header, hero) stretches to the full monitor width and leaves a
+     dead gap in the middle on anything wider than a laptop screen. */
+  max-width: 1700px;
+  margin: 0 auto;
   padding: 24px 40px 44px;
   font: 14.5px/1.6 "Inter", sans-serif;
   min-height: 100vh;
