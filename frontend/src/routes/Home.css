@@ -2166,21 +2166,22 @@
 }
 
 /* Bottom modules (Opportunities / Actions / Outcomes / Data quality) */
-/* Density pass: two rows of two (Opportunities+Actions, then Outcomes+
-   Controls) instead of 4 modules crammed across in one row -- the DOM
-   order (Opportunities, Actions, Outcomes, Data quality) already matches,
-   so this is just the column count. */
+/* A 2x2 CSS grid still forces each ROW's height to match its tallest
+   module -- Opportunities (3 items, tall) next to Actions (2 small
+   tiles, short) left a large empty gap below Actions before the next
+   row started, even with align-items: start (that only stops the short
+   card's own box from stretching; the grid row track is still as tall
+   as its tallest sibling). A native multi-column flow has no row
+   concept at all -- each module just stacks under the next, so two
+   short modules pack tightly while two tall ones don't leave a gap
+   beside them. */
 .hp-bottom-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  /* Cards default to stretching to match the tallest one in their row --
-     Opportunities (3 items) next to Actions (2 small stat tiles) left
-     Actions looking like an oversized, mostly-empty box. Let each module
-     size to its own content instead. */
-  align-items: start;
-  gap: 16px;
+  columns: 2;
+  column-gap: 16px;
 }
 .hp-bottom-module {
+  break-inside: avoid;
+  margin-bottom: 16px;
   border: 1px solid var(--hp-edge);
   background: var(--hp-panel);
   border-radius: var(--hp-card-radius);
@@ -2205,9 +2206,8 @@
   font: 700 13px "Inter", sans-serif;
 }
 .hp-bottom-module-head a {
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--hp-accent);
+  font: 600 10px var(--hp-mono);
+  color: var(--hp-accent-ink);
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -2231,8 +2231,9 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 10px;
-  font-weight: 600;
+  font: 700 9px var(--hp-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
   color: var(--hp-accent-ink);
 }
 .hp-bottom-item-link {
@@ -2240,9 +2241,17 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-top: 2px;
-  color: var(--hp-accent);
-  font-weight: 600;
+  margin-top: 4px;
+  color: var(--hp-accent-ink);
+  font: 600 11px var(--hp-mono);
+  background: var(--hp-accent-soft);
+  border: 1px solid var(--hp-accent-border);
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+.hp-bottom-item-link:hover {
+  background: var(--hp-accent);
+  color: #062028;
 }
 .hp-bottom-stat-row {
   display: grid;
@@ -2309,7 +2318,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .hp-bottom-grid {
-    grid-template-columns: minmax(0, 1fr);
+    columns: 1;
   }
   .hp-domain-bar-label {
     width: 76px;
