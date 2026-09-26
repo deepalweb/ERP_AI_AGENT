@@ -44,7 +44,6 @@ import {
 import { DOMAIN_LABEL } from "../design/domains";
 import TrendChart from "../charts/TrendChart";
 import RadialGauge from "../charts/RadialGauge";
-import RankedBarChart from "../charts/RankedBarChart";
 import {
   formatCurrency,
   formatNumber,
@@ -533,10 +532,37 @@ const TREND_OPTIONS = {
   orders: { valueKey: "sale_orders", formatValue: formatNumber, label: "Orders" },
 };
 const OUTLET_OPTIONS = {
-  revenue: { valueKey: "revenue", formatValue: formatCurrency, label: "Revenue" },
-  orders: { valueKey: "orders", formatValue: formatNumber, label: "Orders" },
-  cancellation: { valueKey: "cancellation_rate_pct", formatValue: formatPercent, label: "Cancellation" },
+  revenue: { valueKey: "revenue", formatValue: formatCurrency, label: "Revenue", color: "#06b6d4" },
+  orders: { valueKey: "orders", formatValue: formatNumber, label: "Orders", color: "#10b981" },
+  cancellation: { valueKey: "cancellation_rate_pct", formatValue: formatPercent, label: "Cancellation", color: "#ef4444" },
 };
+// Outlet performance -- a hand-styled ranked list instead of RankedBarChart
+// (that component is shared across 8 other pages/panels; changing its look
+// there wasn't asked for and wasn't reviewed, so this stays local to Home).
+// Gradient pill bars + rank badges match this page's own established
+// language (mono numerals, per-metric accent color, rounded-full segments
+// already used in the domain bars) rather than a generic chart-library bar.
+function OutletRankBars({ data, valueKey, formatValue, color }) {
+  const rows = [...data].sort((a, b) => b[valueKey] - a[valueKey]);
+  const max = Math.max(...rows.map((r) => r[valueKey]), 1);
+  return (
+    <div className="hp-outlet-ranks">
+      {rows.map((r, i) => (
+        <div className="hp-outlet-rank-row" key={r.name}>
+          <span className="hp-outlet-rank-badge">{i + 1}</span>
+          <span className="hp-outlet-rank-name">{r.name}</span>
+          <div className="hp-outlet-rank-track">
+            <div
+              className="hp-outlet-rank-fill"
+              style={{ width: `${Math.max((r[valueKey] / max) * 100, 4)}%`, background: color }}
+            />
+          </div>
+          <span className="hp-outlet-rank-value">{formatValue(r[valueKey])}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 // Density pass follow-up: was one component nested inside a single outer
 // panel, with its own two inner bordered sub-panels -- a double-border
 // "container inside a container" look. Now two independent panels the
@@ -618,7 +644,7 @@ function OutletPerformancePanel({ operationsSummary, outletMetric, setOutletMetr
       {shortBranches?.length > 0 && (
         <>
           {takeaway && <p className="hp-panel-takeaway">{takeaway}</p>}
-          <RankedBarChart data={shortBranches} nameKey="name" valueKey={outletChoice.valueKey} formatValue={outletChoice.formatValue} />
+          <OutletRankBars data={shortBranches} valueKey={outletChoice.valueKey} formatValue={outletChoice.formatValue} color={outletChoice.color} />
         </>
       )}
       {operationsSummary.isSuccess && (!branches || branches.length === 0) && (
