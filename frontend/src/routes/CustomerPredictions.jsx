@@ -1128,11 +1128,11 @@ export default function CustomerPredictions() {
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-foreground/60">
-                <th className="pb-2 font-medium">Customer</th>
-                <th className="pb-2 font-medium">Last order</th>
-                <th className="pb-2 font-medium">Normal gap</th>
-                <th className="pb-2 font-medium">Expected window</th>
-                <th className="pb-2 font-medium">Status</th>
+                <th className="pb-2 pr-2 font-medium">Customer</th>
+                <th className="pb-2 pr-2 font-medium">Last order</th>
+                <th className="pb-2 pr-2 font-medium">Normal gap</th>
+                <th className="pb-2 pr-2 font-medium">Expected window</th>
+                <th className="pb-2 pr-2 font-medium">Status</th>
                 <th className="pb-2 text-right font-medium">Lifetime revenue</th>
               </tr>
             </thead>

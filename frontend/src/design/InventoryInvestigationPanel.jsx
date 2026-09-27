@@ -1,5 +1,5 @@
 import Badge from "./Badge";
-import { formatDate, formatNumber } from "../format";
+import { formatDate, formatNumber, stripSkuSuffix } from "../format";
 
 /** Business-specific investigation panel for an inventory stock-out case
  * (Celeste Investigate Phase 2's flagship workflow -- see state_findings.
@@ -49,16 +49,16 @@ export default function InventoryInvestigationPanel({ latest, asOfDate }) {
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-foreground-subtle">
-              <th className="pb-2 font-medium">Product</th>
-              <th className="pb-2 font-medium">SKU</th>
-              <th className="pb-2 font-medium">Recorded stock</th>
+              <th className="pb-2 pr-3 font-medium">Product</th>
+              <th className="pb-2 pr-3 font-medium">SKU</th>
+              <th className="pb-2 pr-3 font-medium">Recorded stock</th>
               <th className="pb-2 font-medium">Status</th>
             </tr>
           </thead>
           <tbody>
             {outOfStock.map((p) => (
               <tr key={p.sku ?? p.name} className="border-t border-border">
-                <td className="py-1.5 pr-3 text-foreground-strong">{p.name}</td>
+                <td className="py-1.5 pr-3 text-foreground-strong">{stripSkuSuffix(p.name)}</td>
                 <td className="py-1.5 pr-3 tabular-nums text-foreground-subtle">{p.sku ?? "n/a"}</td>
                 <td className="py-1.5 pr-3 tabular-nums text-foreground">{formatNumber(p.current)}</td>
                 <td className="py-1.5">
@@ -83,15 +83,15 @@ export default function InventoryInvestigationPanel({ latest, asOfDate }) {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-left text-foreground-subtle">
-                  <th className="pb-2 font-medium">Product</th>
-                  <th className="pb-2 font-medium">SKU</th>
+                  <th className="pb-2 pr-3 font-medium">Product</th>
+                  <th className="pb-2 pr-3 font-medium">SKU</th>
                   <th className="pb-2 font-medium">Days of cover</th>
                 </tr>
               </thead>
               <tbody>
                 {otherAtRisk.map((p) => (
                   <tr key={p.sku ?? p.name} className="border-t border-border">
-                    <td className="py-1.5 pr-3 text-foreground">{p.name}</td>
+                    <td className="py-1.5 pr-3 text-foreground">{stripSkuSuffix(p.name)}</td>
                     <td className="py-1.5 pr-3 tabular-nums text-foreground-subtle">{p.sku ?? "n/a"}</td>
                     <td className="py-1.5 pr-3 tabular-nums text-warning">{p.days_of_cover ?? "n/a"}</td>
                   </tr>

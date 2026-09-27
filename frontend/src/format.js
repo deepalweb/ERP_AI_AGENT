@@ -103,3 +103,13 @@ export function prettifyMetricId(id) {
   if (!id) return "Untitled case";
   return id.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }
+
+// state_findings.py bakes "- SKU 003193" into a product's display name on
+// several finding shapes (negative_stock_control, cost_coverage_control,
+// top_seller_stock) -- real duplication when the row also has its own
+// structured `sku` field/column. Display-only: never touches the
+// underlying data, since other consumers may still want the full string.
+export function stripSkuSuffix(name) {
+  if (!name) return name;
+  return name.replace(/\s*-\s*SKU\s+\S+\s*$/i, "").trim();
+}

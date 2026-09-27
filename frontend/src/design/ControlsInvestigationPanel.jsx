@@ -1,16 +1,6 @@
 import RankedBarChart from "../charts/RankedBarChart";
 import { MetricSummaryCard } from "./CaseVisuals";
-import { formatCurrency, formatDate, formatNumber } from "../format";
-
-// state_findings.py's product name already embeds "- SKU 003193" (the same
-// value the structured `sku` field carries) -- a real duplication bug
-// caught live: the table showed the SKU twice, once baked into the name
-// and once in its own column. Strips it for display only; never touches
-// the underlying data (other consumers may still want the full string).
-function displayName(name) {
-  if (!name) return name;
-  return name.replace(/\s*-\s*SKU\s+\S+\s*$/i, "").trim();
-}
+import { formatCurrency, formatDate, formatNumber, stripSkuSuffix as displayName } from "../format";
 
 /** Frontend Intelligence Integration, Phase 2: Business Data Controls
  * investigation panel. Gated by the caller on domain === "controls" --

@@ -63,11 +63,11 @@ export default function CompletedVarianceInvestigationPanel({ latest }) {
         <table className="mt-2 w-full text-sm">
           <thead>
             <tr className="text-left text-foreground-subtle">
-              <th className="pb-2 font-medium">Session</th>
-              <th className="pb-2 font-medium">Outlet</th>
-              <th className="pb-2 font-medium">Completed</th>
-              <th className="pb-2 font-medium">Lines</th>
-              <th className="pb-2 font-medium">Net variance</th>
+              <th className="pb-2 pr-3 font-medium">Session</th>
+              <th className="pb-2 pr-3 font-medium">Outlet</th>
+              <th className="pb-2 pr-3 font-medium">Completed</th>
+              <th className="pb-2 pr-3 font-medium">Lines</th>
+              <th className="pb-2 pr-3 font-medium">Net variance</th>
               <th className="pb-2 font-medium">Gross variance</th>
             </tr>
           </thead>
