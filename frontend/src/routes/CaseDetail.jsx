@@ -181,7 +181,14 @@ const STAGE_STATE_SUFFIX = { not_applicable: " (not applicable)" };
 function CaseEvolutionStepper({ stages }) {
   return (
     <>
-      <ol className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-0">
+      {/* list-none defensively: Tailwind's Preflight already resets <ol>
+          markers, but a screen reader or a text-extraction tool that reads
+          the accessibility tree (not the visual CSS) numbers list items
+          from their semantic role regardless of list-style -- if that's
+          what produced the reported "1. 2. 3. 4." with no visible label
+          text, this doesn't fix that (it's not a CSS problem), but it
+          removes any doubt about the visual rendering itself. */}
+      <ol className="list-none flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-0">
         {stages.map((s, i) => (
           <li key={s.key} className="flex items-center gap-2 sm:flex-1">
             <Badge tone={STAGE_STATE_TONE[s.state]} variant="dot" className={s.state === "not_applicable" ? "opacity-50" : ""}>
