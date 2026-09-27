@@ -1,16 +1,37 @@
 """Cross-domain investigation, v1: "does this revenue case have a related
 signal at the same outlet, same month?" -- Investigate V3's next step per
-the user-approved design (2026-09-27), wording revised same day per
-direct feedback on the live card ("point-in-time" read as internal
-jargon; a manager needs a plain sentence plus an explicit "cause not
-established" qualifier on every card, not a tier name).
+the user-approved design (2026-09-27), revised twice same day per direct
+feedback on the live card:
+
+  (a) wording -- a manager needs a plain sentence plus an explicit
+      "cause not established" qualifier on every card, not an internal
+      tier name.
+  (b) two semantic bugs caught by re-reading the live output, not by
+      inspection alone:
+      1. Direction-blindness: the card showed "cancellation rate
+         decreased ... the same outlet and month as this revenue
+         change" regardless of whether the primary case was itself a
+         decline or an increase. A metric moving in the SAME
+         good/bad direction as the primary (both categories equal:
+         both "critical" or both "opportunity") is a genuinely
+         different claim than one moving the OPPOSITE way (a
+         counter-signal) -- conflating them is a real
+         misrepresentation, not a wording nicety.
+      2. Containment violation: the stock-availability join showed a
+         September 15 snapshot as "during" an August revenue month --
+         it wasn't. v1 now REFUSES to surface a snapshot relationship
+         at all unless the snapshot's own date falls inside the
+         primary's period month (strict containment, not a "later
+         snapshot" tier -- deliberately not built for v1, per explicit
+         instruction to keep the model clean).
 
 Deliberately narrow, matching the approved scope exactly:
 - v1 candidates: revenue -> cancellation_rate (same granularity, monthly
   trend vs. monthly trend) and revenue -> stock_availability (a coarser
-  join: monthly trend vs. a single-day snapshot). RELATED_METRIC_
-  CANDIDATES is the entire configuration surface for widening this later
-  -- not a generic graph engine.
+  join: monthly trend vs. a single-day snapshot, and only when that day
+  falls inside the revenue month). RELATED_METRIC_CANDIDATES is the
+  entire configuration surface for widening this later -- not a generic
+  graph engine.
 - Computed fresh on every Case Detail fetch, never persisted. A
   `case_relationships` table already exists (case_engine.py) and is
   generic enough to hold this later, but the user explicitly asked not to
@@ -18,15 +39,12 @@ Deliberately narrow, matching the approved scope exactly:
   managers -- so this module never writes to it.
 - Never claims "confirmed" for a cross-domain relationship -- that verdict
   is reserved for same-metric internal evidence (segment_concentration_
-  checks). Every related signal carries an explicit "cause not
-  established" qualifier; internally there are three distinct reasons a
-  signal ends up in the weaker tier, each named honestly in its own
-  `detail` text rather than collapsed into one generic "weaker" label:
+  checks). Three tiers for HOW STRONGLY the outlet+period overlap is
+  established (independent of whether the direction agrees):
     "corroborated"  -- both metrics independently confirm the same
                         segment, same granularity (their own
                         segment_concentration_checks both fire
-                        "confirmed"). Still labeled "cause not
-                        established", never "confirmed" cause.
+                        "confirmed").
     "point_in_time" -- the related metric's own concentration check
                         can't run at all (e.g. cancellation_rate's store
                         breakdown is rate-mode -- see evidence_engine.
@@ -34,14 +52,19 @@ Deliberately narrow, matching the approved scope exactly:
                         why), but its breakdown's own top contributor
                         still names the same segment.
     "snapshot"      -- the related signal is a single-day snapshot (e.g.
-                        stock_availability), not a trend over the same
+                        stock_availability) that falls inside the
+                        primary's month, not a trend over the same
                         month -- a coarser granularity mismatch than
                         point_in_time's measurement-mode limitation, so
                         this is kept separate even when the snapshot's
                         own concentration check DOES confirm the same
                         outlet; the snapshot date is always shown
                         alongside the primary's month so the timing gap
-                        is visible, never hidden.
+                        within that month is still visible.
+  A separate, orthogonal axis -- does the related metric's own category
+  (critical/opportunity) AGREE with the primary's, i.e. is it moving the
+  same good/bad direction -- decides "related signal" vs "counter-signal"
+  wording, independent of which of the three tiers above applies.
 - Skips the LLM entirely: calls intelligence.investigate() +
   evidence_engine.build_trend_evidence() directly rather than
   investigation.build_investigation() (which would also run
@@ -57,15 +80,19 @@ RELATED_METRIC_CANDIDATES = {
     "revenue": ["cancellation_rate", "stock_availability"],
 }
 
-# Presentation only -- never exposes the internal tier name to a manager.
-# Every qualifier ends "cause not established" per direct feedback on the
-# live card: this must be obvious on each signal, not just in the section
-# subtitle above the list.
-QUALIFIER_FOR_TIER = {
-    "corroborated": "Independently corroborated · cause not established",
-    "point_in_time": "Related signal observed · cause not established",
-    "snapshot": "Point-in-time snapshot · cause not established",
-}
+# Presentation only -- never exposes an internal tier name to a manager.
+# is_consistent=False (the related metric's category disagrees with the
+# primary's -- moving the opposite good/bad direction) always wins over
+# tier, since "this doesn't support the story" matters more to a manager
+# than how strongly the outlet+period overlap was measured.
+def _qualifier_for(tier: str, is_consistent: bool) -> str:
+    if not is_consistent:
+        return "Counter-signal observed · does not explain this revenue change"
+    return {
+        "corroborated": "Independently corroborated · cause not established",
+        "point_in_time": "Related signal observed · cause not established",
+        "snapshot": "Point-in-time snapshot · cause not established",
+    }[tier]
 
 
 def _active_case_id_for(metric_id: str) -> str | None:
@@ -83,12 +110,13 @@ def _movement_word(moved_up: bool | None) -> str:
     return "increased" if moved_up else "decreased"
 
 
-def _make_signal(*, metric_id, label, tier, segment, headline, detail, case_id) -> dict:
+def _make_signal(*, metric_id, label, tier, segment, is_consistent, headline, detail, case_id) -> dict:
     return {
         "metric_id": metric_id,
         "label": label,
         "tier": tier,
-        "qualifier": QUALIFIER_FOR_TIER[tier],
+        "is_consistent": is_consistent,
+        "qualifier": _qualifier_for(tier, is_consistent),
         "scope": segment,
         "headline": headline,
         "detail": detail,
@@ -115,17 +143,30 @@ def _related_metric_evidence(metric_id: str) -> dict | None:
         "metric": result["metric"],
         "period": anomaly["latest_month"],
         "moved_up": anomaly.get("moved_up"),
+        "category": anomaly.get("category"),
         "breakdowns": result["breakdowns"],
         "checks": checks,
     }
 
 
-def _cancellation_signal(period: str, primary_segments: set[str]) -> dict | None:
+def _direction_phrase(is_consistent: bool, primary_word: str) -> str:
+    """'while revenue also X' when the two move the same good/bad
+    direction, 'while revenue X' (no "also" -- a plainer, less-aligned
+    framing) when they don't. Same sentence structure, same verb form,
+    in both branches -- deliberately, after an earlier version mixed
+    "alongside this revenue increased" (a noun-phrase preposition
+    followed by a bare verb) and read as a grammar error live."""
+    return f"while revenue also {primary_word}" if is_consistent else f"while revenue {primary_word}"
+
+
+def _cancellation_signal(period: str, primary_segments: set[str], primary_category: str | None, primary_word: str) -> dict | None:
     ev = _related_metric_evidence("cancellation_rate")
     if ev is None or ev["period"] != period:
         return None  # different (or no) month -- not the same period, no weak fallback either
 
     word = _movement_word(ev["moved_up"])
+    is_consistent = primary_category is not None and ev["category"] == primary_category
+    phrase = _direction_phrase(is_consistent, primary_word)
     store_check = next((c for c in ev["checks"] if c.get("source") == "store_concentration"), None)
 
     if store_check and store_check.get("verdict") == "confirmed":
@@ -135,7 +176,8 @@ def _cancellation_signal(period: str, primary_segments: set[str]) -> dict | None
         segment = sorted(overlap)[0]
         return _make_signal(
             metric_id="cancellation_rate", label=ev["metric"]["label"], tier="corroborated", segment=segment,
-            headline=f"{ev['metric']['label']} {word} at {segment} in {ev['period']} — the same outlet and month as this revenue change.",
+            is_consistent=is_consistent,
+            headline=f"{ev['metric']['label']} {word} at {segment} in {ev['period']}, {phrase}.",
             detail=f"Both this revenue change and {ev['metric']['label'].lower()} independently concentrate at "
             f"{segment} in {ev['period']}, checked separately by each metric's own concentration test.",
             case_id=_active_case_id_for("cancellation_rate"),
@@ -153,7 +195,8 @@ def _cancellation_signal(period: str, primary_segments: set[str]) -> dict | None
     segment = top[0]["name"]
     return _make_signal(
         metric_id="cancellation_rate", label=ev["metric"]["label"], tier="point_in_time", segment=segment,
-        headline=f"{ev['metric']['label']} {word} at {segment} in {ev['period']} — the same outlet and month as this revenue change.",
+        is_consistent=is_consistent,
+        headline=f"{ev['metric']['label']} {word} at {segment} in {ev['period']}, {phrase}.",
         detail=f"{ev['metric']['label']}'s largest single-outlet movement this month was also at {segment}. "
         f"This is a weaker signal than a confirmed concentration: cancellation rate is measured per outlet as a "
         f"rate, which this app's concentration check doesn't run the same math against as a raw total.",
@@ -165,6 +208,12 @@ def _stock_availability_signal(revenue_period: str, primary_segments: set[str]) 
     alerts = get_stock_alerts()
     as_of_date = alerts.get("as_of_date")
     if not as_of_date:
+        return None
+    # Strict containment (explicit instruction, preferred over a "later
+    # snapshot" tier): a snapshot outside the primary's own month is not
+    # presented as a related signal at all -- current stock conditions
+    # must never be retroactively attached to a historical revenue month.
+    if as_of_date[:7] != revenue_period:
         return None
     segments = alerts.get("segments_by_outlet") or []
     by_outlet = [
@@ -179,13 +228,18 @@ def _stock_availability_signal(revenue_period: str, primary_segments: set[str]) 
     store_check = next((c for c in checks if c.get("source") == "store_concentration"), None)
 
     # Present iff the primary's own outlet has ANY out-of-stock products
-    # today, whether or not it's the outlet with the most -- the point is
-    # "was this outlet affected at all during the revenue month," not "is
-    # it the single worst outlet company-wide". Always tier "snapshot":
-    # even when store_check itself says "confirmed", a single day's
-    # reading can't establish presence across the whole month the revenue
-    # case describes, so this never gets the "corroborated" tier
-    # cancellation_rate can reach.
+    # that day, whether or not it's the outlet with the most -- the point
+    # is "was this outlet affected at all during the revenue month," not
+    # "is it the single worst outlet company-wide". Always tier
+    # "snapshot": even when store_check itself says "confirmed", a
+    # single day's reading can't establish presence across the whole
+    # month the revenue case describes, so this never gets the
+    # "corroborated" tier cancellation_rate can reach. Stock availability
+    # (out-of-stock) is always a "critical"-direction condition -- an
+    # increase in stockouts is never good -- so this counts as
+    # "consistent" only when the primary case is itself a critical
+    # (problem) case; against an "opportunity" (improving) primary,
+    # unresolved stockouts don't support that story either.
     match = next((o for o in by_outlet if o["name"] in primary_segments), None)
     if not match:
         return None
@@ -197,19 +251,24 @@ def _stock_availability_signal(revenue_period: str, primary_segments: set[str]) 
     )
     return _make_signal(
         metric_id="stock_availability", label="Stock availability", tier="snapshot", segment=segment,
-        headline=f"Stock availability issues were observed at {segment} on {as_of_date} — during the "
-        f"{revenue_period} revenue-decline month.",
+        is_consistent=True,  # containment already guarantees same-month; category comparison n/a for a snapshot
+        headline=f"Stock availability issues were observed at {segment} on {as_of_date} — within the "
+        f"{revenue_period} revenue period this change describes.",
         detail=f"{match['current']} product(s) were out of stock at {segment} as of {as_of_date}, a single-day "
-        f"snapshot, not a measurement across the full {revenue_period} month this revenue change describes."
+        f"snapshot within {revenue_period}, not a measurement across the full month."
         f"{concentrated_note} This does not establish that stock availability caused the revenue change.",
         case_id=None,  # snapshot findings aren't tracked as their own persistent case the way trend metrics are
     )
 
 
-def related_signals_for(metric_id: str, period: str | None, checks: list[dict]) -> list[dict]:
+def related_signals_for(metric_id: str, period: str | None, checks: list[dict], category: str | None = None,
+                         pct_change: float | None = None) -> list[dict]:
     """`checks` is the PRIMARY case's own root_cause.checks (already
     computed, already on the case) -- this never recomputes the primary,
-    only looks up candidate related signals to compare it against."""
+    only looks up candidate related signals to compare it against.
+    `category`/`pct_change` are the primary's own (for the direction-
+    agreement check and the headline's "alongside/while revenue X"
+    phrase) -- both already on the case, never recomputed here."""
     candidates = RELATED_METRIC_CANDIDATES.get(metric_id)
     if not candidates or not period:
         return []
@@ -222,10 +281,11 @@ def related_signals_for(metric_id: str, period: str | None, checks: list[dict]) 
     primary_segments = set(primary_store_check.get("segments") or [])
     if not primary_segments:
         return []
+    primary_word = _movement_word(pct_change >= 0) if pct_change is not None else "changed"
 
     related = []
     if "cancellation_rate" in candidates:
-        signal = _cancellation_signal(period, primary_segments)
+        signal = _cancellation_signal(period, primary_segments, category, primary_word)
         if signal:
             related.append(signal)
     if "stock_availability" in candidates:

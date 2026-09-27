@@ -1508,8 +1508,10 @@ def get_case_detail(case_id: str) -> dict | None:
     # gets an early-exit empty list at negligible cost.
     related = []
     if latest and latest.get("root_cause"):
+        confirm = latest.get("confirm") or {}
         related = related_signals.related_signals_for(
-            case["metric_id"], (latest.get("confirm") or {}).get("period"), latest["root_cause"].get("checks") or []
+            case["metric_id"], confirm.get("period"), latest["root_cause"].get("checks") or [],
+            category=latest.get("category"), pct_change=confirm.get("pct_change"),
         )
 
     return {
