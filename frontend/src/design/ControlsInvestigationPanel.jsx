@@ -1,3 +1,4 @@
+import DonutChart from "../charts/DonutChart";
 import RankedBarChart from "../charts/RankedBarChart";
 import { MetricSummaryCard } from "./CaseVisuals";
 import { formatCurrency, formatDate, formatNumber } from "../format";
@@ -90,18 +91,38 @@ function NegativeStockPanel({ latest, statusLabel }) {
         <MetricSummaryCard label="Case status" value={statusLabel ?? "—"} />
       </div>
 
-      {byOutlet.length > 0 && (
-        <div className="mt-4">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Affected outlets</span>
-          <p className="mt-1 text-xs text-foreground-subtle">
-            Counted per outlet -- a product negative at more than one outlet is counted at each, so these figures
-            don&rsquo;t sum to the {products.length} company-wide total above.
-          </p>
-          <div className="mt-2">
-            <RankedBarChart data={byOutlet} nameKey="outlet" valueKey="product_count" formatValue={formatNumber} />
+      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {byOutlet.length > 0 && (
+          <div>
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Affected outlets</span>
+            <p className="mt-1 text-xs text-foreground-subtle">
+              Counted per outlet -- a product negative at more than one outlet is counted at each, so these figures
+              don&rsquo;t sum to the {products.length} company-wide total above.
+            </p>
+            <div className="mt-2">
+              <RankedBarChart data={byOutlet} nameKey="outlet" valueKey="product_count" formatValue={formatNumber} />
+            </div>
           </div>
-        </div>
-      )}
+        )}
+        {products.some((p) => p.value_rs != null) && (
+          <div>
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">
+              Highest-value products, by recorded stock value
+            </span>
+            <p className="mt-1 text-xs text-foreground-subtle">
+              Same records as the table below, ranked visually by the Rs value involved.
+            </p>
+            <div className="mt-2">
+              <RankedBarChart
+                data={products.filter((p) => p.value_rs != null).slice(0, 10)}
+                nameKey="name"
+                valueKey="value_rs"
+                formatValue={formatCurrency}
+              />
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="mt-4 overflow-x-auto">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">
@@ -170,12 +191,26 @@ function CostCoveragePanel({ latest, statusLabel }) {
         <MetricSummaryCard label="Case status" value={statusLabel ?? "—"} />
       </div>
 
-      {coveragePct != null && (
-        <div className="mt-4">
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Coverage</span>
-          <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-surface-sunken">
-            <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${Math.min(100, coveragePct)}%` }} />
+      {coveragePct != null && total != null && (
+        <div className="mt-4 grid grid-cols-1 items-center gap-4 border-t border-border pt-3 sm:grid-cols-2">
+          <div>
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Coverage</span>
+            <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-surface-sunken">
+              <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${Math.min(100, coveragePct)}%` }} />
+            </div>
+            <p className="mt-2 text-xs text-foreground-subtle">
+              {formatNumber(total - noCost)} of {formatNumber(total)} active inventory products have a usable cost;
+              {" "}{formatNumber(noCost)} do not.
+            </p>
           </div>
+          <DonutChart
+            data={[
+              { name: "Has usable cost", value: total - noCost },
+              { name: "No usable cost", value: noCost },
+            ]}
+            formatValue={formatNumber}
+            colors={["var(--status-good)", "var(--status-critical)"]}
+          />
         </div>
       )}
 
