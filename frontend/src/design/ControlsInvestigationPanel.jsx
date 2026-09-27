@@ -1,7 +1,16 @@
-import DonutChart from "../charts/DonutChart";
 import RankedBarChart from "../charts/RankedBarChart";
 import { MetricSummaryCard } from "./CaseVisuals";
 import { formatCurrency, formatDate, formatNumber } from "../format";
+
+// state_findings.py's product name already embeds "- SKU 003193" (the same
+// value the structured `sku` field carries) -- a real duplication bug
+// caught live: the table showed the SKU twice, once baked into the name
+// and once in its own column. Strips it for display only; never touches
+// the underlying data (other consumers may still want the full string).
+function displayName(name) {
+  if (!name) return name;
+  return name.replace(/\s*-\s*SKU\s+\S+\s*$/i, "").trim();
+}
 
 /** Frontend Intelligence Integration, Phase 2: Business Data Controls
  * investigation panel. Gated by the caller on domain === "controls" --
@@ -114,7 +123,7 @@ function NegativeStockPanel({ latest, statusLabel }) {
             </p>
             <div className="mt-2">
               <RankedBarChart
-                data={products.filter((p) => p.value_rs != null).slice(0, 10)}
+                data={products.filter((p) => p.value_rs != null).slice(0, 10).map((p) => ({ ...p, name: displayName(p.name) }))}
                 nameKey="name"
                 valueKey="value_rs"
                 formatValue={formatCurrency}
@@ -131,16 +140,16 @@ function NegativeStockPanel({ latest, statusLabel }) {
         <table className="mt-2 w-full text-sm">
           <thead>
             <tr className="text-left text-foreground-subtle">
-              <th className="pb-2 font-medium">Product</th>
-              <th className="pb-2 font-medium">SKU</th>
-              <th className="pb-2 font-medium">Recorded qty</th>
+              <th className="pb-2 pr-3 font-medium">Product</th>
+              <th className="pb-2 pr-3 font-medium">SKU</th>
+              <th className="pb-2 pr-3 font-medium">Recorded qty</th>
               <th className="pb-2 font-medium">Estimated value</th>
             </tr>
           </thead>
           <tbody>
             {products.slice(0, 15).map((p) => (
               <tr key={p.sku ?? p.name} className="border-t border-border">
-                <td className="py-1.5 pr-3 text-foreground-strong">{p.name}</td>
+                <td className="py-1.5 pr-3 text-foreground-strong">{displayName(p.name)}</td>
                 <td className="py-1.5 pr-3 tabular-nums text-foreground-subtle">{p.sku ?? "n/a"}</td>
                 <td className="py-1.5 pr-3 tabular-nums text-foreground">{formatNumber(p.qty)}</td>
                 <td className="py-1.5 tabular-nums text-foreground">
@@ -187,30 +196,33 @@ function CostCoveragePanel({ latest, statusLabel }) {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <MetricSummaryCard label="Products affected" value={formatNumber(noCost)} caption={total ? `of ${formatNumber(total)} active inventory products` : undefined} />
         <MetricSummaryCard label="Cost coverage" value={coveragePct != null ? `${coveragePct}%` : "—"} />
-        <MetricSummaryCard label="Financial loss" value="Not established" caption="A record count, not a priced loss" />
+        {/* De-emphasized (valueClassName) relative to the other three cards
+            -- this is a data-quality/control exception, not a financial-loss
+            case, so "Not established" shouldn't visually compete with the
+            real affected-count and coverage numbers. */}
+        <MetricSummaryCard
+          label="Financial loss"
+          value="Not established"
+          caption="A record count, not a priced loss"
+          valueClassName="text-base font-semibold text-foreground-subtle"
+        />
         <MetricSummaryCard label="Case status" value={statusLabel ?? "—"} />
       </div>
 
+      {/* One coverage visual, not two (a bar plus a donut) -- 7 missing out
+          of 7,218 is too small a slice for a donut to communicate anything;
+          it mostly reads as one solid green circle. The bar alone already
+          carries the fact. */}
       {coveragePct != null && total != null && (
-        <div className="mt-4 grid grid-cols-1 items-center gap-4 border-t border-border pt-3 sm:grid-cols-2">
-          <div>
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Coverage</span>
-            <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-surface-sunken">
-              <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${Math.min(100, coveragePct)}%` }} />
-            </div>
-            <p className="mt-2 text-xs text-foreground-subtle">
-              {formatNumber(total - noCost)} of {formatNumber(total)} active inventory products have a usable cost;
-              {" "}{formatNumber(noCost)} do not.
-            </p>
+        <div className="mt-4 border-t border-border pt-3">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Coverage</span>
+          <div className="mt-2 h-2.5 w-full overflow-hidden rounded-full bg-surface-sunken">
+            <div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${Math.min(100, coveragePct)}%` }} />
           </div>
-          <DonutChart
-            data={[
-              { name: "Has usable cost", value: total - noCost },
-              { name: "No usable cost", value: noCost },
-            ]}
-            formatValue={formatNumber}
-            colors={["var(--status-good)", "var(--status-critical)"]}
-          />
+          <p className="mt-2 text-xs text-foreground-subtle">
+            {formatNumber(total - noCost)} of {formatNumber(total)} active inventory products have a usable cost;
+            {" "}{formatNumber(noCost)} do not.
+          </p>
         </div>
       )}
 
@@ -219,14 +231,14 @@ function CostCoveragePanel({ latest, statusLabel }) {
         <table className="mt-2 w-full text-sm">
           <thead>
             <tr className="text-left text-foreground-subtle">
-              <th className="pb-2 font-medium">Product</th>
+              <th className="pb-2 pr-3 font-medium">Product</th>
               <th className="pb-2 font-medium">SKU</th>
             </tr>
           </thead>
           <tbody>
             {products.map((p) => (
               <tr key={p.sku ?? p.name} className="border-t border-border">
-                <td className="py-1.5 pr-3 text-foreground-strong">{p.name}</td>
+                <td className="py-1.5 pr-3 text-foreground-strong">{displayName(p.name)}</td>
                 <td className="py-1.5 tabular-nums text-foreground-subtle">{p.sku ?? "n/a"}</td>
               </tr>
             ))}
@@ -240,9 +252,9 @@ function CostCoveragePanel({ latest, statusLabel }) {
           { label: "Margin analysis", detail: "Sales involving these products may be excluded or estimated, depending on the calculation path." },
           {
             label: "Management reporting",
-            detail: `Totals remain mostly covered (${coveragePct != null ? `${coveragePct}%` : "nearly complete"}), but results `
-              + `involving these specific products are incomplete. This does not affect the other `
-              + `${total != null ? formatNumber(total - noCost) : "remaining"} products' valuations.`,
+            detail: `Totals remain mostly covered (${coveragePct != null ? `${coveragePct}%` : "nearly complete"}). `
+              + `${total != null ? `The other ${formatNumber(total - noCost)} products have usable cost values; ` : ""}`
+              + `aggregate totals can still be incomplete where these ${formatNumber(noCost)} products are involved.`,
           },
         ]}
       />

@@ -64,6 +64,30 @@ function fmtDateTime(value) {
   return d ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "n/a";
 }
 
+// Real factors from impact_engine.business_impact_score() (severity tier x
+// persistence x whether a quantified impact exists x data-quality
+// confidence), stated in plain language per THIS case's own real values --
+// not just the formula description, which a manager can't map back to
+// "why medium, specifically" without already knowing the code.
+function priorityReasoning(latest) {
+  if (!latest) return null;
+  const parts = [];
+  const priorityLabel = (latest.priority || "unscored").replace(/_/g, " ");
+  parts.push(`This case's own severity tier is "${priorityLabel}".`);
+  const consecutive = latest.persistence?.consecutive_periods;
+  parts.push(
+    consecutive >= 2
+      ? `It has persisted for ${consecutive} consecutive periods, which raises the ranking.`
+      : "No repeat-period persistence is tracked for this finding, so the ranking isn't boosted for recurrence.",
+  );
+  parts.push(
+    latest.impact?.financial_impact_rs != null
+      ? "A quantified financial figure is available for this finding, which raises the ranking."
+      : "No priced financial impact is available here -- the ranking reflects a record count, not a currency figure.",
+  );
+  return parts.join(" ");
+}
+
 function parseJSON(value, fallback) {
   if (value == null) return fallback;
   if (typeof value !== "string") return value;
@@ -249,7 +273,6 @@ function ExistingCaseAction({
 }) {
   return (
     <div id={`action-${action.finding_id}`} className="scroll-mt-24 border-b border-border pb-4 last:border-0 last:pb-0">
-      <TechnicalDetails summary="Technical details">Finding ID: {action.finding_id}</TechnicalDetails>
       {staleWarning?.findingId === action.finding_id && (
         <div className="mt-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
           <p className="font-medium text-foreground-strong">The evidence for this finding has changed since you opened this case.</p>
@@ -659,10 +682,14 @@ export default function CaseDetail() {
         .filter(Boolean)
         .join(" ")
     : null;
-  // The concrete next step (a real recommendation) is more useful than the
-  // generic "review the evidence" prompt whenever one exists; the prompt
-  // is still the fallback for a case with no recommendations yet.
-  const nextDecision = latest?.recommendations?.[0]?.action ?? decisionPromptText(c.status);
+  // Was "real recommendation, else the generic prompt" -- but that made
+  // the brief repeat the exact same sentence the Recommendation card
+  // shows in full below, word for word (a real duplication complaint).
+  // Now: the generic prompt ONLY (real recommendations are the
+  // Recommendation card's job alone, with its own action buttons) -- null
+  // when a real recommendation exists, so the brief doesn't show a
+  // "Next decision" line that just repeats it.
+  const nextDecision = latest?.recommendations?.[0]?.action ? null : decisionPromptText(c.status);
   const evolutionStages = caseEvolutionStages(c, actions, observations);
   // Whether a REAL finding_actions row exists for latest.finding_id
   // (TODAY's evidence snapshot) -- distinct from actions[0], which is the
@@ -829,7 +856,11 @@ export default function CaseDetail() {
           )}
         </div>
 
-        <div className="flex flex-col gap-4 lg:col-span-4">
+        {/* self-start is required for lg:sticky to actually have room to
+            move -- a grid item stretches to match its row's full height by
+            default, which leaves a sticky child nowhere to travel. */}
+        <div className="flex flex-col gap-4 lg:sticky lg:top-6 lg:col-span-4 lg:self-start">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Decision &amp; follow-up</span>
           <Section title="Proposed by Celeste">
             {latest?.recommendations?.length > 0 && latest?.finding_id ? (
               <div className="space-y-3">
@@ -883,16 +914,21 @@ export default function CaseDetail() {
               // an earlier version of this fallback used ActionTracker
               // directly and silently dropped that warning (also found via
               // the browser test).
-              <ExistingCaseAction
-                action={{ ...DEFAULT_NEW_ACTION, finding_id: latest.finding_id }}
-                staleWarning={staleWarning}
-                onUpdate={handleUpdateAction}
-                metrics={metricsQuery.data?.metrics ?? []}
-                caseId={caseId}
-                onDesignateObjective={handleDesignateObjective}
-                confirmStaleSave={confirmStaleSave}
-                reviewFreshEvidence={reviewFreshEvidence}
-              />
+              <div>
+                <p className="text-sm text-foreground-subtle">No management action recorded yet.</p>
+                <div className="mt-2">
+                  <ExistingCaseAction
+                    action={{ ...DEFAULT_NEW_ACTION, finding_id: latest.finding_id }}
+                    staleWarning={staleWarning}
+                    onUpdate={handleUpdateAction}
+                    metrics={metricsQuery.data?.metrics ?? []}
+                    caseId={caseId}
+                    onDesignateObjective={handleDesignateObjective}
+                    confirmStaleSave={confirmStaleSave}
+                    reviewFreshEvidence={reviewFreshEvidence}
+                  />
+                </div>
+              </div>
             ) : (
               <p className="text-sm text-foreground-subtle">No action recorded yet.</p>
             )}
@@ -980,10 +1016,10 @@ export default function CaseDetail() {
             <summary className="cursor-pointer text-sm font-medium text-foreground-strong">
               Why this is {latest?.priority ? `${latest.priority.replace(/_/g, " ")} priority` : "unscored"}
             </summary>
-            <p className="mt-2 text-sm text-foreground-subtle">
-              Internal priority score: {c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "not scored"} --
-              severity &times; persistence &times; whether impact was quantified, for Celeste's own case ranking only, never a
-              currency figure or a probability.
+            <p className="mt-2 text-sm text-foreground-subtle">{priorityReasoning(latest)}</p>
+            <p className="mt-2 text-xs text-foreground-subtle">
+              Internal priority score: {c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "not scored"}
+              {" "}-- for Celeste's own case ranking only, never a currency figure or a probability.
             </p>
           </details>
         </div>

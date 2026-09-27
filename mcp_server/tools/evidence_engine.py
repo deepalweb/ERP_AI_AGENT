@@ -223,11 +223,14 @@ def segment_concentration_checks(
                 "total_delta_unit": total_delta_unit,
             })
         else:
+            # Same label-can-be-a-phrase grammar fix as current_total_
+            # concentration_checks' own no_evidence_found branch above.
             checks.append({
                 "source": f"{b['dimension']}_concentration",
                 "verdict": "no_evidence_found",
-                "detail": f"Checked — no single {b['label'].lower()} or small group accounts for a majority "
-                f"of the {move_word} from {move_span}; the top segments cover only {max(cumulative_pct, 0):.0f}% of it.",
+                "detail": f"Checked — no single record or small group within {b['label'].lower()} accounts for "
+                f"a majority of the {move_word} from {move_span}; the top segments cover only "
+                f"{max(cumulative_pct, 0):.0f}% of it.",
                 "total_delta": round(total_delta, 4),
                 "total_delta_unit": total_delta_unit,
             })
@@ -300,9 +303,16 @@ def current_total_concentration_checks(breakdowns: list) -> list[dict]:
         else:
             checks.append({
                 "source": f"{b['dimension']}_concentration",
+                # b["label"] is sometimes a full descriptive phrase (e.g.
+                # "Products with no recorded cost"), not a bare singular
+                # noun -- an earlier version of this sentence assumed the
+                # latter ("no single products with no recorded cost or
+                # small group accounts..."), a real grammar defect caught
+                # live. "record" is deliberately generic so this reads
+                # correctly regardless of which shape the label is.
                 "verdict": "no_evidence_found",
-                "detail": f"Checked — no single {b['label'].lower()} or small group accounts for a majority "
-                f"of the total; the top segments cover only {max(cumulative_pct, 0):.0f}% of it.",
+                "detail": f"Checked — no single record or small group within {b['label'].lower()} accounts for "
+                f"a majority of the total; the top segments cover only {max(cumulative_pct, 0):.0f}% of it.",
             })
 
     return checks

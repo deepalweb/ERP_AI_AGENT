@@ -233,10 +233,14 @@ export function controlsExecutiveText(latest) {
     const coveragePct = latest.coverage_pct;
     if (noCost == null) return null;
     const plural = noCost !== 1;
-    return `Cost coverage is ${coveragePct != null ? `${coveragePct}%` : "nearly complete"}, but `
-      + `${formatNumber(noCost)} product${plural ? "s" : ""} still ${plural ? "have" : "has"} no usable cost value. `
-      + `Any inventory-value or margin analysis involving ${plural ? "those products" : "that product"} can be `
-      + `incomplete until ${plural ? "their" : "its"} cost data is corrected.`;
+    // Shortened per direct feedback: the old version repeated almost the
+    // same claim "What this affects" already covers in more detail below
+    // -- this now states the count/coverage/consequence once, plainly,
+    // and lets the investigation section carry the rest.
+    return `${formatNumber(noCost)} active product${plural ? "s" : ""} ${plural ? "have" : "has"} no usable cost `
+      + `value. Cost coverage remains ${coveragePct != null ? `${coveragePct}%` : "nearly complete"}, but valuation `
+      + `and margin analysis involving ${plural ? "those products" : "that product"} can be incomplete. No `
+      + `financial loss has been established.`;
   }
   if (latest.metric_id === "negative_stock_control") {
     const count = latest.products?.length ?? latest.confirm?.current;

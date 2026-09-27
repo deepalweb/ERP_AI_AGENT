@@ -753,7 +753,13 @@ def _cost_coverage_control_finding():
                 # the affected-products table already shows every one of
                 # them, so the recommendation only needs to name the count
                 # and point at it.
-                "action": f"Review and add a recorded cost (or a usable catalog list price) for the {no_cost} "
+                # "usable catalog list price" previously implied selling/
+                # list price is interchangeable with cost -- get_cost_
+                # coverage()'s own "catalog_fallback_only" is the real
+                # concept meant here (a catalog cost field this business
+                # has already approved as a stand-in when no direct cost
+                # is recorded), so name it as that, not as "list price".
+                "action": f"Review and add a recorded cost (or an approved catalog fallback cost) for the {no_cost} "
                 f"affected product{'s' if plural else ''} listed below.",
                 "owner": "Inventory team",
                 "priority": priority,
