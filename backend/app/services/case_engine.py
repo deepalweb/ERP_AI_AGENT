@@ -36,6 +36,7 @@ from filelock import Timeout
 from sqlalchemy.exc import IntegrityError
 
 from backend.app.db import appdb
+from backend.app.services import related_signals
 from mcp_server.tools import intelligence
 
 GRACE_PERIOD_DAYS = 30  # how far back a closed case is still considered for recurrence/reopen matching
@@ -1500,6 +1501,17 @@ def get_case_detail(case_id: str) -> dict | None:
             "hour": latest_snapshot.get("hour"),
         }
 
+    # Cross-domain investigation v1 (2026-09-27): computed fresh on every
+    # fetch, never persisted -- see related_signals.py's own docstring for
+    # the full design and why. Only ever non-empty for metric_ids listed in
+    # RELATED_METRIC_CANDIDATES (today: revenue only); every other case
+    # gets an early-exit empty list at negligible cost.
+    related = []
+    if latest and latest.get("root_cause"):
+        related = related_signals.related_signals_for(
+            case["metric_id"], (latest.get("confirm") or {}).get("period"), latest["root_cause"].get("checks") or []
+        )
+
     return {
         "case": case,
         "resolution_policy": {"name": case["resolution_policy"], "verification_window": VERIFICATION_WINDOW},
@@ -1508,6 +1520,7 @@ def get_case_detail(case_id: str) -> dict | None:
         "observations_note": OBSERVATIONS_NOTE,
         "performance_history": performance_history,
         "relationships": get_case_relationships(case_id),
+        "related_signals": related,
         "history": get_case_history(case_id),
     }
 

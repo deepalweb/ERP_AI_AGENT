@@ -415,6 +415,52 @@ function RecommendationCard({ rec, accepted, hasRecordedAction, findingId, onAcc
   );
 }
 
+// Cross-domain investigation v1 (2026-09-27): a related signal is never
+// labeled "Confirmed" -- that verdict is reserved for same-metric internal
+// evidence (see related_signals.py's own docstring). "Corroborated" means
+// both metrics independently confirmed the same segment; "Point-in-time"
+// means the related metric's own concentration check couldn't run at all
+// (e.g. a rate-mode breakdown) but its largest segment still matches --
+// a real but weaker signal, worded as overlap, never as cause.
+const RELATED_SIGNAL_TIER_META = {
+  corroborated: { label: "Corroborated overlap", tone: "accent" },
+  point_in_time: { label: "Point-in-time overlap", tone: "neutral" },
+};
+
+function RelatedSignals({ signals }) {
+  if (!signals?.length) return null;
+  return (
+    <div className="rounded-xl border border-border bg-surface p-4">
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Related business signals</span>
+      <p className="mt-1 text-xs text-foreground-subtle">
+        Other findings at the same outlet and period -- supporting evidence to look into, never proof of cause.
+      </p>
+      <div className="mt-3 space-y-3">
+        {signals.map((s) => {
+          const meta = RELATED_SIGNAL_TIER_META[s.tier] ?? { label: s.tier, tone: "neutral" };
+          return (
+            <div key={s.metric_id} className="border-t border-border pt-3 first:border-t-0 first:pt-0">
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-sm font-medium text-foreground-strong">{s.label}</span>
+                <Badge tone={meta.tone} className="flex-none">{meta.label}</Badge>
+              </div>
+              <p className="mt-1 text-xs text-foreground-subtle">{s.detail}</p>
+              {s.case_id && (
+                <Link
+                  to={`/investigate/${encodeURIComponent(s.case_id)}`}
+                  className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+                >
+                  View {s.label.toLowerCase()} case &rarr;
+                </Link>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function CaseDetail() {
   const { caseId } = useParams();
   const queryClient = useQueryClient();
@@ -598,7 +644,7 @@ export default function CaseDetail() {
   }
 
   const { case: c, latest, observations, observations_note: observationsNote, performance_history: performanceHistory,
-    relationships, history, actions, resolution_policy: resolutionPolicy } = detailQuery.data;
+    relationships, history, actions, resolution_policy: resolutionPolicy, related_signals: relatedSignals } = detailQuery.data;
 
   const statusMeta = caseStatusMeta(c.status);
   const severityMeta = latest ? SEVERITY_TAG_META[latest.priority] ?? null : null;
@@ -933,6 +979,8 @@ export default function CaseDetail() {
               </p>
             )}
           </Section>
+
+          <RelatedSignals signals={relatedSignals} />
 
           {/* Priority details -- the internal ranking score, demoted to a
               small collapsed disclosure rather than an equally-weighted
