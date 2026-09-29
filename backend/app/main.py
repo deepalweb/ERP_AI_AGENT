@@ -3,7 +3,7 @@ import os
 
 import anyio
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-from mcp_server.tools import intelligence, state_findings
+from mcp_server.tools import current_period, intelligence, state_findings
 from .core.access import AccessControlMiddleware, auth_mode
 from .db import reporting
 from .db.store_scope import CELESTE_STORE_NAMES
@@ -200,6 +200,20 @@ async def store_scope():
     """The fixed list of outlets every sales/operations number in this app is
     scoped to — see backend/app/db/store_scope.py for why."""
     return {"status": "ok", "stores": CELESTE_STORE_NAMES}
+
+
+@app.get("/performance/summary")
+async def performance_summary(month: str | None = None, store_id: int | None = None):
+    from backend.app.services import performance
+    try:
+        performance.validate_filters(month, store_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        return {"status": "ok", **await performance.get_performance(month, store_id)}
+    except Exception:
+        logger.exception("performance summary failed")
+        return {"status": "error", "detail": "Could not load performance comparisons."}
 
 
 @app.get("/dashboard/summary")
@@ -699,6 +713,12 @@ def _investigate_cached(metric_id: str):
     # directly (uncached) as the core of scan_all()'s real detection pipeline
     # and must see fresh data on every rescan.
     return intelligence.investigate(metric_id)
+
+
+@app.get("/intelligence/current-period")
+async def current_period_investigations(refresh: bool = False):
+    """Provisional source-anchored assessments; never mutates cases or outcomes."""
+    return await anyio.to_thread.run_sync(lambda: current_period.assess_all(refresh=refresh))
 
 
 @app.get("/intelligence/investigate/{metric_id}")

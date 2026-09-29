@@ -121,11 +121,14 @@ class MetricDef:
     # an undeclared pair just because their categories happen to differ —
     # see that function's docstring.
     expected_relationship: dict[str, str] = field(default_factory=dict)
+    zero_baseline_threshold: float | None = None
+    zero_baseline_min_exposure: int = 15
 
 
 METRICS: dict[str, MetricDef] = {
     "cancellation_rate": MetricDef(
         id="cancellation_rate",
+        zero_baseline_threshold=5.0,
         # Every metric below is marked reviewed=True as a one-time backfill:
         # each one's SQL was read end-to-end (this file, in full) to decide
         # independence_group membership, so "reviewed" is already true for
@@ -272,6 +275,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "order_volume": MetricDef(
         id="order_volume",
+        zero_baseline_threshold=15,
         independence_reviewed=True,
         label="Confirmed order volume",
         unit="count",
@@ -310,6 +314,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "delayed_delivery_rate": MetricDef(
         id="delayed_delivery_rate",
+        zero_baseline_threshold=5.0,
         independence_reviewed=True,
         label="Severely delayed delivery rate",
         unit="percent",
@@ -381,6 +386,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "uber_failure_rate": MetricDef(
         id="uber_failure_rate",
+        zero_baseline_threshold=5.0,
         independence_reviewed=True,
         label="Uber order failure rate",
         unit="percent",
@@ -442,6 +448,7 @@ METRICS: dict[str, MetricDef] = {
     ),
     "pickme_cancellation_rate": MetricDef(
         id="pickme_cancellation_rate",
+        zero_baseline_threshold=5.0,
         independence_reviewed=True,
         label="PickMe order cancellation rate",
         unit="percent",
@@ -765,6 +772,9 @@ def list_metrics():
             # request a cadence the backend would reject (Phase 2e Task 4:
             # never invent measurement semantics on the client).
             "supports_weekly_measurement": m.short_term_trend_sql is not None,
+            "zero_baseline_rule": ({"absolute_threshold": m.zero_baseline_threshold,
+                                    "minimum_exposure": m.zero_baseline_min_exposure}
+                                   if m.zero_baseline_threshold is not None else None),
         }
         for m in METRICS.values()
     ]
@@ -832,8 +842,10 @@ def get_trailing_trend(metric: MetricDef, window_days: int = 7):
     return trend, as_of
 
 
-def detect_anomaly(trend: list[dict], direction: Direction):
+def detect_anomaly(trend: list[dict], direction: Direction, *, metric: MetricDef | None = None):
     complete = [m for m in trend if not m["is_partial"]]
+    if metric and metric.is_rate:
+        complete = [m for m in complete if m.get("denominator", 0) > 0]
     if len(complete) < 2:
         return {"is_anomalous": False, "verdict": "insufficient_data", "latest_month": None}
 
@@ -849,6 +861,10 @@ def detect_anomaly(trend: list[dict], direction: Direction):
     is_significant = (pct_change is not None and abs(pct_change) >= ANOMALY_PCT_THRESHOLD) or (
         z_score is not None and abs(z_score) >= ANOMALY_Z_THRESHOLD
     )
+    if baseline_mean == 0 and metric and metric.zero_baseline_threshold is not None:
+        exposure = latest.get("denominator", latest["value"] if metric.unit == "count" else 0)
+        is_significant = (abs(latest["value"]) >= metric.zero_baseline_threshold
+                          and exposure >= metric.zero_baseline_min_exposure)
     moved_bad = (direction == "higher_is_bad" and moved_up) or (direction == "higher_is_good" and not moved_up)
     moved_good = (direction == "higher_is_bad" and not moved_up) or (direction == "higher_is_good" and moved_up)
 
@@ -861,11 +877,13 @@ def detect_anomaly(trend: list[dict], direction: Direction):
         category = "opportunity"
     else:
         category = "normal"
+    if baseline_mean == 0 and latest["value"] != 0 and (metric is None or metric.zero_baseline_threshold is None):
+        category = None  # no calibrated activation rule; never count this as healthy
 
     return {
         "is_anomalous": category == "critical",
         "category": category,
-        "verdict": "anomalous" if category == "critical" else category,
+        "verdict": "activation_rule_required" if category is None else "anomalous" if category == "critical" else category,
         "latest_month": latest["month"],
         "latest_value": latest["value"],
         "baseline_mean": round(baseline_mean, 4),
@@ -1027,7 +1045,7 @@ def investigate(metric_id: str):
         return {"error": f"Unknown metric '{metric_id}'. Call list_metrics for available options."}
 
     trend = get_trend(metric)
-    anomaly = detect_anomaly(trend, metric.direction)
+    anomaly = detect_anomaly(trend, metric.direction, metric=metric)
     persistence = classify_persistence(trend, metric.direction)
 
     breakdowns = []
@@ -1058,11 +1076,11 @@ def investigate_trailing(metric_id: str):
         return {"error": f"'{metric_id}' has no short-term (trailing window) definition."}
 
     trend, as_of = get_trailing_trend(metric)
-    anomaly = detect_anomaly(trend, metric.direction)
+    anomaly = detect_anomaly(trend, metric.direction, metric=metric)
     persistence = classify_persistence(trend, metric.direction)
 
     breakdowns = []
-    if as_of is not None:
+    if as_of is not None and "moved_up" in anomaly:
         breakdowns = [
             get_trailing_breakdown(dim, as_of, anomaly["moved_up"]) for dim in metric.dimensions
         ]
@@ -1091,8 +1109,8 @@ def scan_attention():
     flagged = []
     for metric in METRICS.values():
         trend = get_trend(metric)
-        anomaly = detect_anomaly(trend, metric.direction)
-        if anomaly["category"] not in ("critical", "opportunity"):
+        anomaly = detect_anomaly(trend, metric.direction, metric=metric)
+        if anomaly.get("category") not in ("critical", "opportunity"):
             continue
 
         top_driver = None

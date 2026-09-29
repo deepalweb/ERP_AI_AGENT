@@ -96,7 +96,7 @@ const latest = {
       { source: "store_concentration", verdict: "confirmed", detail: "Concentrated in Ethul Kotte (68% of the move)." },
     ],
   },
-  impact: { detail: "Roughly Rs 1.2M above plan this month if the trend holds through month-end." },
+  impact: { financial_impact_rs: 1_200_000, detail: "Roughly Rs 1.2M above plan this month if the trend holds through month-end." },
   how: null,
   recommendations: [
     { action: "Consider extending the weekend promo into weekdays.", owner: "Marketing", priority: "medium", expected_benefit: "Further lift if the same segment responds." },

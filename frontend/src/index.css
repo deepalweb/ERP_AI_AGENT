@@ -595,30 +595,107 @@ select {
   font-size: 12px;
   color: var(--text-subtle);
 }
-.outcome-explainer {
+/* Replaces the old linear "01/02/03" .outcome-explainer strip -- two
+   independent verticals (management action, business condition)
+   converging on one case, not a causal sequence. See
+   design/Management.jsx's ParallelTracks. */
+.track-diagram {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  background: var(--surface-sunken);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
   border: 1px solid var(--border);
   border-radius: 13px;
   overflow: hidden;
 }
-.outcome-explainer > div {
-  padding: 23px;
-  border-right: 1px solid var(--border);
+.track-col {
+  padding: 18px 20px;
+  background: var(--surface);
 }
-.outcome-explainer > div:last-child {
-  border: 0;
+.track-col-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
 }
-.outcome-explainer h2 {
-  margin: 10px 0 6px;
+.track-step-list {
+  margin-top: 8px;
   color: var(--text-h);
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
 }
-.outcome-explainer p {
-  font-size: 12px;
+.track-convergence {
+  grid-column: 1 / -1;
+  padding: 14px 20px;
+  background: var(--surface-sunken);
+  border-top: 1px solid var(--border);
   color: var(--text-subtle);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+/* Outcomes' case-primary card -- 3 blocks (business result / management
+   action / interpretation), each a visually separate fact so a manager
+   never reads a completed action as proof the business result happened
+   because of it. See design/Management.jsx's CaseOutcomeCard. */
+.outcome-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 20px;
+}
+.outcome-card h3 {
+  margin: 8px 0 14px;
+  color: var(--text-h);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.outcome-block {
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.outcome-block:first-of-type {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: 0;
+}
+.outcome-block-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-subtle);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.65px;
+  text-transform: uppercase;
+}
+.outcome-block p {
+  margin-top: 4px;
+}
+.outcome-interpretation {
+  background: var(--surface-sunken);
+  margin-left: -20px;
+  margin-right: -20px;
+  margin-bottom: -20px;
+  padding: 12px 20px 16px;
+  border-radius: 0 0 12px 12px;
+}
+.outcome-interpretation p {
+  line-height: 1.6;
+}
+/* The non-causality line -- deliberately the one sentence in this whole
+   card that must never be skimmed past. Not loud (no warning color, this
+   is a neutral fact, not a problem), but set apart from its two sibling
+   lines by weight and a left rule, so "secondary but impossible to miss"
+   is a real visual property, not just a hope. */
+.outcome-attribution {
+  margin-top: 6px;
+  padding-left: 9px;
+  border-left: 2px solid var(--accent-border);
+  color: var(--text-h);
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.5;
 }
 .original-header > div:first-child {
   flex-wrap: wrap;
@@ -731,13 +808,8 @@ select {
   .page-heading {
     align-items: flex-start;
   }
-  .outcome-explainer {
+  .track-diagram {
     grid-template-columns: minmax(0, 1fr);
-  }
-  .outcome-explainer > div {
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-    padding: 18px;
   }
   .section-heading {
     flex-wrap: wrap;

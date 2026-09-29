@@ -1,6 +1,7 @@
 import { CATEGORY_META } from "../InvestigationCard";
 import LineChart from "../charts/LineChart";
 import DivergingBarList from "../charts/DivergingBarList";
+import CardFooter from "./CardFooter";
 import { formatByUnit, monthLabel } from "../format";
 
 const PERSISTENCE_META = {
@@ -108,6 +109,8 @@ export default function InvestigateMetricCard({ result }) {
         .map((b) => (
           <BreakdownChart key={b.dimension} breakdown={b} unit={metric.unit} direction={metric.direction} />
         ))}
+
+      <CardFooter relatedCaseId={result.related_case_id} />
     </div>
   );
 }

@@ -47,8 +47,8 @@ export default function RevenueInvestigationPanel({ latest, casePeriod }) {
 
   const ovPoint = findByPeriod(orderVolumeQuery.data?.trend, casePeriod);
   const aovPoint = findByPeriod(aovQuery.data?.trend, casePeriod);
-  const ovAnomaly = orderVolumeQuery.data?.anomaly;
-  const aovAnomaly = aovQuery.data?.anomaly;
+  const ovAnomaly = orderVolumeQuery.data?.anomaly?.latest_month === casePeriod ? orderVolumeQuery.data.anomaly : null;
+  const aovAnomaly = aovQuery.data?.anomaly?.latest_month === casePeriod ? aovQuery.data.anomaly : null;
   const aovBarelyMoved = aovAnomaly?.pct_change_vs_baseline != null && Math.abs(aovAnomaly.pct_change_vs_baseline) < 15;
 
   return (
@@ -60,7 +60,9 @@ export default function RevenueInvestigationPanel({ latest, casePeriod }) {
             {monthLabel(baselineMonths[0]?.month)} to {monthLabel(baselineMonths[baselineMonths.length - 1]?.month)}).
           </>
         ) : (
-          "Not enough complete months yet to establish a baseline."
+          latest?.confirm?.baseline != null
+            ? "The saved baseline is shown in Comparison and affected segments. Its underlying monthly history is not available here."
+            : "No baseline or complete comparison history was saved with this result."
         )}
         {partialMonth && (
           <> {monthLabel(partialMonth.month)} is still in progress ({formatCurrency(partialMonth.value)} so far) and is
@@ -100,7 +102,7 @@ export default function RevenueInvestigationPanel({ latest, casePeriod }) {
               </li>
             )}
           </ul>
-          {ovPoint && aovPoint && (
+          {ovPoint && aovPoint && ovAnomaly && aovAnomaly && (
             <p className="mt-1.5 text-xs text-foreground-subtle">
               {aovBarelyMoved
                 // Phase 3 final validation, Check 4: average order value is a

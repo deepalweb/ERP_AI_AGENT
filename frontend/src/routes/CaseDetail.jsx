@@ -17,6 +17,8 @@ import {
   additionalObservationsText, baselineVolatilityCaution, controlsExecutiveText, controlsResolutionText,
   decisionPromptText, evidenceRollupText, financialImpactText, headlineFor, metricSnapshotText, negativeStockText,
 } from "../design/plainLanguage";
+import InvestigationResults from "../design/InvestigationResults";
+import CurrentPeriodInvestigations from "../design/CurrentPeriodInvestigations";
 import InventoryInvestigationPanel from "../design/InventoryInvestigationPanel";
 import RevenueInvestigationPanel from "../design/RevenueInvestigationPanel";
 import StockCountInvestigationPanel from "../design/StockCountInvestigationPanel";
@@ -107,6 +109,13 @@ const HISTORY_EVENT_META = {
   reopened: { label: "Reopened", tone: "warning" },
   decision_evidence: { label: "Decision recorded", tone: "accent" },
   recommendation_approved: { label: "Recommendation approved", tone: "good" },
+  measurement_changed: { label: "Measurement coverage changed", tone: "accent" },
+  case_changed: { label: "Case assessment changed", tone: "accent" },
+  evidence_changed: { label: "Evidence changed", tone: "accent" },
+  target_changed: { label: "Target version created", tone: "accent" },
+  action_reopened: { label: "Action reopened", tone: "warning" },
+  outcome_measured: { label: "Outcome measured", tone: "accent" },
+  resolution_held: { label: "Verification held", tone: "warning" },
 };
 
 function historyEventDescription(event) {
@@ -127,6 +136,20 @@ function historyEventDescription(event) {
       return `Action set to "${detail.action_status}" against ${detail.finding_id}, evidence preserved as of ${fmtDateTime(detail.observed_at)}.`;
     case "recommendation_approved":
       return detail.recommendation?.action ? `"${detail.recommendation.action}"` : null;
+    case "measurement_changed":
+      return detail.reason || `Measurement: ${String(detail.measurement_status).replaceAll("_", " ")}; coverage: ${detail.coverage}.`;
+    case "case_changed":
+      return Object.entries(detail).map(([key, value]) => `${key.replaceAll("_", " ")}: ${value.before ?? "—"} → ${value.after ?? "—"}`).join(" · ");
+    case "evidence_changed":
+      return `Updated: ${(detail.fields ?? []).join(", ")}. Previous evidence is preserved in this event.`;
+    case "target_changed":
+      return `Target version ${detail.target_version}. A new completion cycle requires a new measurement.`;
+    case "action_reopened":
+      return "Action reopened. Its prior completion is preserved; a new completion starts a new measurement window.";
+    case "outcome_measured":
+      return `Target version ${detail.target_version}: ${detail.outcome_verdict || detail.outcome_status || "awaiting measurement"}.`;
+    case "resolution_held":
+      return detail.reason;
     default:
       return null;
   }
@@ -311,6 +334,7 @@ function ExistingCaseAction({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-foreground">
               Target: {action.target_metric_id} {action.target_comparison} {action.target_value}
+              {action.target_version > 0 && ` · version ${action.target_version}`}
               {action.target_unit === "percent" ? "%" : action.target_unit === "currency" ? " Rs" : ""}
               {action.target_baseline_relative ? " (relative to baseline)" : ""}
               {action.target_measurement_period === "weekly" ? " -- weekly" : " -- monthly"}
@@ -326,6 +350,22 @@ function ExistingCaseAction({
             )}
           </div>
           {action.intended_result && <p className="mt-1 text-foreground-subtle">Intent: {action.intended_result}</p>}
+          {action.target_history?.length > 0 && (
+            <details className="mt-2 text-xs text-foreground-subtle">
+              <summary className="cursor-pointer">Target and measurement history</summary>
+              <ul className="mt-2 space-y-2">
+                {action.target_history.map((version) => (
+                  <li key={version.version}>
+                    Version {version.version}: {version.target.target_metric_id} {version.target.target_comparison} {version.target.target_value}
+                    {version.superseded_at ? " · superseded" : " · current"}
+                    {version.outcomes.map((outcome, index) => (
+                      <div key={index}>Observed {outcome.outcome_value ?? "—"} · {outcome.outcome_verdict || outcome.outcome_status || "pending"} · {outcome.outcome_period || "awaiting period"}</div>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           {action.outcome_verdict && (
             <p className="mt-1 text-foreground-subtle">
               Observed {action.outcome_value} in {action.outcome_period}, checked {fmtDateTime(action.outcome_checked_at)}.
@@ -732,6 +772,7 @@ export default function CaseDetail() {
   const isIncidentCase = typeof c.metric_id === "string" && c.metric_id.startsWith("incident_");
   const isControlsCase = c.domain === "controls";
   const isSupplierCase = c.domain === "supplier";
+  const hasTrendResults = ["monthly", "weekly"].includes(c.horizon) && latest && (latest.confirm?.baseline != null || latest.trend?.length || latest.breakdowns?.length || latest.how?.stages?.length);
   // Business Controls cases (a data-control gap, not a trend anomaly) read
   // as generic through the default sentence chain -- see plainLanguage.js's
   // controlsExecutiveText/controlsResolutionText docstrings for why. Both
@@ -751,6 +792,7 @@ export default function CaseDetail() {
       <Link to="/investigate" className="inline-flex items-center gap-1 text-sm text-accent hover:underline">
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} /> Back to Investigate
       </Link>
+
 
       {retryNotice && (
         <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-foreground">
@@ -790,6 +832,27 @@ export default function CaseDetail() {
         />
       </div>
 
+      <section className="panel mt-4 p-4" aria-label="Measurement and verification">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+          <span>Last verification check: <strong>{detailQuery.data.measurement?.observed_at ? fmtDateTime(detailQuery.data.measurement.observed_at) : "Not recorded"}</strong></span>
+          <span>Coverage: <strong>{detailQuery.data.measurement?.coverage ?? "Unknown"}</strong></span>
+          <span>Source freshness: <strong>{detailQuery.data.measurement?.freshness ?? "Unknown"}</strong></span>
+        </div>
+        <p className="mt-2 text-sm text-foreground">{detailQuery.data.verification_explanation || "Awaiting a successful measurement of this case's scope."}</p>
+        {detailQuery.data.measurement && (
+          <details className="mt-2 text-xs text-foreground-subtle">
+            <summary className="cursor-pointer">Evidence provenance</summary>
+            <p className="mt-2">Source check: {detailQuery.data.measurement.detector_id} · Scope: {detailQuery.data.measurement.scope} · Period: {detailQuery.data.measurement.period || "Unavailable"}</p>
+            <p>{String(detailQuery.data.measurement.measurement_status).replaceAll("_", " ")}</p>
+          </details>
+        )}
+      </section>
+
+      {["monthly", "weekly"].includes(c.horizon) && <>
+        <CurrentPeriodInvestigations metricId={c.metric_id} />
+        <p className="mt-4 text-sm text-foreground-subtle">Saved case evidence below: {formatConfirmPeriod(latest?.confirm?.period)}. Actions and targets below use that saved evidence, separately from the provisional current-period check.</p>
+      </>}
+
       {/* 2. Business brief -- what happened, why uncertain, impact, and a
           standalone next-decision line. controlsExecText overrides the
           generic sentence chain for a controls case (see plainLanguage.js);
@@ -819,14 +882,14 @@ export default function CaseDetail() {
           flow layout, replacing the earlier equal-weighted vertical stack
           of same-width cards. */}
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
-        <div className="flex flex-col gap-4 lg:col-span-8">
+        <div className="flex min-w-0 flex-col gap-4 lg:col-span-8">
           {/* Investigation content -- rendered directly, no "Visual
               investigation" heading over an empty section. Only a
               dedicated panel or a real multi-point trend renders anything
               at all; a metric with neither renders nothing here rather
               than an empty labeled box. */}
           {(isStuckStockCount || isInventoryStockOut || isRevenueCase || isCompletedVarianceCase || isIncidentCase
-            || isControlsCase || isSupplierCase || trendPoints.length > 1) && (
+            || isControlsCase || isSupplierCase || (!hasTrendResults && trendPoints.length > 1)) && (
             <Section title={isControlsCase ? "Control investigation" : "Investigation"}>
               {isStuckStockCount ? (
                 <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
@@ -848,6 +911,12 @@ export default function CaseDetail() {
                   <TrendChart data={trendPoints} formatValue={(v) => formatByUnit(v, latest?.confirm?.unit)} stroke="var(--accent)" gridStroke="var(--border)" axisStroke="var(--text-subtle)" />
                 </div>
               )}
+            </Section>
+          )}
+
+          {hasTrendResults && (
+            <Section title="Comparison and affected segments">
+              <InvestigationResults latest={latest} showTrend={!isRevenueCase && !isSupplierCase} />
             </Section>
           )}
 
@@ -884,7 +953,7 @@ export default function CaseDetail() {
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-foreground-subtle">No recommendations generated for this case yet.</p>
+              <p className="text-sm text-foreground-subtle">No recommendations available. {latest?.recommendation_generation?.status === "rejected" ? "The generated advice did not pass validation." : "The measured evidence remains available above."}</p>
             )}
           </Section>
 
@@ -948,7 +1017,7 @@ export default function CaseDetail() {
               technical section below. */}
           <Section title="Resolution">
             <p className="text-sm text-foreground">
-              {controlsResText ? controlsResText : (
+              {c.resolution_verdict === "recovered" ? "Condition recovered. Clean measurements no longer detect the condition; this does not establish that its underlying cause was resolved." : controlsResText ? controlsResText : (
                 <>
                   {c.status === "resolved" && RESOLUTION_VERDICT_TEXT[c.resolution_verdict] ? RESOLUTION_VERDICT_TEXT[c.resolution_verdict] :
                     c.status === "resolved" && `Verified resolved -- clean for ${resolutionPolicy?.verification_window ?? 2} consecutive periods with no fresh anomaly.`}

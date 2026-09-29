@@ -17,6 +17,7 @@ import json
 
 from backend.app.db import appdb
 from backend.app.services import action_outcomes, case_engine, finding_actions
+from tests.coverage_helpers import sync_covered_cases
 from tests.test_phase2e import _fake_today_sequence, _monthly_finding, _set_trend
 
 
@@ -51,22 +52,21 @@ def test_repeated_inconclusive_checks_do_not_duplicate_history_or_change_resolut
     case_engine.designate_case_objective_from_action(case_id, "revenue-2026-07")
 
     _set_trend(monkeypatch, "revenue", [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     _set_trend(monkeypatch, "revenue", [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(case_id)["status"] == "verification_pending"
 
     # The required August row never arrives; push well past the inconclusive
     # deadline and let the case close on it.
     monkeypatch.setattr(action_outcomes, "_today", lambda: datetime.date(2027, 1, 1))
     action_outcomes.check_outcomes()
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     case = case_engine.get_case(case_id)
     assert case["status"] == "resolved"
     assert case["resolution_verdict"] == "inconclusive"
 
     counts_after_first_close = _history_event_counts(case_id)
-    action_after_first = finding_actions.get_actions_for(["revenue-2026-07"])["revenue-2026-07"]
 
     # Re-run check_outcomes() several more times with NOTHING new -- real
     # daily-scan cadence, same absent data.
@@ -111,15 +111,15 @@ def test_evidence_change_after_a_decision_produces_exactly_one_audited_correctio
     case_engine.designate_case_objective_from_action(case_id, "revenue-2026-07")
 
     _set_trend(monkeypatch, "revenue", [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     _set_trend(monkeypatch, "revenue", [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
 
     # Evidence as it stood then: no August measurement at all -- the case
     # closes "inconclusive," the honest verdict for what was known then.
     monkeypatch.setattr(action_outcomes, "_today", lambda: datetime.date(2027, 1, 1))
     action_outcomes.check_outcomes()
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(case_id)["resolution_verdict"] == "inconclusive"
 
     # The evidence genuinely changes: the real August figure finally lands.

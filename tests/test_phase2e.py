@@ -19,6 +19,7 @@ import pytest
 from backend.app.db import appdb
 from backend.app.services import action_outcomes, case_engine, finding_actions
 from mcp_server.tools import intelligence
+from tests.coverage_helpers import sync_covered_cases
 
 
 def _monthly_finding(metric_id, domain, period, category="critical", current=100, impact=50.0):
@@ -126,7 +127,7 @@ def test_scan_holding_the_lock_blocks_and_times_out_a_concurrent_action_save(app
 def test_action_save_and_a_concurrent_scan_never_interleave(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09", current=100)
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     version = case_engine.get_case_observations(f1["case_id"])[0]["version"]
 
     order = []
@@ -156,7 +157,7 @@ def test_action_save_and_a_concurrent_scan_never_interleave(appdb_reset, monkeyp
 def test_legacy_save_on_a_case_aware_finding_is_marked_evidence_unverified(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
 
     # Home.jsx/Actions.jsx's plain form -- no evidence version at all.
     result = case_engine.save_action_with_verification("revenue-2026-09", _DEFAULT_ACTION_KWARGS, None)
@@ -168,7 +169,7 @@ def test_legacy_save_on_a_case_aware_finding_is_marked_evidence_unverified(appdb
 def test_verified_save_on_a_case_aware_finding_is_marked_evidence_verified(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     version = case_engine.get_case_observations(f1["case_id"])[0]["version"]
 
     result = case_engine.save_action_with_verification("revenue-2026-09", _DEFAULT_ACTION_KWARGS, version)
@@ -188,11 +189,11 @@ def test_save_on_a_finding_with_no_case_leaves_evidence_verified_not_applicable(
 def test_a_stale_version_is_still_rejected_through_the_atomic_path(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09", current=100)
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     stale_version = case_engine.get_case_observations(f1["case_id"])[0]["version"]
 
     f2 = _monthly_finding("revenue", "financial", "2026-09", current=90)  # same-day rescan, new evidence
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
 
     with pytest.raises(case_engine.StaleEvidenceError) as excinfo:
         case_engine.save_action_with_verification("revenue-2026-09", _DEFAULT_ACTION_KWARGS, stale_version)
@@ -270,15 +271,15 @@ def test_weekly_horizon_case_with_a_direct_objective_actually_resolves(appdb_res
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence(
         [datetime.date(2026, 9, 1), datetime.date(2026, 9, 2), datetime.date(2026, 9, 3)]))
     f = _state_finding("cancellation_rate", "operations", "2026-09-01", category="opportunity")
-    case_engine.sync_cases([], [], [f])
+    sync_covered_cases([], [], [f])
     case_id = f["case_id"]
 
     _set_trailing_trend(monkeypatch, "cancellation_rate", [{"month": "recent week", "value": 3, "is_partial": False}],
                          as_of=datetime.date(2026, 9, 3))
     case_engine.set_case_objective(case_id, "cancellation_rate", 5, "<=")
 
-    case_engine.sync_cases([], [], [])  # progress=1
-    case_engine.sync_cases([], [], [])  # progress=2, window satisfied
+    sync_covered_cases([], [], [])  # progress=1
+    sync_covered_cases([], [], [])  # progress=2, window satisfied
 
     case = case_engine.get_case(case_id)
     assert case["status"] == "resolved"
@@ -288,7 +289,7 @@ def test_weekly_horizon_case_with_a_direct_objective_actually_resolves(appdb_res
 def test_case_objective_rejects_a_weekly_metric_without_weekly_support(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     f = _state_finding("revenue", "financial", "2026-09-01", category="opportunity")
-    case_engine.sync_cases([], [], [f])
+    sync_covered_cases([], [], [f])
     with pytest.raises(ValueError):
         case_engine.set_case_objective(f["case_id"], "revenue", 1_000_000, ">=")
 
@@ -301,7 +302,7 @@ def test_case_objective_rejects_snapshot_horizon(appdb_reset, monkeypatch):
         "confirm": {"period": "2026-09-01", "current": 1, "baseline": 2, "pct_change": -50.0},
         "root_cause": {"checks": []},
     }
-    case_engine.sync_cases([], [f], [])  # state_findings -> horizon="snapshot"
+    sync_covered_cases([], [f], [])  # state_findings -> horizon="snapshot"
     with pytest.raises(ValueError):
         case_engine.set_case_objective(f["case_id"], "cancellation_rate", 5, "<=")
 
@@ -356,7 +357,7 @@ def test_an_inconclusive_action_lets_its_opportunity_case_close_inconclusive_not
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence(
         [datetime.date(2026, 7, 1), datetime.date(2026, 8, 1), datetime.date(2026, 9, 1)]))
     f = _monthly_finding("revenue", "financial", "2026-07", category="opportunity")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
     finding_actions.set_action(
@@ -367,9 +368,9 @@ def test_an_inconclusive_action_lets_its_opportunity_case_close_inconclusive_not
                      {"t": "2026-07-15T00:00:00"})
 
     _set_trend(monkeypatch, "revenue", [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     _set_trend(monkeypatch, "revenue", [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(case_id)["status"] == "verification_pending"  # held, outcome still pending
 
     # The trend already lacks an August row (only September's, from
@@ -380,7 +381,7 @@ def test_an_inconclusive_action_lets_its_opportunity_case_close_inconclusive_not
     # the held-case re-check semantics _advance_verification relies on.
     monkeypatch.setattr(action_outcomes, "_today", lambda: datetime.date(2027, 1, 1))
     action_outcomes.check_outcomes()
-    case_engine.sync_cases([], [], [])  # re-checks the policy
+    sync_covered_cases([], [], [])  # re-checks the policy
 
     case = case_engine.get_case(case_id)
     assert case["status"] == "resolved"
@@ -412,12 +413,12 @@ def test_version_tokens_never_collide_across_different_days_of_a_monthly_finding
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence(
         [datetime.date(2026, 9, 1), datetime.date(2026, 9, 2)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09", current=100)
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     case_id = f1["case_id"]
     day1_version = case_engine.get_case_observations(case_id)[0]["version"]
 
     f2 = _monthly_finding("revenue", "financial", "2026-09", current=110)  # next calendar day -- a fresh row
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
     day2_version = case_engine.get_case_observations(case_id)[-1]["version"]
 
     assert day1_version != day2_version
@@ -432,7 +433,7 @@ def test_a_failure_recording_the_decision_snapshot_rolls_back_the_action_write_t
     # nothing was left half-saved.
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
 
     def _boom(*args, **kwargs):
         raise RuntimeError("simulated failure recording the decision snapshot")
@@ -453,7 +454,7 @@ def test_dismiss_reopen_and_objective_endpoints_respect_the_same_case_write_lock
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     monkeypatch.setattr(case_engine, "ACTION_SAVE_LOCK_TIMEOUT", 0.2)
     f1 = _monthly_finding("revenue", "financial", "2026-09", category="opportunity")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     case_id = f1["case_id"]
 
     scan_lock = appdb.case_store_lock()
@@ -487,7 +488,7 @@ def test_dismiss_reopen_and_objective_endpoints_respect_the_same_case_write_lock
 def test_designate_objective_from_action_respects_the_case_write_lock(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence([datetime.date(2026, 9, 1)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09", category="opportunity")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     case_id = f1["case_id"]
     finding_actions.set_action(
         "revenue-2026-09", True, "completed", None, case_id=case_id,
@@ -539,7 +540,7 @@ def test_late_arriving_data_audits_a_correction_on_a_case_already_closed_inconcl
     monkeypatch.setattr(case_engine, "_business_today", _fake_today_sequence(
         [datetime.date(2026, 7, 1), datetime.date(2026, 8, 1), datetime.date(2026, 9, 1)]))
     f = _monthly_finding("revenue", "financial", "2026-07", category="opportunity")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
     finding_actions.set_action(
@@ -551,9 +552,9 @@ def test_late_arriving_data_audits_a_correction_on_a_case_already_closed_inconcl
     case_engine.designate_case_objective_from_action(case_id, "revenue-2026-07")
 
     _set_trend(monkeypatch, "revenue", [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     _set_trend(monkeypatch, "revenue", [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(case_id)["status"] == "verification_pending"  # held on the designated action
 
     # The required August row never lands; the deadline passes and the
@@ -561,7 +562,7 @@ def test_late_arriving_data_audits_a_correction_on_a_case_already_closed_inconcl
     # designated from this exact action, the held case closes on that.
     monkeypatch.setattr(action_outcomes, "_today", lambda: datetime.date(2027, 1, 1))
     action_outcomes.check_outcomes()
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     case = case_engine.get_case(case_id)
     assert case["status"] == "resolved"
     assert case["resolution_verdict"] == "inconclusive"

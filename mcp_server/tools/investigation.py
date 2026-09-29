@@ -8,15 +8,19 @@ metric to intelligence.METRICS and it gets investigated the same way.
 """
 
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import UTC, date, datetime
+from functools import partial
 
 from openai import OpenAI
 
-from mcp_server.tools import evidence_engine, impact_engine, intelligence
+from mcp_server.tools import evidence_engine, impact_engine, intelligence, measurement, model_config
+from mcp_server.tools import recommendations as recommendation_schema
 
 CATEGORY_ORDER = {"critical": 0, "opportunity": 1}
+logger = logging.getLogger(__name__)
 SEVERITY_BY_CATEGORY = {"critical": "high", "opportunity": "positive"}
 
 # How each metric is presented in the Explore feed's domain grouping. Lives
@@ -107,7 +111,7 @@ def _get_client() -> OpenAI:
 
 
 def _get_model() -> str:
-    return os.getenv("OPENAI_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+    return model_config.model_name()
 
 
 def _headline(metric: dict, anomaly: dict) -> str:
@@ -226,17 +230,10 @@ def _generate_recommendations(metric: dict, anomaly: dict, breakdowns: list, imp
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
-        content = (response.choices[0].message.content or "[]").strip()
-        if content.startswith("```"):
-            content = content.strip("`")
-            if content.startswith("json"):
-                content = content[4:]
-        recommendations = json.loads(content)
-        if not isinstance(recommendations, list):
-            return []
-        return recommendations
+        return recommendation_schema.parse(response.choices[0].message.content or "[]",
+            allowed_refs={c["source"] for c in (evidence_pkg or {}).get("checks", [])})
     except Exception:
-        return []
+        return recommendation_schema.Recommendations()
 
 
 def generate_daily_synthesis(investigations: list[dict]) -> dict | None:
@@ -321,7 +318,29 @@ def generate_daily_synthesis(investigations: list[dict]) -> dict | None:
     return {"narrative": narrative, "metric_ids": [inv["metric_id"] for inv in connected]}
 
 
-def build_investigation(metric_id: str):
+def _trend_measurement(metric_id, horizon, result):
+    anomaly = result["anomaly"]
+    category = anomaly.get("category")
+    status = ("measured_actionable" if category in ("critical", "opportunity")
+              else "measured_healthy" if category == "normal" else "measurement_unavailable")
+    freshness = "fresh"
+    if horizon == "weekly":
+        as_of = result.get("as_of")
+        if as_of is None or (datetime.now(UTC).date() - as_of.date()).days > 1:
+            freshness = "unknown" if as_of is None else "stale"
+    latest = next((r for r in result.get("trend", []) if r["month"] == anomaly.get("latest_month")), {})
+    if "denominator" in latest and latest["denominator"] <= 0:
+        status = "measurement_unavailable"
+    return measurement.observation(
+        metric_id, horizon, status, period=anomaly.get("latest_month"),
+        value=anomaly.get("latest_value"),
+        freshness=freshness,
+        coverage="complete" if category else "incomplete",
+        reason="Insufficient complete observations or exposure." if status == "measurement_unavailable" else None,
+    )
+
+
+def build_investigation(metric_id: str, *, enrich=True):
     result = intelligence.investigate(metric_id)
     if "error" in result:
         return result
@@ -337,7 +356,8 @@ def build_investigation(metric_id: str):
     # for every metric via the shared ThreadPoolExecutor.
     category = anomaly.get("category")
     if category not in ("critical", "opportunity"):
-        return {"metric_id": metric_id, "category": category, "status": "no_finding"}
+        return {"metric_id": metric_id, "category": category, "status": "no_finding",
+                "measurement": _trend_measurement(metric_id, "monthly", result)}
 
     breakdowns = result["breakdowns"]
     impact = impact_engine.compute_impact(metric_id, intelligence.METRICS[metric_id], anomaly, trend, horizon="monthly")
@@ -348,12 +368,14 @@ def build_investigation(metric_id: str):
     evidence = evidence_engine.build_trend_evidence(
         metric_id, anomaly, breakdowns, trend, result["persistence"], category
     )
-    recommendations = _generate_recommendations(metric, anomaly, breakdowns, impact, evidence)
+    recommendations = (_generate_recommendations(metric, anomaly, breakdowns, impact, evidence)
+                       if enrich else recommendation_schema.Recommendations(status="pending"))
     priority = _priority_for(anomaly)
     impact_score = impact_engine.business_impact_score(priority, result["persistence"], impact, evidence["data_quality"])
 
     return {
         "id": f"{metric_id}-{anomaly['latest_month']}",
+        "measurement": _trend_measurement(metric_id, "monthly", result),
         "metric_id": metric_id,
         "domain": METRIC_DOMAIN.get(metric_id, "order_customer"),
         "priority": priority,
@@ -401,6 +423,8 @@ def build_investigation(metric_id: str):
         "impact": impact,
         "how": how,
         "recommendations": recommendations,
+        "recommendation_generation": {"status": getattr(recommendations, "generation_status", "generated"),
+                                      "rejected_count": getattr(recommendations, "rejected_count", 0)},
         "status": "completed",
     }
 
@@ -413,7 +437,7 @@ def scan_all():
     here since both the DB driver and the OpenAI HTTP client release the GIL
     while waiting on I/O."""
     with ThreadPoolExecutor(max_workers=len(intelligence.METRICS)) as executor:
-        results = list(executor.map(build_investigation, intelligence.METRICS))
+        results = list(executor.map(partial(_scan_metric, horizon="monthly"), intelligence.METRICS))
 
     investigations = [inv for inv in results if inv.get("status") == "completed"]
     # Second pass, after every metric's own evidence is built: check whether
@@ -422,8 +446,36 @@ def scan_all():
     # can only run once every investigation in the batch already exists, so
     # it can't live inside build_investigation()'s per-metric, parallel path.
     evidence_engine.cross_metric_corroboration_checks(investigations)
+    with ThreadPoolExecutor(max_workers=max(1, len(investigations))) as executor:
+        list(executor.map(_enrich_final_evidence, investigations))
     investigations.sort(key=lambda i: CATEGORY_ORDER.get(i["category"], 2))
-    return investigations
+    return measurement.FindingBatch(investigations, [r["measurement"] for r in results if "measurement" in r])
+
+
+def _enrich_final_evidence(finding):
+    confirm = finding["confirm"]
+    anomaly = {"latest_month": confirm["period"], "latest_value": confirm["current"],
+               "baseline_mean": confirm["baseline"], "pct_change_vs_baseline": confirm["pct_change"],
+               "z_score": confirm.get("z_score"), "category": finding["category"],
+               "moved_up": confirm["current"] > confirm["baseline"]}
+    evidence = {**finding["root_cause"], "historical_context": finding.get("persistence"),
+                "data_quality": finding.get("data_quality"), "memory": finding.get("memory")}
+    recs = _generate_recommendations(finding["metric"], anomaly, finding["breakdowns"], finding["impact"], evidence)
+    finding["recommendations"] = recs
+    finding["recommendation_generation"] = {"status": getattr(recs, "generation_status", "generated"),
+                                             "rejected_count": getattr(recs, "rejected_count", 0)}
+
+
+def _scan_metric(metric_id, *, horizon):
+    try:
+        return (build_investigation(metric_id, enrich=False) if horizon == "monthly"
+                else build_trailing_investigation(metric_id))
+    except Exception:
+        logger.exception("Trend detector failed: %s (%s)", metric_id, horizon)
+        return {"metric_id": metric_id, "status": "no_finding", "measurement": measurement.observation(
+            metric_id, horizon, "measurement_unavailable", coverage="incomplete", freshness="unknown",
+            reason="The detector could not complete its source measurement; retry the scan.",
+        )}
 
 
 def build_trailing_investigation(metric_id: str):
@@ -443,7 +495,8 @@ def build_trailing_investigation(metric_id: str):
     # Same insufficient_data guard as build_investigation() above.
     category = anomaly.get("category")
     if category not in ("critical", "opportunity"):
-        return {"metric_id": metric_id, "category": category, "status": "no_finding"}
+        return {"metric_id": metric_id, "category": category, "status": "no_finding",
+                "measurement": _trend_measurement(metric_id, "weekly", result)}
 
     breakdowns = result["breakdowns"]
     impact = impact_engine.compute_impact(metric_id, intelligence.METRICS[metric_id], anomaly, trend, horizon="weekly")
@@ -464,6 +517,9 @@ def build_trailing_investigation(metric_id: str):
 
     return {
         "id": f"{metric_id}-trailing-{as_of_date}",
+        "recommendation_generation": {"status": getattr(recommendations, "generation_status", "generated"),
+                                      "rejected_count": getattr(recommendations, "rejected_count", 0)},
+        "measurement": _trend_measurement(metric_id, "weekly", result),
         "metric_id": metric_id,
         "domain": METRIC_DOMAIN.get(metric_id, "order_customer"),
         "priority": priority,
@@ -512,8 +568,8 @@ def scan_short_term():
     in SHORT_TERM_METRICS (those with a short_term_trend_sql defined), not
     every metric in intelligence.METRICS."""
     with ThreadPoolExecutor(max_workers=max(len(SHORT_TERM_METRICS), 1)) as executor:
-        results = list(executor.map(build_trailing_investigation, SHORT_TERM_METRICS))
+        results = list(executor.map(partial(_scan_metric, horizon="weekly"), SHORT_TERM_METRICS))
 
     findings = [inv for inv in results if inv.get("status") == "completed"]
     findings.sort(key=lambda i: CATEGORY_ORDER.get(i["category"], 2))
-    return findings
+    return measurement.FindingBatch(findings, [r["measurement"] for r in results if "measurement" in r])

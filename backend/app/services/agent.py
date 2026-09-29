@@ -11,6 +11,7 @@ from mcp_server.tools import intelligence, sales
 from . import (
     basket,
     brand_mix,
+    case_engine,
     channels,
     concentration,
     customer_lookup,
@@ -847,10 +848,31 @@ TOOLS = [
     },
 ]
 
+def _investigate_metric(metric_id: str) -> dict:
+    """Ask Celeste V2: same raw investigate() the tool always called, plus
+    one deterministic field -- related_case_id, resolved via the exact
+    finding_id the daily scan would use for this metric's current anomaly
+    month (case_engine.get_case_id_for_finding, already used the same way
+    by management.finding_case_id). Not new intelligence: if today's scan
+    already flagged this metric, its case_observations row shares this
+    same finding_id, so the lookup finds it; if not (or there's no
+    current anomaly at all), related_case_id is honestly None. Computed
+    here, server-side, before the model ever sees the result -- the model
+    never generates or chooses a route."""
+    result = intelligence.investigate(metric_id)
+    if "error" in result:
+        return result
+    latest_month = result["anomaly"].get("latest_month")
+    result["related_case_id"] = (
+        case_engine.get_case_id_for_finding(f"{metric_id}-{latest_month}") if latest_month else None
+    )
+    return result
+
+
 TOOL_FUNCTIONS = {
     "get_sales_summary": sales.get_sales_summary,
     "list_metrics": lambda: intelligence.list_metrics(),
-    "investigate_metric": lambda metric_id: intelligence.investigate(metric_id),
+    "investigate_metric": _investigate_metric,
     "get_customer_intelligence": customers.get_customer_intelligence,
     "get_customer_lookup": customer_lookup.get_customer_lookup,
     "get_inventory_depth": inventory.get_inventory_depth,
@@ -906,7 +928,8 @@ def _get_client() -> OpenAI:
 
 
 def _get_model() -> str:
-    return os.getenv("OPENAI_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+    from mcp_server.tools.model_config import model_name
+    return model_name()
 
 
 async def run_agent_turn(messages: list[dict]) -> dict:

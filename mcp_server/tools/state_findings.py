@@ -38,11 +38,10 @@ from datetime import date
 
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
-from backend.app.services import data_controls
+from backend.app.services import data_controls, stock_counts
 from backend.app.services import inventory as inventory_service
-from backend.app.services import stock_counts
 from backend.app.services.stock_alerts import get_stock_alerts, get_top_product_stock_coverage
-from mcp_server.tools import evidence_engine, impact_engine
+from mcp_server.tools import evidence_engine, impact_engine, measurement
 
 DEAD_STOCK_VALUE_SHARE_THRESHOLD_PCT = 5
 OVERSTOCK_VALUE_SHARE_THRESHOLD_PCT = 25
@@ -88,10 +87,13 @@ def _priority_for_share(share_pct: float, threshold_pct: float) -> str:
 
 def _stock_availability_finding():
     alerts = get_stock_alerts()
+    measurement.source_as_of(alerts.get("as_of_date"), verifies_source=False)
     if not alerts.get("as_of_date"):
         return None
 
     segments = alerts["segments_by_outlet"]
+    if not segments:
+        measurement.source_unavailable("No outlet inventory coverage.")
     total_out = sum(s["out_of_stock"] for s in segments)
     total_low = sum(s["low_stock"] for s in segments)
     if total_out == 0:
@@ -191,8 +193,10 @@ def _stock_availability_finding():
 def _dead_overstock_finding():
     rows = reporting.run_query(inventory_service.INVENTORY_DEPTH_SQL)
     if not rows:
+        measurement.source_unavailable("No inventory depth records.")
         return None
     as_of_date = rows[0]["as_of"]
+    measurement.source_as_of(as_of_date, verifies_source=False)
 
     segment_value = {"dead_stock": 0.0, "overstock": 0.0, "healthy": 0.0}
     dead_stock_candidates = []
@@ -218,6 +222,7 @@ def _dead_overstock_finding():
 
     total_value = sum(segment_value.values())
     if not total_value:
+        measurement.source_unavailable("Inventory cannot be valued.")
         return None
 
     dead_share = segment_value["dead_stock"] / total_value * 100
@@ -586,11 +591,12 @@ def build_inventory_findings():
     actually breached their threshold — 0 to 3 results. Never fabricates
     a finding when the underlying data is empty (each helper returns None in
     that case) — same "don't fabricate" posture as the trend engine."""
-    findings = [
-        _stock_availability_finding(), _dead_overstock_finding(), _stuck_stock_count_finding(),
-        _completed_stock_count_variance_finding(),
-    ]
-    return [f for f in findings if f is not None]
+    return measurement.combine([
+        measurement.run_snapshot("stock_availability", _stock_availability_finding),
+        measurement.run_snapshot("dead_overstock_value", _dead_overstock_finding),
+        measurement.run_snapshot("stuck_stock_count", _stuck_stock_count_finding),
+        measurement.run_snapshot("completed_stock_count_variance", _completed_stock_count_variance_finding),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +707,8 @@ def _cost_coverage_control_finding():
     result = data_controls.get_cost_coverage()
     total = result["total_products"]
     no_cost = result["no_cost_at_all"]
+    if not total:
+        measurement.source_unavailable("No inventory catalog coverage.")
     if not total or not no_cost:
         return None
     coverage_pct = result["coverage_pct"]
@@ -780,8 +788,10 @@ def build_controls_findings():
     """Business Data Controls, Wave 1 Step 1 -- a new, first-class domain
     alongside inventory/operational, for findings about the RELIABILITY of
     the data other findings depend on, not a business outcome itself."""
-    findings = [_negative_stock_control_finding(), _cost_coverage_control_finding()]
-    return [f for f in findings if f is not None]
+    return measurement.combine([
+        measurement.run_snapshot("negative_stock_control", _negative_stock_control_finding),
+        measurement.run_snapshot("cost_coverage_control", _cost_coverage_control_finding),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -811,6 +821,9 @@ def _top_seller_stock_finding():
     real, comparatively rare signal; the rest of the "short" list is kept
     as supporting context on the finding, not what triggers it."""
     coverage = get_top_product_stock_coverage()
+    measurement.source_as_of(coverage.get("as_of_date"), verifies_source=False)
+    if not coverage.get("products"):
+        measurement.source_unavailable("No top-product coverage.")
     if not coverage.get("as_of_date"):
         return None
 
@@ -996,9 +1009,11 @@ def _outlet_activity_finding():
     borderline case."""
     rows = reporting.run_query(OUTLET_ACTIVITY_SQL)
     if not rows or rows[0]["as_of"] is None:
+        measurement.source_unavailable("No outlet activity watermark.")
         return None
 
     as_of = rows[0]["as_of"]
+    measurement.source_as_of(as_of)
     dark = [r for r in rows if int(r["orders_30d"] or 0) == 0]
     if not dark:
         return None
@@ -1068,5 +1083,7 @@ def _outlet_activity_finding():
 def build_operational_findings():
     """Runs the newer operational state checks (top-seller stock coverage,
     outlet activity) — same never-fabricate posture as build_inventory_findings."""
-    findings = [_top_seller_stock_finding(), _outlet_activity_finding()]
-    return [f for f in findings if f is not None]
+    return measurement.combine([
+        measurement.run_snapshot("top_seller_stock", _top_seller_stock_finding),
+        measurement.run_snapshot("outlet_no_orders", _outlet_activity_finding),
+    ])

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchCustomerLifecycle,
@@ -14,6 +15,7 @@ import {
   fetchTopProductStockCoverage,
 } from "../api";
 import Section from "../design/Card";
+import CustomerGrowthOverview from "../design/CustomerGrowthOverview";
 import Pill from "../design/Pill";
 import DonutChart from "../charts/DonutChart";
 import OrderForecastChart from "../charts/OrderForecastChart";
@@ -271,10 +273,19 @@ function ProfileStat({ label, value }) {
 }
 
 function CustomerLookupSection() {
+  // ?customer=<partner_id> -- deep link from Ask Celeste's CustomerLookupCard
+  // ("Open customer profile"). partner_id is an internal numeric id, never
+  // PII, so it's safe in a URL; read once on mount so a manager clearing
+  // the selection below isn't fought by a stale param on the next render.
+  const [searchParams] = useSearchParams();
   const [form, setForm] = useState({ name: "", email: "", phone: "" });
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState(null);
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedId, setSelectedId] = useState(() => {
+    const raw = searchParams.get("customer");
+    const id = raw ? Number(raw) : NaN;
+    return Number.isInteger(id) ? id : null;
+  });
 
   const canSearch = form.name.trim() || form.email.trim() || form.phone.trim();
 
@@ -368,23 +379,31 @@ function CustomerLookupSection() {
         </div>
       )}
 
-      {selected && (
+      {selectedId != null && (
         <div className="mt-4 rounded-xl border border-border bg-background p-4">
           <div className="flex items-center justify-between">
-            <div>
-              <div className="font-medium text-foreground-strong">{selected.name}</div>
-              <div className="text-xs text-foreground/50">
-                {selected.phone_masked ?? "no phone"} &middot; {formatNumber(selected.order_count)} lifetime orders
+            {selected ? (
+              <div>
+                <div className="font-medium text-foreground-strong">{selected.name}</div>
+                <div className="text-xs text-foreground/50">
+                  {selected.phone_masked ?? "no phone"} &middot; {formatNumber(selected.order_count)} lifetime orders
+                </div>
               </div>
-            </div>
-            {results.length > 1 && (
+            ) : (
+              // Arrived via ?customer= with no search performed yet -- the
+              // profile section below fetches by id directly, same as a
+              // normal search result would, so there's nothing more needed
+              // here than a way back to a fresh search.
+              <div className="text-xs text-foreground/50">Opened from Ask Celeste</div>
+            )}
+            {(selected ? results.length > 1 : true) && (
               <button type="button" onClick={() => setSelectedId(null)} className="text-xs text-accent">
-                Change
+                {selected ? "Change" : "Search instead"}
               </button>
             )}
           </div>
-          <CustomerProfileSection partnerId={selected.partner_id} />
-          <NextBasketSection partnerId={selected.partner_id} enabled={true} />
+          <CustomerProfileSection partnerId={selectedId} />
+          <NextBasketSection partnerId={selectedId} enabled={true} />
         </div>
       )}
     </Section>
@@ -911,9 +930,22 @@ export default function CustomerPredictions() {
         {s?.as_of_date && <span className="text-xs text-foreground/60">Data through {formatDate(s.as_of_date)}</span>}
       </div>
 
+      <CustomerGrowthOverview
+        summary={s}
+        lifecycle={lifecycle.data?.status === "ok" ? lifecycle.data : null}
+        loading={summary.isFetching || lifecycle.isFetching}
+        onRetry={() => { summary.refetch(); lifecycle.refetch(); }}
+        onViewCustomers={() => {
+          changeStatus("due");
+          document.getElementById("customer-list")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }}
+      />
+
       {/* Find a customer */}
       <CustomerLookupSection />
 
+      <details className="mt-4 rounded-xl border border-border p-4">
+        <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">Demand forecasts and stock availability</summary>
       {/* Order forecast */}
       <Section title="Order forecast" note="5 days actual, 5 days predicted">
         {forecastChart.isLoading && <p className="text-sm text-foreground/50">Loading&hellip;</p>}
@@ -986,6 +1018,8 @@ export default function CustomerPredictions() {
         )}
       </Section>
 
+      </details>
+
       {/* Executive summary */}
       <Section title="Executive summary">
         {summary.isLoading && (
@@ -1021,18 +1055,17 @@ export default function CustomerPredictions() {
               />
               <ExecutiveTile label="Approaching / due" value={formatNumber(s.due.count)} tone="warning" />
               <ExecutiveTile label="Overdue" value={formatNumber(s.overdue.count)} tone="critical" />
-              <ExecutiveTile label="Expected orders" value={formatNumber(s.expected_orders)} />
+              <ExecutiveTile label="Customers in reorder window" value={formatNumber(s.expected_orders)} />
               <ExecutiveTile
-                label="Expected revenue"
+                label="Typical baskets across due customers"
                 value={formatCurrency(s.expected_revenue)}
-                sub={`${formatCurrency(s.high_confidence_expected_revenue)} high-confidence`}
+                sub={`${formatCurrency(s.high_confidence_expected_revenue)} from customers with 10+ orders`}
               />
             </div>
             <p className="mt-3 text-xs text-foreground/50">
               &ldquo;Customers analyzed&rdquo; is everyone who has ever ordered. &ldquo;With a usable pattern&rdquo; is
               the smaller group (3+ orders with a consistent gap) Celeste can actually predict for — most of the rest
-              have only 1&ndash;2 orders and don&rsquo;t have an individual pattern yet. Expected revenue is the
-              typical size of each customer&rsquo;s next order, not a business-wide forecast.
+              have only 1&ndash;2 orders and don&rsquo;t have an individual pattern yet. Typical basket value sums historical average order values across due customers; it is not a sales forecast or incremental revenue.
             </p>
           </>
         )}
@@ -1086,7 +1119,7 @@ export default function CustomerPredictions() {
       {lifecycle.data?.status === "ok" && <CustomerLifecycleSection lifecycle={lifecycle.data} />}
 
       {/* Outlet-wise customer behavior */}
-      <Section title="Outlet-wise customer behavior" note="Celeste's 5 retail outlets only">
+      <Section title="Outlet-wise customer behavior" note="Configured Celeste outlets only">
         {outletBehavior.isLoading && <p className="text-sm text-foreground/50">Loading&hellip;</p>}
         {outletBehavior.data?.status === "ok" && <OutletBehaviorTable outlets={outletBehavior.data.outlets} />}
         {outletBehavior.data?.status === "error" && (
@@ -1095,6 +1128,7 @@ export default function CustomerPredictions() {
       </Section>
 
       {/* Customer table */}
+      <div id="customer-list" className="scroll-mt-4">
       <Section title="Customers">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex flex-wrap gap-1">
@@ -1180,20 +1214,19 @@ export default function CustomerPredictions() {
         )}
       </Section>
 
+      </div>
+
       {/* Prediction performance — placeholder until the prediction -> actual
           tracking loop has had real time to accumulate evaluated
           predictions. Showing a score today would mean inventing one. */}
       <Section title="Prediction performance">
         <p className="text-sm text-foreground/60">
-          Building history. Celeste will start comparing these predictions against actual orders as new data
-          arrives, and this section will show timing and value accuracy once enough predictions have been
-          evaluated.
+          Timing accuracy and sales uplift have not been established here. Purchase windows are heuristics;
+          validating them requires historical backtesting and measured outcomes from customer actions.
         </p>
       </Section>
 
-      <p className="mt-4 text-xs text-foreground/40">
-        Not shown yet: predicted next-basket contents and an order-value range — planned for a later update.
-      </p>
+
     </div>
   );
 }

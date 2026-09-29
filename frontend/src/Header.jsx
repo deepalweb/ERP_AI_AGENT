@@ -9,7 +9,7 @@ const NAV_ITEMS = [
   { to: "/investigate", label: "Investigate" },
   { to: "/actions", label: "Actions" },
   { to: "/outcomes", label: "Outcomes" },
-  { to: "/dashboard", label: "Dashboard" },
+  { to: "/dashboard", label: "Business Performance" },
   { to: "/customers/predictions", label: "Customers" },
 ];
 

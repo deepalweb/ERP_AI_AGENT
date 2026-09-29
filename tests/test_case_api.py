@@ -16,6 +16,7 @@ import pytest
 
 from backend.app import main
 from backend.app.services import case_engine, finding_actions
+from tests.coverage_helpers import sync_covered_cases
 
 
 def _monthly_finding(metric_id, domain, period, category="critical", checks=None, current=100, impact=50.0,
@@ -355,10 +356,10 @@ async def test_a_recurring_case_does_not_inherit_the_old_cases_actions(appdb_res
 
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(old_case_id)["status"] == "resolved"
 
     f2 = _monthly_finding("revenue", "financial", "2026-09")

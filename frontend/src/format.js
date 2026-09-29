@@ -113,3 +113,19 @@ export function stripSkuSuffix(name) {
   if (!name) return name;
   return name.replace(/\s*-\s*SKU\s+\S+\s*$/i, "").trim();
 }
+
+// A finding_id always embeds its metric_id as a prefix, in one of 3 shapes
+// (see backend finding_actions.best_status_for_metric's docstring):
+// "metric-YYYY-MM" (monthly), "metric-trailing-YYYY-MM-DD" (weekly),
+// "metric-YYYY-MM-DD" (state/snapshot). Used only as a last-resort case-
+// navigation fallback (Management.jsx's WorkItem) when an action has no
+// linked case at all -- lets "View investigation" still land somewhere
+// useful (Investigate filtered to this metric) instead of a dead end.
+export function metricIdFromFindingId(findingId) {
+  if (!findingId) return null;
+  const stripped = findingId
+    .replace(/-trailing-\d{4}-\d{2}-\d{2}$/, "")
+    .replace(/-\d{4}-\d{2}-\d{2}$/, "")
+    .replace(/-\d{4}-\d{2}$/, "");
+  return stripped !== findingId ? stripped : null;
+}

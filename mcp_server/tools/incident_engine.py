@@ -28,13 +28,20 @@ zero special-casing needed.
 
 import json
 import logging
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import sqrt
 from statistics import mean, pstdev
 
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
-from mcp_server.tools import evidence_engine, impact_engine, intelligence, investigation
+from mcp_server.tools import (
+    evidence_engine,
+    impact_engine,
+    intelligence,
+    investigation,
+    measurement,
+)
+from mcp_server.tools import recommendations as recommendation_schema
 
 logger = logging.getLogger(__name__)
 
@@ -265,16 +272,11 @@ def _generate_incident_recommendations(evidence: dict) -> list[dict]:
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
-        content = (response.choices[0].message.content or "[]").strip()
-        if content.startswith("```"):
-            content = content.strip("`")
-            if content.startswith("json"):
-                content = content[4:]
-        recommendations = json.loads(content)
-        return recommendations if isinstance(recommendations, list) else []
+        return recommendation_schema.parse(response.choices[0].message.content or "[]",
+            allowed_refs={c["source"] for c in evidence.get("checks", [])})
     except Exception:
         logger.exception("incident recommendation generation failed")
-        return []
+        return recommendation_schema.Recommendations()
 
 
 def build_incident_findings() -> list[dict]:
@@ -449,4 +451,23 @@ def build_incident_findings() -> list[dict]:
             "persistence": {"days_appeared": days_appeared, "days_observed": days_observed},
         })
 
-    return findings
+    flagged = {f["metric_id"] for f in findings}
+    records = []
+    # Only observed, sufficiently exposed outlet/product/hour scopes are covered.
+    # A disappeared product or sparse hour is not evidence of recovery.
+    for row in hourly:
+        if row["orders"] < MIN_N:
+            continue
+        key = f"incident_s{row['store_id']}_p{row['product_id']}_h{row['hr']}"
+        records.append(measurement.observation(
+            key, "snapshot", "measured_actionable" if key in flagged else "measured_healthy",
+            scope=key, period=as_of_date,
+            freshness="fresh" if (datetime.now(UTC).date() - as_of.date()).days <= 1 else "stale",
+            value=row["cancels"] / row["orders"] * 100,
+        ))
+    for finding in findings:
+        finding["measurement"] = next((m for m in records if m["metric_id"] == finding["metric_id"]), None)
+        recs = finding["recommendations"]
+        finding["recommendation_generation"] = {"status": getattr(recs, "generation_status", "not_requested"),
+                                                  "rejected_count": getattr(recs, "rejected_count", 0)}
+    return measurement.FindingBatch(findings, records)

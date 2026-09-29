@@ -18,7 +18,7 @@ import { formatDate, prettifyMetricId } from "../format";
  * of drifting into a second wording for the same backend states. */
 
 export const RESOLUTION_VERDICT_TEXT = {
-  recovered: "Recovered -- the underlying problem cleared its own anomaly threshold and stayed clear.",
+  recovered: "Condition recovered -- clean measurements no longer detect the condition. This does not establish that its underlying cause was resolved.",
   captured: "Captured -- the declared business objective was verified achieved.",
   expired: "Expired -- the opportunity stopped being flagged without a verified objective being achieved.",
   inconclusive: "Inconclusive -- the objective's metric moved as intended, but an overlapping action means the result can't be confidently attributed.",

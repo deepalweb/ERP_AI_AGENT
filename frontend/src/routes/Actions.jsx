@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchManagementActions } from "../api";
 import Button from "../design/Button";
 import { DOMAIN_LABEL, DOMAIN_ORDER } from "../design/domains";
+import { OUTCOME_STATUS_META, OUTCOME_VERDICT_META } from "../design/outcomeStatus";
 import {
   PageHeading,
   Pagination,
@@ -10,20 +11,33 @@ import {
   WorkItem,
 } from "../design/Management";
 
+// Single source of truth for this filter's labels -- the exact same metas
+// WorkItem's own outcome badge renders, so the dropdown option a manager
+// picks always reads identically to the badge it filters for (previously
+// this filter lived on Outcomes.jsx with its own hand-typed "Blocked
+// verification" label, which drifted from the badge's real wording).
+const OUTCOME_FILTERS = [
+  { value: "", label: "All outcomes" },
+  ...Object.entries(OUTCOME_STATUS_META).map(([value, meta]) => ({ value, label: meta.label })),
+  ...Object.entries(OUTCOME_VERDICT_META).map(([value, meta]) => ({ value, label: meta.label })),
+];
+
 export default function Actions() {
   const [status, setStatus] = useState("");
   const [relevance, setRelevance] = useState("");
   const [domain, setDomain] = useState("");
   const [owner, setOwner] = useState("");
+  const [outcomeStatus, setOutcomeStatus] = useState("");
   const [offset, setOffset] = useState(0);
   const query = useQuery({
-    queryKey: ["management", "actions", status, relevance, domain, owner, offset],
+    queryKey: ["management", "actions", status, relevance, domain, owner, outcomeStatus, offset],
     queryFn: () =>
       fetchManagementActions({
         status,
         relevant: relevance,
         domain,
         owner,
+        outcome_status: outcomeStatus,
         offset,
         limit: 20,
       }),
@@ -89,6 +103,18 @@ export default function Actions() {
             setOffset(0);
           }}
         />
+        <select
+          aria-label="Outcome"
+          value={outcomeStatus}
+          onChange={(e) => {
+            setOutcomeStatus(e.target.value);
+            setOffset(0);
+          }}
+        >
+          {OUTCOME_FILTERS.map(({ value, label }) => (
+            <option key={value || "all"} value={value}>{label}</option>
+          ))}
+        </select>
       </div>
       <QueryState
         query={query}

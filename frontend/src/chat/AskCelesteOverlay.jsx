@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./legacy-cards.css";
@@ -137,7 +138,30 @@ function ToolCalls({ toolCalls }) {
   );
 }
 
-function Message({ message }) {
+/** Follow-up question chips (agent.py's `_extract_follow_ups`, a
+ * `FOLLOW_UPS:` trailer the model appends almost every turn) — computed
+ * backend-side since Ask Celeste V2 shipped its case-linking work, but
+ * never rendered until now. Deliberately its own component, its own CSS
+ * class, and its own click behavior (resubmit through the normal send
+ * path, not a route) so it can never be confused with -- or visually
+ * merge into -- CardFooter's navigation row: that one leaves chat, this
+ * one continues the conversation. Only shown on the conversation's last
+ * message; an older message's follow-ups would suggest continuing a
+ * thread that's no longer the frontier of the conversation. */
+function FollowUpChips({ followUps, onPick }) {
+  if (!followUps || followUps.length === 0) return null;
+  return (
+    <div className="followup-chip-row">
+      {followUps.map((q) => (
+        <button key={q} type="button" className="followup-chip" onClick={() => onPick(q)}>
+          {q}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Message({ message, isLast, onFollowUp }) {
   const hasTools = message.toolCalls && message.toolCalls.length > 0;
   return (
     <div className={`message message-${message.role}${hasTools ? " message-has-tools" : ""}`}>
@@ -145,6 +169,9 @@ function Message({ message }) {
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
       </div>
       <ToolCalls toolCalls={message.toolCalls} />
+      {isLast && message.role === "assistant" && (
+        <FollowUpChips followUps={message.followUps} onPick={onFollowUp} />
+      )}
     </div>
   );
 }
@@ -174,6 +201,21 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
       if (open && trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
     };
   }, [open]);
+
+  // Ask Celeste V2's card links (CardFooter's "Open tracked case",
+  // StockCountVarianceCard's "Open in Investigate", CustomerLookupCard's
+  // "Open customer profile") are plain react-router Links -- a client-side
+  // route change, not a page load, so this overlay (rendered once at the
+  // App level, always mounted) otherwise just stays open on top of the
+  // page the user actually meant to land on. Close automatically whenever
+  // the route changes while open; skipped on mount and while closed, so
+  // this never fires from navigation that has nothing to do with chat.
+  const location = useLocation();
+  const prevPathRef = useRef(location.pathname);
+  useEffect(() => {
+    if (open && prevPathRef.current !== location.pathname) onClose();
+    prevPathRef.current = location.pathname;
+  }, [location.pathname, open, onClose]);
 
   useEffect(() => {
     saveConversations({ conversations, activeId });
@@ -206,6 +248,36 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
     });
   }
 
+  // The actual API call + response-append, shared by a fresh send and a
+  // retry. `messages` is exactly what gets sent AND what the assistant
+  // reply gets appended onto -- a retry passes the current conversation
+  // unchanged (the failed turn's user message is already in there from
+  // the original send), so a failed call can be rerun without ever
+  // appending a second, duplicate user bubble.
+  async function callAgent(messages, targetId) {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await sendChatMessage(messages.map(({ role, content }) => ({ role, content })));
+            if (data.status === "error") {
+        setError(data.detail || "The agent failed to process this request.");
+        return;
+      }
+      setChatState((prev) => ({
+        ...prev,
+        conversations: prev.conversations.map((c) =>
+          c.id === targetId
+            ? { ...c, messages: [...messages, { role: "assistant", content: data.reply, toolCalls: data.tool_calls, followUps: data.follow_ups }], updatedAt: Date.now() }
+            : c,
+        ),
+      }));
+    } catch {
+      setError("Could not reach the agent backend. Is it running on port 8000?");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function sendText(text, baseMessages, targetId) {
     if (!text || loading) return;
     const nextMessages = [...baseMessages, { role: "user", content: text }];
@@ -217,28 +289,7 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
           : c,
       ),
     }));
-    setLoading(true);
-    setError(null);
-
-    try {
-      const data = await sendChatMessage(nextMessages.map(({ role, content }) => ({ role, content })));
-      if (data.status === "error") {
-        setError(data.detail || "The agent failed to process this request.");
-        return;
-      }
-      setChatState((prev) => ({
-        ...prev,
-        conversations: prev.conversations.map((c) =>
-          c.id === targetId
-            ? { ...c, messages: [...nextMessages, { role: "assistant", content: data.reply, toolCalls: data.tool_calls }], updatedAt: Date.now() }
-            : c,
-        ),
-      }));
-    } catch {
-      setError("Could not reach the agent backend. Is it running on port 8000?");
-    } finally {
-      setLoading(false);
-    }
+    await callAgent(nextMessages, targetId);
   }
 
   async function handleSend(e) {
@@ -247,6 +298,19 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
     if (!text) return;
     setInput("");
     await sendText(text, activeMessages, activeId);
+  }
+
+  function handleRetry() {
+    if (loading || activeMessages.length === 0) return;
+    callAgent(activeMessages, activeId);
+  }
+
+  // A follow-up chip resubmits through the exact same path as typing and
+  // hitting Send -- sendText always appends a NEW user message, unlike
+  // handleRetry's reuse-as-is behavior -- so this can never be confused
+  // with, or accidentally reuse, the retry duplicate-bubble fix above.
+  function handleFollowUp(text) {
+    sendText(text, activeMessages, activeId);
   }
 
   // A Situation Card's "Ask Celeste about this" arrives as {text, key} — key
@@ -288,14 +352,21 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
               <div className="chat-welcome"><p className="eyebrow">Start with a question</p><h3>A closer look at<br />your business.</h3><p>Ask about sales, products, inventory, or customer patterns.</p><p className="mt-3 text-xs text-foreground-subtle">Saved case evidence and decisions are available in Investigate.</p><button type="button" onClick={() => setInput("How were sales last month?")}>How were sales last month? →</button></div>
             )}
             {activeMessages.map((m, i) => (
-              <Message key={i} message={m} />
+              <Message key={i} message={m} isLast={i === activeMessages.length - 1} onFollowUp={handleFollowUp} />
             ))}
             {loading && (
               <div className="message message-assistant">
                 <div className="message-bubble message-loading">Thinking&hellip;</div>
               </div>
             )}
-            {error && <div className="text-sm text-critical">{error}</div>}
+            {error && (
+              <div className="flex flex-wrap items-center gap-3 text-sm text-critical">
+                {error}
+                <button type="button" onClick={handleRetry} className="font-medium text-accent hover:underline">
+                  Retry
+                </button>
+              </div>
+            )}
           </main>
 
           <form className="flex gap-2 border-t border-border p-4" onSubmit={handleSend}>

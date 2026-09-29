@@ -28,3 +28,8 @@ node_modules/
 # Installed skill packages (reproducible from skills-lock.json via `npx skills`)
 .agents/skills/
 .claude/skills/
+**/.agents/skills/
+**/.claude/skills/
+
+# /graphify knowledge-graph output (local analysis artifact, not project source)
+graphify-out/

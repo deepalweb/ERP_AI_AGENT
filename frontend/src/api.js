@@ -63,6 +63,16 @@ export async function fetchMetricInvestigation(metricId) {
   return readResponse(response);
 }
 
+export async function fetchCurrentPeriod({ refresh = false, signal } = {}) {
+  const timeout = AbortSignal.timeout(60000);
+  const response = await apiFetch(`${API_BASE_URL}/intelligence/current-period${refresh ? "?refresh=true" : ""}`, {
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  });
+  const body = await readResponse(response);
+  if (!Array.isArray(body.items)) throw new Error("Current-period measurements are unavailable.");
+  return body;
+}
+
 export async function fetchInvestigations() {
   const response = await apiFetch(`${API_BASE_URL}/investigations`);
 
@@ -364,4 +374,11 @@ export async function sendChatMessage(messages) {
   });
 
   return readResponse(response);
+}
+
+export async function fetchPerformanceSummary(month, storeId) {
+  const params = new URLSearchParams();
+  if (month) params.set("month", month);
+  if (storeId) params.set("store_id", storeId);
+  return readResponse(await apiFetch(`${API_BASE_URL}/performance/summary?${params}`));
 }

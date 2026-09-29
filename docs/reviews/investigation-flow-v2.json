@@ -1,0 +1,211 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Celeste investigation: verified measurements",
+    "quality_profile": "showcase",
+    "locale": "en"
+  },
+  "lanes": [
+    {
+      "id": "scan",
+      "label": "Detection and evidence"
+    },
+    {
+      "id": "cases",
+      "label": "Case lifecycle"
+    },
+    {
+      "id": "people",
+      "label": "Manager decisions"
+    }
+  ],
+  "mainPath": [
+    "trigger",
+    "detect",
+    "evidence",
+    "narrate",
+    "sync",
+    "review",
+    "action",
+    "measure"
+  ],
+  "nodes": [
+    {
+      "id": "trigger",
+      "lane": "scan",
+      "col": 0,
+      "type": "backend",
+      "label": "Run scan",
+      "sublabel": "05:00 or API / cache miss",
+      "width": 140
+    },
+    {
+      "id": "detect",
+      "lane": "scan",
+      "col": 1,
+      "type": "backend",
+      "label": "Detect findings",
+      "sublabel": "Monthly / weekly / snapshot",
+      "width": 140
+    },
+    {
+      "id": "evidence",
+      "lane": "scan",
+      "col": 2,
+      "type": "backend",
+      "label": "Build evidence",
+      "sublabel": "Checks + corroboration",
+      "width": 140
+    },
+    {
+      "id": "narrate",
+      "lane": "scan",
+      "col": 3,
+      "type": "cloud",
+      "label": "Validate AI advice",
+      "sublabel": "Optional trend enrichment",
+      "width": 140
+    },
+    {
+      "id": "sync",
+      "lane": "cases",
+      "col": 3,
+      "type": "database",
+      "label": "Sync cases",
+      "sublabel": "Coverage required"
+    },
+    {
+      "id": "review",
+      "lane": "people",
+      "col": 3,
+      "type": "frontend",
+      "label": "Review case",
+      "sublabel": "Evidence + audit"
+    },
+    {
+      "id": "action",
+      "lane": "people",
+      "col": 4,
+      "type": "backend",
+      "label": "Record action",
+      "sublabel": "Versioned targets",
+      "width": 140
+    },
+    {
+      "id": "measure",
+      "lane": "people",
+      "col": 5,
+      "type": "backend",
+      "label": "Measure outcome",
+      "sublabel": "Future scan; clean period",
+      "width": 140
+    },
+    {
+      "id": "resolve",
+      "lane": "cases",
+      "col": 5,
+      "type": "backend",
+      "label": "Resolve or hold",
+      "sublabel": "Recovery / capture policy",
+      "width": 140
+    },
+    {
+      "id": "data",
+      "lane": "cases",
+      "col": 1,
+      "type": "database",
+      "label": "Reporting data",
+      "sublabel": "Scoped Celeste outlet queries",
+      "width": 140
+    }
+  ],
+  "edges": [
+    {
+      "from": "trigger",
+      "to": "detect",
+      "label": "run",
+      "role": "main"
+    },
+    {
+      "from": "data",
+      "to": "detect",
+      "label": "read",
+      "role": "branch"
+    },
+    {
+      "from": "detect",
+      "to": "evidence",
+      "label": "flagged",
+      "role": "main"
+    },
+    {
+      "from": "evidence",
+      "to": "narrate",
+      "label": "ground",
+      "role": "main"
+    },
+    {
+      "from": "narrate",
+      "to": "sync",
+      "label": "findings",
+      "role": "main"
+    },
+    {
+      "from": "sync",
+      "to": "review",
+      "label": "case API",
+      "role": "main"
+    },
+    {
+      "from": "review",
+      "to": "action",
+      "label": "save",
+      "role": "main"
+    },
+    {
+      "from": "action",
+      "to": "measure",
+      "label": "completed",
+      "role": "main"
+    },
+    {
+      "from": "measure",
+      "to": "resolve",
+      "label": "target verdict",
+      "role": "branch"
+    },
+    {
+      "from": "sync",
+      "to": "resolve",
+      "label": "two clean units",
+      "role": "branch"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Detection owns the facts",
+      "items": [
+        "Corroboration completes before AI recommendations.",
+        "Malformed advice is rejected; measured evidence remains."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Actions and cases differ",
+      "items": [
+        "Targets and outcomes retain their version history.",
+        "Only explicit healthy coverage advances recovery."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Unknown is not healthy",
+      "items": [
+        "Manual scopes need explicit remeasurement.",
+        "Missing source freshness pauses verification."
+      ]
+    }
+  ]
+}

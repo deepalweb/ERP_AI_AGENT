@@ -4,7 +4,9 @@ exists (WINDOW_DAYS consecutive days, or the streak ending early)."""
 
 from datetime import date, timedelta
 
-from backend.app.services import finding_actions, weekly_streaks as ws
+from backend.app.services import finding_actions
+from backend.app.services import weekly_streaks as ws
+from mcp_server.tools.measurement import observation
 
 # Anchored to real "today" (not a fixed literal) so that finding_actions
 # rows -- whose updated_at is always stamped as real wall-clock now -- fall
@@ -44,13 +46,13 @@ def test_streak_reaching_window_days_gets_a_verdict_while_still_ongoing(appdb_re
     assert verdicted[0]["verdict"] == "unchanged"
 
 
-def test_streak_ending_before_window_days_gets_a_verdict_from_last_value(appdb_reset):
+def test_streak_ending_before_window_days_gets_a_verdict_from_clean_measurement(appdb_reset):
     # Detected at 15.0 (day 0), improves to 4.0 by day 1, then stops being
-    # flagged on day 2 -- verdict must come from the LAST known value (4.0),
+    # flagged on day 2 -- a clean measurement confirms the value (4.0),
     # not the original detected_value.
     ws.record_streaks([_finding("cancellation_rate", 0, 15.0)])
     ws.record_streaks([_finding("cancellation_rate", 1, 4.0)])
-    ws.record_streaks([])  # day 2: no longer flagged at all -> streak ends
+    ws.record_streaks([], measurements=[observation("cancellation_rate", "weekly", "measured_healthy", value=4.0)])  # day 2: no longer flagged at all -> streak ends
     verdicted = ws.get_verdicted_streaks()
     assert len(verdicted) == 1
     assert verdicted[0]["status"] == "ended"
@@ -84,7 +86,7 @@ def test_a_gap_in_flagging_closes_the_stale_streak_without_a_verdict(appdb_reset
 def test_action_status_during_run_is_captured_when_streak_ends(appdb_reset):
     ws.record_streaks([_finding("cancellation_rate", 0, 15.0)])
     finding_actions.set_action("cancellation_rate-trailing-" + _day(0), True, "completed", "Fixed the courier issue.")
-    ws.record_streaks([])  # ends the streak
+    ws.record_streaks([], measurements=[observation("cancellation_rate", "weekly", "measured_healthy", value=4.0)])  # ends the streak
     verdicted = ws.get_verdicted_streaks()
     assert verdicted[0]["action_status_during_run"] == "completed"
 

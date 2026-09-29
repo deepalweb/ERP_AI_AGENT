@@ -112,9 +112,11 @@ test("Daily Brief -> Investigate -> Case Detail -> evidence -> action -> target 
 
   await page.getByRole("link", { name: /investigate/i }).first().click();
   await expect(page).toHaveURL(/\/investigate$/);
-  await expect(page.getByText("Weekend revenue is running ahead of plan")).toBeVisible();
+  // The attention queue and the full case list both link to this case.
+  const caseLink = page.getByRole("link", { name: /Weekend revenue is running ahead of plan/ }).first();
+  await expect(caseLink).toBeVisible();
 
-  await page.getByText("Weekend revenue is running ahead of plan").click();
+  await caseLink.click();
   await expect(page).toHaveURL(new RegExp(`/investigate/${CASE_ID}`));
 
   // What the evidence establishes (root cause) and business impact are

@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+import { ArrowRight } from "lucide-react";
 import { formatCurrency, formatNumber } from "../format";
 import { LIFECYCLE_LABEL, NEXT_BASKET_LABEL, VALUE_TIER_LABEL } from "../design/customerVocabulary";
 
@@ -130,6 +132,15 @@ export default function CustomerLookupCard({ result }) {
       <div className="tool-card-notice">
         Data through {result.as_of || "unknown"}. Contact detail is intentionally not shown here — only a masked
         phone number, never a raw email or phone.
+      </div>
+
+      {/* c.partner_id is an internal numeric id, never PII -- the same
+          identifier the Customers page's own search/profile flow already
+          uses, so this deep link needs no name/phone/email in the URL. */}
+      <div className="tool-card-footer">
+        <Link to={`/customers/predictions?customer=${c.partner_id}`} className="tool-card-footer-link">
+          Open customer profile <ArrowRight size={12} />
+        </Link>
       </div>
     </div>
   );

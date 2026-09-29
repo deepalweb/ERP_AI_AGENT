@@ -32,7 +32,7 @@ import os
 from datetime import datetime
 
 from backend.app.db import appdb, reporting
-from backend.app.db.store_scope import SALE_ORDER_LIVE_STATES
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from backend.app.services.customer_predictions import (
     DETERIORATION_WINDOW_DAYS_DEFAULT,
     LIFECYCLE_SQL,
@@ -48,10 +48,20 @@ from backend.app.services.customer_predictions import (
 # Frontend Intelligence Integration: the Customers page's detail view
 # already has a partner_id from a prior search result -- it needs only
 # name/phone (to mask) and order_count, the same fields search_customers()
-# already resolves, scoped identically (SALE_ORDER_LIVE_STATES).
+# already resolves, scoped identically (SALE_ORDER_LIVE_STATES + Celeste's
+# own outlets -- a real bug fixed here: this subquery previously counted
+# orders across ALL stores, including the 22 non-Celeste partner-brand
+# outlets, while lifetime_revenue (LIFECYCLE_SQL, via customer_orders) was
+# already correctly scoped to Celeste's 4 outlets. The two numbers shown
+# together on the same profile card described two different order
+# populations -- caught by independently recomputing a real customer's
+# figures from raw SQL and finding order_count=25/revenue=228,780.61
+# didn't reconcile against any single population, until store_id was
+# added: 21 Celeste orders correctly matched the revenue figure).
 PARTNER_IDENTITY_SQL = f"""
     SELECT rp.name, rp.phone,
-           (SELECT COUNT(*) FROM sale_order so WHERE so.partner_id = rp.id AND so.state IN {SALE_ORDER_LIVE_STATES}) AS order_count
+           (SELECT COUNT(*) FROM sale_order so WHERE so.partner_id = rp.id AND so.state IN {SALE_ORDER_LIVE_STATES}
+                AND so.store_id IN {CELESTE_STORE_IDS}) AS order_count
     FROM res_partner rp WHERE rp.id = :partner_id
 """
 

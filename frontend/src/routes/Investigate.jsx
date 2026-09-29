@@ -1,10 +1,11 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ArrowRight, Search } from "lucide-react";
+import { AlertCircle, ArrowRight, Search, X } from "lucide-react";
 import { fetchCases, fetchManagementSummary } from "../api";
 import Badge, { toneForPriority } from "../design/Badge";
 import Button from "../design/Button";
+import CurrentPeriodInvestigations from "../design/CurrentPeriodInvestigations";
 import { caseStatusMeta } from "../design/caseStatus";
 import { DOMAIN_LABEL, DOMAIN_META } from "../design/domains";
 import { formatByUnit, formatCurrency, formatNumber, formatPct, moveToneClass, prettifyMetricId } from "../format";
@@ -270,6 +271,12 @@ function NeedsAttentionFirst() {
 }
 
 export default function Investigate() {
+  // ?metric=<id> -- last-resort fallback link from Management.jsx's
+  // WorkItem, for an action whose case couldn't be resolved server-side.
+  // Read once on mount only: a manager clearing the chip below shouldn't
+  // have it silently reappear from a stale URL on the next render.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [metricId, setMetricId] = useState(() => searchParams.get("metric") || "");
   const [status, setStatus] = useState("");
   const [domain, setDomain] = useState("");
   const [priority, setPriority] = useState("");
@@ -278,13 +285,23 @@ export default function Investigate() {
   const [search, setSearch] = useState("");
   const [offset, setOffset] = useState(0);
 
+  function clearMetricFilter() {
+    setMetricId("");
+    setOffset(0);
+    setSearchParams((params) => {
+      params.delete("metric");
+      return params;
+    });
+  }
+
   const query = useQuery({
-    queryKey: ["cases", status, domain, priority, sort, offset],
+    queryKey: ["cases", status, domain, priority, metricId, sort, offset],
     queryFn: () =>
       fetchCases({
         status: status || undefined,
         domain: domain || undefined,
         priority: priority || undefined,
+        metric_id: metricId || undefined,
         sort,
         limit: PAGE_SIZE,
         offset,
@@ -342,6 +359,17 @@ export default function Investigate() {
         </div>
       </div>
 
+      <CurrentPeriodInvestigations metricId={metricId} />
+
+      {metricId && (
+        <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-accent-border bg-accent-soft px-3 py-1 text-xs font-medium text-accent">
+          Filtered to {prettifyMetricId(metricId)}
+          <button type="button" onClick={clearMetricFilter} aria-label="Clear metric filter" className="text-accent hover:text-accent/70">
+            <X size={12} />
+          </button>
+        </div>
+      )}
+
       {(cases || priorities) && (
         <div className="mt-4 flex flex-wrap items-center gap-4 text-sm">
           <span className="inline-flex items-center gap-1.5">
@@ -365,7 +393,7 @@ export default function Investigate() {
 
       <NeedsAttentionFirst />
 
-      <div className="sticky top-0 z-10 -mx-6 mb-5 border-b border-border bg-background px-6 py-3">
+      <div className="sticky top-0 z-10 -mx-[18px] mb-5 border-b border-border bg-background px-[18px] py-3 sm:-mx-6 sm:px-6">
         <div className="flex flex-wrap items-center gap-2">
           <div className="relative min-w-[200px] flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-foreground-subtle" strokeWidth={2} />

@@ -193,15 +193,10 @@ def check_outcomes() -> None:
 
         if period_row is None:
             status = _pending_outcome_status(period_end_date, cadence)
-            appdb.run_query(
-                "UPDATE finding_actions SET outcome_status=:s WHERE finding_id=:f",
-                {"s": status, "f": row["finding_id"]},
-            )
+            updates = {"outcome_status": status}
             if status == "inconclusive":
-                appdb.run_query(
-                    "UPDATE finding_actions SET outcome_checked_at=:t WHERE finding_id=:f",
-                    {"t": datetime.utcnow().isoformat(), "f": row["finding_id"]},
-                )
+                updates["outcome_checked_at"] = datetime.utcnow().isoformat()
+            finding_actions.store_outcome(row, updates)
             _maybe_correct_case_resolution(row["case_id"], row["finding_id"])
             continue  # scenario L/M (too early / still partial), or overdue but not yet given up on
 
@@ -216,15 +211,11 @@ def check_outcomes() -> None:
             if any(_windows_overlap(row, s) for s in siblings):
                 confidence = "overlapping_actions"
 
-        appdb.run_query(
-            "UPDATE finding_actions SET outcome_checked_at=:t, outcome_value=:v, outcome_period=:p, "
-            "outcome_verdict=:verdict, outcome_status=:verdict, outcome_confidence=:conf WHERE finding_id=:f",
-            {
-                "t": datetime.utcnow().isoformat(), "v": period_row["value"], "p": period_label,
-                "verdict": verdict, "conf": confidence, "f": row["finding_id"],
-            },
-        )
-
+        finding_actions.store_outcome(row, {
+            "outcome_checked_at": datetime.utcnow().isoformat(), "outcome_value": period_row["value"],
+            "outcome_period": period_label, "outcome_verdict": verdict, "outcome_status": verdict,
+            "outcome_confidence": confidence,
+        })
         _maybe_correct_case_resolution(row["case_id"], row["finding_id"])
 
 
@@ -247,7 +238,7 @@ def _maybe_correct_case_resolution(case_id: str | None, finding_id: str) -> None
         return
     if case.get("objective_source_finding_id") != finding_id:
         return
-    new_verdict = case_engine._resolve_from_action_outcome(finding_id)
+    new_verdict = case_engine.OpportunityPolicy().resolve(case)
     if new_verdict is None:
         return  # still pending/blocked -- nothing to correct yet
     if case["resolution_verdict"] != new_verdict:

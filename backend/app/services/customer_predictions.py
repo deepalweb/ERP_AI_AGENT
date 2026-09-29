@@ -1287,9 +1287,11 @@ def get_predicted_next_basket(partner_id: int, top_n: int = 8) -> dict | None:
 # rather than guessing which one was meant.
 CUSTOMER_SEARCH_SQL = f"""
     SELECT rp.id AS partner_id, rp.name, rp.phone, rp.email,
-           (SELECT COUNT(*) FROM sale_order so WHERE so.partner_id = rp.id AND so.state IN {SALE_ORDER_LIVE_STATES}) AS order_count
+           (SELECT COUNT(*) FROM sale_order so WHERE so.partner_id = rp.id AND so.state IN {SALE_ORDER_LIVE_STATES}
+                AND so.store_id IN {CELESTE_STORE_IDS}) AS order_count
     FROM res_partner rp
-    WHERE rp.id IN (SELECT DISTINCT partner_id FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES})
+    WHERE rp.id IN (SELECT DISTINCT partner_id FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES}
+                     AND store_id IN {CELESTE_STORE_IDS})
       AND (CAST(:name_pattern AS text) IS NULL OR rp.name ILIKE :name_pattern)
       AND (CAST(:phone_last9 AS text) IS NULL OR RIGHT(regexp_replace(COALESCE(rp.phone, ''), '[^0-9]', '', 'g'), 9) = :phone_last9)
       AND (CAST(:email AS text) IS NULL OR rp.email ILIKE :email)

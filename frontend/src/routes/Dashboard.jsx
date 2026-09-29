@@ -1,247 +1,57 @@
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import {
-  fetchBrandMix,
-  fetchBusinessHealth,
-  fetchCustomerIntelligence,
-  fetchDashboardSummary,
-  fetchInventoryDepth,
-  fetchOperationsSummary,
-  fetchOrdersByHour,
-} from "../api";
+import { fetchPerformanceSummary, fetchInventoryDepth } from "../api";
 import Section from "../design/Card";
-import Pill, { pillTone } from "../design/Pill";
-import RankedBarChart from "../charts/RankedBarChart";
-import DonutChart from "../charts/DonutChart";
 import { formatCurrency, formatNumber, monthLabel } from "../format";
 
-const CANCEL_RATE_THRESHOLDS = { warning: 5, critical: 10 };
-
-function DomainBar({ domain }) {
-  const color = domain.status === "critical" ? "bg-critical" : domain.status === "warning" ? "bg-warning" : "bg-good";
-  return (
-    <div className="py-1.5">
-      <div className="flex items-center justify-between text-sm">
-        <span className="font-medium text-foreground-strong">{domain.label}</span>
-        <span className="text-foreground/70">{domain.score}/100</span>
-      </div>
-      <div className="mt-1 h-2 rounded-full bg-border">
-        <div className={`h-2 rounded-full ${color}`} style={{ width: `${domain.score}%` }} />
-      </div>
-      {domain.drivers?.[0] && <div className="mt-1 text-xs text-foreground/60">{domain.drivers[0]}</div>}
-    </div>
-  );
+function RevenueBars({ rows }) {
+  const max = Math.max(1, ...rows.map((row) => Math.abs(row.revenue)));
+  return <figure aria-label="Revenue ranking" className="space-y-4">{rows.map((row, index) => <div key={row.id ?? `${row.name}-${index}`}>
+    <div className="mb-1 flex justify-between gap-3 text-xs"><span className="min-w-0 break-words">{row.name}</span><span className="shrink-0 tabular-nums">{formatCurrency(row.revenue)}</span></div>
+    <div className="h-2 rounded bg-background" aria-hidden="true"><div className="h-full rounded" style={{ width: `${Math.abs(row.revenue) / max * 100}%`, background: row.revenue < 0 ? "var(--status-critical)" : "var(--accent)" }} /></div>
+  </div>)}</figure>;
 }
 
-function StoreTable({ branches }) {
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-foreground/60">
-            <th className="pb-2 font-medium">Store</th>
-            <th className="pb-2 font-medium">Orders</th>
-            <th className="pb-2 font-medium">Revenue</th>
-            <th className="pb-2 font-medium">Cancel rate</th>
-            <th className="pb-2 font-medium">Fulfillment delay</th>
-          </tr>
-        </thead>
-        <tbody>
-          {branches.map((b) => (
-            <tr key={b.name} className="border-t border-border">
-              <td className="py-1.5">{b.name}</td>
-              <td className="py-1.5">{formatNumber(b.orders)}</td>
-              <td className="py-1.5">{formatCurrency(b.revenue)}</td>
-              <td className="py-1.5">
-                <Pill tone={pillTone(b.cancellation_rate_pct, CANCEL_RATE_THRESHOLDS)}>{b.cancellation_rate_pct}%</Pill>
-              </td>
-              <td className="py-1.5">{b.delayed_rate_pct}%</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function SegmentTiles({ segments }) {
-  return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      {segments.map((s) => (
-        <div key={s.id} className="rounded-lg border border-border p-3">
-          <div className="text-lg font-bold text-foreground-strong">{formatNumber(s.count)}</div>
-          <div className="text-xs font-medium text-foreground/60">{s.label}</div>
-          <div className="text-xs text-foreground/50">{formatCurrency(s.revenue)} lifetime</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function HourBar({ hours, maxOrders }) {
-  return (
-    <div className="flex h-40 items-end gap-1">
-      {hours.map((h) => (
-        <div key={h.hour} className="flex flex-1 flex-col items-center gap-1" title={`${h.hour}:00 — ${formatNumber(h.orders)} orders`}>
-          <div
-            className="w-full rounded-t bg-[var(--series-1)]"
-            style={{ height: `${maxOrders ? (h.orders / maxOrders) * 100 : 0}%`, minHeight: 2 }}
-          />
-          {h.hour % 3 === 0 && <span className="text-[10px] text-foreground/50">{h.hour}</span>}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/** The reference dashboard — comparative/reference views a manager can't get
- * from a glance at the header or from Home's findings feed: business health,
- * store-vs-store comparison, inventory value, customer segments, products &
- * categories, and hourly order distribution. Every figure here is real —
- * checked against the live backend before wiring.
- *
- * Deliberately narrower than it used to be. This page originally carried
- * every raw KPI tile (revenue/orders/AOV/margin, fulfillment %, stock
- * counts, channel share), plus cancellation-reasons and a profitability
- * waterfall — trimmed because each of those either just restates a single
- * number the header already shows, duplicates a Celeste finding's own
- * breakdown when something's actually flagged, or (profitability) was
- * already caveated in its own caption as a partial/incomplete P&L. What's
- * left is what has no other place to be seen: cross-store comparison,
- * category/segment breakdowns, and distributions — reference data, not a
- * second copy of what Home already surfaces.
- *
- * This used to be the "/" front page; it moved to "/dashboard" (secondary
- * nav item) when Home became the findings briefing. */
 export default function Dashboard() {
-  const dashboard = useQuery({ queryKey: ["dashboardSummary"], queryFn: fetchDashboardSummary });
-  const health = useQuery({ queryKey: ["businessHealth"], queryFn: fetchBusinessHealth });
-  const operations = useQuery({ queryKey: ["operationsSummary"], queryFn: fetchOperationsSummary });
-  const inventoryDepth = useQuery({ queryKey: ["inventoryDepth"], queryFn: fetchInventoryDepth });
-  const customers = useQuery({ queryKey: ["customerIntelligence"], queryFn: fetchCustomerIntelligence });
-  const brandMix = useQuery({ queryKey: ["brandMix"], queryFn: fetchBrandMix });
-  const ordersByHour = useQuery({ queryKey: ["ordersByHour"], queryFn: fetchOrdersByHour });
-
-  if (dashboard.isLoading) {
-    return (
-      <div className="px-6 py-6">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-24 animate-pulse rounded-xl border border-border bg-chart-surface" />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  if (dashboard.data?.status !== "ok") {
-    return <div className="px-6 py-6 text-sm text-foreground/60">Couldn&rsquo;t load the business dashboard.</div>;
-  }
-
-  const { sales, top_products } = dashboard.data;
-
-  // /intelligence/health's own payload has a `status` field (the health
-  // verdict) that overwrites the route wrapper's `"status": "ok"` — so
-  // `overall` being a number is the real success signal here.
-  const healthOk = typeof health.data?.overall === "number";
-
-  const maxHourOrders = ordersByHour.data?.status === "ok"
-    ? Math.max(...ordersByHour.data.hours.map((h) => h.orders))
-    : 0;
-
-  return (
-    <div className="px-6 py-6">
-      <div className="flex items-baseline justify-between">
-        <h1 className="text-xl font-semibold text-foreground-strong">Business dashboard</h1>
-        <span className="text-xs text-foreground/60">Data through {monthLabel(sales.headline_month)}</span>
-      </div>
-
-      {/* Customer Purchase Intelligence dropped out of the primary nav (see
-          Header.jsx) once the nav was trimmed to Home/Actions/Explore/Ask —
-          this keeps it one click away instead of removing access to it. */}
-      <Link
-        to="/customers/predictions"
-        className="mt-3 flex items-center justify-between rounded-xl border border-accent-border bg-accent-soft px-4 py-3 text-sm font-medium text-accent hover:bg-accent-soft/80"
-      >
-        Customer Purchase Intelligence — when customers are likely to order again
-        <span aria-hidden="true">&rarr;</span>
-      </Link>
-
-      {/* Business health */}
-      {healthOk && (
-        <Section title="Business health" note={`${health.data.overall}/100 — Sales · Operations · Inventory · Customers, equally weighted`}>
-          <div className="grid gap-x-8 sm:grid-cols-2">
-            {health.data.domains.map((d) => (
-              <DomainBar key={d.id} domain={d} />
-            ))}
-          </div>
-          {health.data.excluded?.length > 0 && (
-            <p className="mt-2 text-xs text-foreground/50">
-              Not scored: {health.data.excluded.map((e) => e.label).join(", ")} — {health.data.excluded[0].reason}
-            </p>
-          )}
-        </Section>
-      )}
-
-      {/* Store performance */}
-      {operations.data?.status === "ok" && (
-        <Section title="Store performance">
-          <StoreTable branches={operations.data.branches} />
-        </Section>
-      )}
-
-      {/* Inventory value */}
-      {inventoryDepth.data?.status === "ok" && (
-        <Section title="Inventory value">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            {inventoryDepth.data.segments.map((s) => (
-              <div key={s.id} className="rounded-lg border border-border p-3">
-                <div className="text-lg font-bold text-foreground-strong">{formatCurrency(s.value)}</div>
-                <div className="text-xs font-medium text-foreground/60">{s.label}</div>
-                <div className="text-xs text-foreground/50">{formatNumber(s.count)} products · {formatNumber(s.units)} units</div>
-              </div>
-            ))}
-          </div>
-        </Section>
-      )}
-
-      {/* Customers */}
-      {customers.data?.status === "ok" && (
-        <Section title="Customers" note={`As of ${customers.data.as_of_date}`}>
-          <SegmentTiles segments={customers.data.segments} />
-          {customers.data.at_risk_customers.length > 0 && (
-            <div className="mt-3 text-xs text-foreground/60">
-              Top at-risk by revenue: {customers.data.at_risk_customers.slice(0, 3).map((c) => c.name).join(", ")}
-            </div>
-          )}
-        </Section>
-      )}
-
-      {/* Products & categories */}
-      {brandMix.data?.status === "ok" && (
-        <Section
-          title="Products & categories"
-          note={`${brandMix.data.departments.find((d) => d.department === "Unlinked")?.revenue_share_pct ?? 0}% unlinked to a department`}
-        >
-          <div className="grid gap-4 xl:grid-cols-2">
-            <div>
-              <div className="mb-1 text-xs font-medium text-foreground/70">Revenue by department</div>
-              <DonutChart data={brandMix.data.departments} nameKey="department" valueKey="revenue" formatValue={formatCurrency} />
-            </div>
-            <div>
-              <div className="mb-1 text-xs font-medium text-foreground/70">Top products by revenue</div>
-              <RankedBarChart data={top_products} nameKey="name" valueKey="revenue" formatValue={formatCurrency} />
-            </div>
-          </div>
-        </Section>
-      )}
-
-      {/* Orders by hour */}
-      {ordersByHour.data?.status === "ok" && (
-        <Section title="Orders by hour" note="All-time distribution — this business's history is only a few months">
-          <HourBar hours={ordersByHour.data.hours} maxOrders={maxHourOrders} />
-        </Section>
-      )}
+  const [month, setMonth] = useState("");
+  const [store, setStore] = useState("");
+  const performance = useQuery({ queryKey: ["performanceSummary", month, store], queryFn: () => fetchPerformanceSummary(month, store), retry: false });
+  const inventory = useQuery({ queryKey: ["inventoryDepth"], queryFn: fetchInventoryDepth, retry: false });
+  const data = performance.data?.status === "ok" ? performance.data : null;
+  const [months, setMonths] = useState([]);
+  const [stores, setStores] = useState([]);
+  useEffect(() => { if (data) { setMonths(data.months); setStores(data.stores); } }, [data]);
+  const note = `${month ? monthLabel(month) : "All available history"} · ${store ? "Selected outlet" : "All Celeste outlets"}`;
+  const maxHour = Math.max(1, ...(data?.hours ?? []).map((r) => r.orders));
+  return <div className="px-6 py-6">
+    <h1 className="text-xl font-semibold text-foreground-strong">Business Performance</h1>
+    <p className="mt-1 text-sm text-foreground/60">Compare outlets, product sales and ordering patterns over the same period.</p>
+    <div className="mt-5 flex flex-wrap items-end gap-3 rounded-xl border border-border bg-chart-surface p-4">
+      <label className="text-xs text-foreground/70">Sales period<select aria-label="Sales period" value={month} onChange={(e) => setMonth(e.target.value)} className="mt-1 block rounded-lg border border-border bg-background p-2 text-sm text-foreground-strong"><option value="">All available history</option>{months.map((m) => <option key={m} value={m}>{monthLabel(m)}{m === months.at(-1) ? " (may be partial)" : ""}</option>)}</select></label>
+      <label className="text-xs text-foreground/70">Outlet<select aria-label="Outlet" value={store} onChange={(e) => setStore(e.target.value)} className="mt-1 block rounded-lg border border-border bg-background p-2 text-sm text-foreground-strong"><option value="">All Celeste outlets</option>{stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
+      <button type="button" onClick={() => performance.refetch()} disabled={performance.isFetching} className="rounded-lg border border-border px-3 py-2 text-sm disabled:opacity-50">Reload comparisons</button>
     </div>
-  );
+    {performance.isFetching && <p role="status" className="mt-4 text-sm">Loading comparisons…</p>}
+    {!performance.isFetching && !data && <p role="alert" className="mt-4 text-sm text-warning">Could not load performance comparisons. Use Reload comparisons to try again.</p>}
+    {data && <>
+      <p className="mt-3 text-xs text-foreground/60">Selected orders: {data.start?.replace("T", " ") ?? "No orders"} to {data.end?.replace("T", " ") ?? "—"} · Asia/Colombo. Source through {data.source_through?.replace("T", " ") ?? "unavailable"}.{data.latest_month_included && " Latest source month may be incomplete."}</p>
+      <Section title="Outlet comparison" note={note}>
+        {data.outlets.length ? <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs text-foreground/60">{["Outlet", "Confirmed orders", "Revenue", "Cancellation rate"].map((h) => <th key={h} className="p-2">{h}</th>)}</tr></thead><tbody>{data.outlets.map((r) => <tr key={r.id} className="border-t border-border"><td className="p-2">{r.name}</td><td className="p-2">{formatNumber(r.orders)}</td><td className="p-2">{formatCurrency(r.revenue)}</td><td className="p-2">{r.cancellation_rate_pct == null ? "Unavailable" : `${r.cancellation_rate_pct}%`}</td></tr>)}</tbody></table></div> : <p className="text-sm">No orders in this selection.</p>}
+        <p className="mt-3 text-xs text-foreground/60">Revenue uses confirmed order totals. Cancellation rate = cancelled ÷ confirmed and cancelled orders.</p>
+      </Section>
+      <div className="grid gap-x-4 xl:grid-cols-2">
+        <Section title="Revenue by department" note={note}>{data.departments.length ? <RevenueBars rows={data.departments} /> : <p className="text-sm">No department sales in this selection.</p>}</Section>
+        <Section title="Top products by revenue" note={note}>{data.products.length ? <RevenueBars rows={data.products} /> : <p className="text-sm">No product sales in this selection.</p>}</Section>
+      </div>
+      <p className="mt-2 text-xs text-foreground/60">Product and department revenue use order-line subtotals, which can differ from order totals because of taxes. Unlinked means no department is assigned.</p>
+      <Section title="Orders by hour" note={note}>
+        <figure aria-label="Confirmed orders by local hour"><div className="flex h-40 items-end gap-1">{data.hours.map((r) => <div key={r.hour} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={`${r.hour}:00 · ${r.orders} orders`}><div className="bg-accent" style={{height: `${r.orders / maxHour * 85}%`}} /><span className="h-4 text-[10px] text-foreground/60">{r.hour % 3 === 0 ? r.hour : ""}</span></div>)}</div><figcaption className="mt-3 text-xs text-foreground/60">Confirmed orders by Asia/Colombo hour. Cancelled orders are excluded.</figcaption></figure>
+        <details className="mt-3 text-xs"><summary className="cursor-pointer">Hourly values</summary><div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">{data.hours.map((r) => <span key={r.hour}>{r.hour}:00 · {formatNumber(r.orders)}</span>)}</div></details>
+      </Section>
+    </>}
+    <Section title="Inventory value — separate stock snapshot">
+      <p className="mb-3 text-xs text-foreground/60">Shared internal inventory; sales period and outlet filters above do not apply. Valuation is estimated. Sales-velocity reference date: {inventory.data?.as_of_date ?? "unavailable"}; this is not a historical stock snapshot date.</p>
+      {inventory.isLoading ? <p className="text-sm">Loading inventory…</p> : inventory.data?.status === "ok" ? <div className="grid gap-3 sm:grid-cols-3">{inventory.data.segments.map((r) => <div key={r.id} className="rounded-lg border border-border p-3"><div className="text-lg font-semibold">{r.value == null ? "Unavailable" : formatCurrency(r.value)}</div><div className="text-sm">{r.label}</div><div className="text-xs text-foreground/60">{formatNumber(r.count)} products · {formatNumber(r.units)} units</div></div>)}</div> : <p className="text-sm text-warning">Inventory unavailable.</p>}
+    </Section>
+  </div>;
 }

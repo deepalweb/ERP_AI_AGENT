@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS pattern tracking.py already uses.
 """
 
 import json
-import os
 from datetime import datetime, timedelta
 
 import anyio
@@ -27,7 +26,7 @@ from backend.app.services import (
     tracking,
     weekly_streaks,
 )
-from mcp_server.tools import incident_engine, investigation, state_findings
+from mcp_server.tools import incident_engine, investigation, measurement, state_findings
 
 STALE_AFTER = timedelta(hours=24)
 
@@ -209,14 +208,18 @@ def _compute_daily_brief():
     # docstring), so this one line is all it takes for them to get
     # persistence tracking, proactive-warning diffing, and every frontend
     # renderer for free, with no special-casing anywhere else.
-    state = (
-        state_findings.build_inventory_findings()
-        + state_findings.build_operational_findings()
-        + state_findings.build_controls_findings()
-        + incident_engine.build_incident_findings()
-    )
+    state = measurement.combine([
+        state_findings.build_inventory_findings(),
+        state_findings.build_operational_findings(),
+        state_findings.build_controls_findings(),
+        incident_engine.build_incident_findings(),
+    ])
+    data_freshness = _data_freshness()
+    if data_freshness.get("status") != "fresh":
+        for record in state.measurements:
+            record.update(freshness="unknown", reason="Order source freshness is not established.")
     state_tracking.record_new_findings(state)
-    state_tracking.check_outcomes(state)
+    state_tracking.check_outcomes(state, measurements=state.measurements)
     state_tracking_history = state_tracking.get_tracking_history()
     # Trailing 7-day findings (cancellation_rate, delayed_delivery_rate) —
     # tracking.py's check_outcomes() assumes a "YYYY-MM" period key, which a
@@ -225,7 +228,11 @@ def _compute_daily_brief():
     # sound comparison point exists (WINDOW_DAYS days, or the streak ending
     # early) — see weekly_streaks.get_verdicted_streaks().
     short_term = investigation.scan_short_term()
-    weekly_streaks.record_streaks(short_term)
+    short_measurements = getattr(short_term, "measurements", [])
+    if data_freshness.get("status") != "fresh":
+        for record in short_measurements:
+            record.update(freshness="unknown", reason="Order source freshness is not established.")
+    weekly_streaks.record_streaks(short_term, measurements=short_measurements)
     active_streaks = weekly_streaks.get_active_streaks()
     for f in short_term:
         f["streak"] = active_streaks.get(f["metric_id"])
@@ -242,7 +249,6 @@ def _compute_daily_brief():
     # Computed here (rather than at its old spot further down) because
     # case_engine.sync_cases needs it too: a weekly/snapshot case's
     # verification window must not advance on stale data.
-    data_freshness = _data_freshness()
     # Phase 2d: measure any completed action's declared target BEFORE this
     # cycle's case resolution runs, so a case whose verification window
     # closes this same cycle can already see a just-landed action outcome
@@ -253,7 +259,10 @@ def _compute_daily_brief():
     # unaffected). Runs after notifications' own diff above so that diff
     # sees the lists exactly as it always has. Protected against
     # concurrent scans by the _scan_lock() this whole function runs under.
-    case_engine.sync_cases(investigations, state, short_term, data_fresh=data_freshness.get("status") != "stale")
+    case_engine.sync_cases(
+        investigations, state, short_term, data_fresh=data_freshness.get("status") == "fresh",
+        measurements=[*getattr(investigations, "measurements", []), *state.measurements, *short_measurements],
+    )
     tracking.record_new_findings(investigations)
     tracking.check_outcomes()
     history = tracking.get_tracking_history()

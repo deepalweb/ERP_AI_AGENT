@@ -31,7 +31,7 @@ from datetime import date, timedelta
 from backend.app.db import appdb
 from backend.app.services import finding_actions
 from backend.app.services.tracking import verdict_for_deviation
-from mcp_server.tools import intelligence
+from mcp_server.tools import intelligence, measurement
 
 WINDOW_DAYS = 7  # mirrors intelligence.get_trailing_trend's default window_days
 
@@ -84,7 +84,7 @@ def _finalize_verdict(row: dict, outcome_value: float) -> None:
     )
 
 
-def record_streaks(short_term_findings: list[dict]):
+def record_streaks(short_term_findings: list[dict], *, measurements=None):
     """Called once per daily scan (brain.run_daily_scan, right after
     investigation.scan_short_term()) — updates the streak table from
     today's flagged short-term findings and closes out any streak whose
@@ -104,6 +104,10 @@ def record_streaks(short_term_findings: list[dict]):
     ongoing_by_metric = {r["metric_id"]: r for r in ongoing_rows}
 
     for metric_id, finding in flagged_by_metric.items():
+        if measurements is not None:
+            source = next((m for m in measurements if m["metric_id"] == metric_id), {})
+            if source.get("freshness") != "fresh" or source.get("coverage") != "complete":
+                continue
         as_of_date = finding["as_of_date"]
         current_value = finding["confirm"]["current"]
         row = ongoing_by_metric.get(metric_id)
@@ -150,9 +154,14 @@ def record_streaks(short_term_findings: list[dict]):
 
     for metric_id, row in ongoing_by_metric.items():
         if metric_id not in flagged_by_metric:
+            clean = measurement.healthy(measurements, metric_id, "weekly")
+            if clean is None:
+                continue
             appdb.run_query("UPDATE weekly_streaks SET status = 'ended' WHERE id = :id", {"id": row["id"]})
-            if row["verdict"] is None and row["last_value"] is not None:
-                _finalize_verdict(row, row["last_value"])
+            if row["verdict"] is None and clean.get("value") is not None:
+                appdb.run_query("UPDATE weekly_streaks SET last_value=:v WHERE id=:id",
+                                {"v": clean["value"], "id": row["id"]})
+                _finalize_verdict(row, clean["value"])
 
 
 def get_active_streaks() -> dict:

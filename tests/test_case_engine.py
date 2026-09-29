@@ -10,12 +10,13 @@ proof), recurrence vs. reopening, and idempotency/uniqueness.
 """
 
 import json
-from datetime import date, timedelta
+from datetime import date
 
 import pytest
 
 from backend.app.db import appdb
 from backend.app.services import case_engine
+from tests.coverage_helpers import sync_covered_cases
 
 
 def _fake_date_sequence(days):
@@ -73,7 +74,7 @@ def test_single_finding_multi_segment_scope_is_one_case_with_evidence_preserved(
     }]
     f = _monthly_finding("revenue", "financial", "2026-09", checks=checks)
 
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
 
     # One case, not two -- a finding containing two implicated outlets does
     # not fork into per-outlet cases.
@@ -90,7 +91,7 @@ def test_explicit_company_wide_scope_is_distinguished_from_unknown(appdb_reset, 
     f1 = _monthly_finding("revenue", "financial", "2026-09", checks=company_wide_checks)
     f2 = _monthly_finding("gross_margin", "financial", "2026-09", checks=[])
 
-    case_engine.sync_cases([f1, f2], [], [])
+    sync_covered_cases([f1, f2], [], [])
 
     assert case_engine.get_case(f1["case_id"])["scope_status"] == "company_wide"
     assert case_engine.get_case(f2["case_id"])["scope_status"] == "unknown"
@@ -109,7 +110,7 @@ def test_a_finding_with_no_root_cause_concept_does_not_crash_sync(appdb_reset, m
     f = _monthly_finding("revenue", "financial", "2026-09")
     f["root_cause"] = None
 
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
 
     case = case_engine.get_case(f["case_id"])
     assert case is not None
@@ -125,7 +126,7 @@ def test_different_metrics_sharing_a_segment_are_never_merged(appdb_reset, monke
     revenue = _monthly_finding("revenue", "financial", "2026-09", checks=checks)
     order_volume = _monthly_finding("order_volume", "order_customer", "2026-09", checks=checks)
 
-    case_engine.sync_cases([revenue, order_volume], [], [])
+    sync_covered_cases([revenue, order_volume], [], [])
 
     assert revenue["case_id"] != order_volume["case_id"]
 
@@ -137,7 +138,7 @@ def test_monthly_and_weekly_findings_for_the_same_metric_are_separate_cases(appd
     monthly = _monthly_finding("cancellation_rate", "order_customer", "2026-09")
     weekly = _weekly_finding("cancellation_rate", "order_customer", "2026-09-15")
 
-    case_engine.sync_cases([monthly], [], [weekly])
+    sync_covered_cases([monthly], [], [weekly])
 
     assert monthly["case_id"] != weekly["case_id"]
 
@@ -150,10 +151,10 @@ def test_continuation_across_two_scans_is_one_case(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 15), date(2026, 9, 16)]))
 
     f1 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
 
     f2 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
 
     assert f1["case_id"] == f2["case_id"]
     assert len(case_engine.get_case_observations(f1["case_id"])) == 2
@@ -162,7 +163,7 @@ def test_continuation_across_two_scans_is_one_case(appdb_reset, monkeypatch):
 def test_active_case_uniqueness_blocks_a_second_open_row_including_reopened(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 15)]))
     f = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_engine.dismiss_case(f["case_id"], "test")
     case_engine._reopen_case(f["case_id"], f, "unknown", [], "test reopen")
 
@@ -185,10 +186,10 @@ def test_still_flagged_case_stays_open_regardless_of_trend(appdb_reset, monkeypa
     # "2 consecutive improved verdicts while still flagged" is rejected.
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1), date(2026, 9, 2)]))
     f1 = _monthly_finding("cancellation_rate", "order_customer", "2026-09", current=15)
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
 
     f2 = _monthly_finding("cancellation_rate", "order_customer", "2026-09", current=13)
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
 
     case = case_engine.get_case(f1["case_id"])
     assert case["status"] == "open"
@@ -208,10 +209,10 @@ def test_single_absent_cycle_does_not_resolve(appdb_reset, monkeypatch):
                          lambda metric: [{"month": "2026-09", "value": 1, "is_partial": False}])
 
     f = _monthly_finding("cancellation_rate", "order_customer", "2026-09")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
-    case_engine.sync_cases([], [], [])  # no longer flagged -- one clean cadence unit
+    sync_covered_cases([], [], [])  # no longer flagged -- one clean cadence unit
 
     case = case_engine.get_case(case_id)
     assert case["status"] == "verification_pending"
@@ -228,17 +229,17 @@ def test_two_consecutive_clean_cadence_units_resolves(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine.intelligence, "METRICS", {"revenue": _M()})
 
     f = _monthly_finding("revenue", "financial", "2026-07")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(case_id)["status"] == "verification_pending"
 
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     case = case_engine.get_case(case_id)
     assert case["status"] == "resolved"
     assert case["closed_at"] is not None
@@ -254,17 +255,17 @@ def test_reappearing_before_verification_completes_resets_progress(appdb_reset, 
     monkeypatch.setattr(case_engine.intelligence, "METRICS", {"revenue": _M()})
 
     f = _monthly_finding("revenue", "financial", "2026-07")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(case_id)["status"] == "verification_pending"
 
     # Flagged again before the window completed.
     f2 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
     case = case_engine.get_case(case_id)
     assert case["status"] == "open"
     assert case["verification_progress"] == 0
@@ -285,20 +286,20 @@ def test_recurrence_after_verified_resolution_creates_new_linked_case(appdb_rese
     monkeypatch.setattr(case_engine.intelligence, "METRICS", {"revenue": _M()})
 
     f = _monthly_finding("revenue", "financial", "2026-07")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     original_case_id = f["case_id"]
 
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     assert case_engine.get_case(original_case_id)["status"] == "resolved"
 
     # Recurs within the grace window, after a GENUINE (verified) resolution.
     f2 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
 
     assert f2["case_id"] != original_case_id
     relationships = case_engine.get_case_relationships(f2["case_id"])
@@ -315,12 +316,12 @@ def test_dismissed_case_reopens_on_recurrence_instead_of_forking(appdb_reset, mo
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1), date(2026, 9, 10)]))
 
     f = _monthly_finding("purchase_price_variance", "supplier", "2026-09")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
     case_engine.dismiss_case(case_id, "known one-off pricing correction")
 
     f2 = _monthly_finding("purchase_price_variance", "supplier", "2026-09")
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
 
     assert f2["case_id"] == case_id  # reopened, not forked
     case = case_engine.get_case(case_id)
@@ -338,9 +339,9 @@ def test_dismissed_case_reopens_on_recurrence_instead_of_forking(appdb_reset, mo
 def test_rerunning_sync_for_the_same_scan_run_does_not_duplicate_observations(appdb_reset, monkeypatch):
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     f2 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f2], [], [])  # same calendar day -- e.g. a retry
+    sync_covered_cases([f2], [], [])  # same calendar day -- e.g. a retry
 
     assert len(case_engine.get_case_observations(f1["case_id"])) == 1
 
@@ -351,10 +352,10 @@ def test_distinct_daily_scans_append_observations_even_with_identical_finding_id
     # idempotency key.
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1), date(2026, 9, 2)]))
     f1 = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
     f2 = _monthly_finding("revenue", "financial", "2026-09")
     assert f1["id"] == f2["id"]
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
 
     assert len(case_engine.get_case_observations(f1["case_id"])) == 2
 
@@ -367,7 +368,7 @@ def test_dismissing_a_finding_action_never_touches_a_case(appdb_reset, monkeypat
 
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1)]))
     f = _monthly_finding("revenue", "financial", "2026-09")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
 
     finding_actions.set_action(f["id"], False, "not_started", None)
 
@@ -385,12 +386,12 @@ def test_stale_data_does_not_advance_a_weekly_cases_verification(appdb_reset, mo
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1), date(2026, 9, 2)]))
 
     f = _weekly_finding("cancellation_rate", "order_customer", "2026-09-01")
-    case_engine.sync_cases([], [], [f])
+    sync_covered_cases([], [], [f])
     case_id = f["case_id"]
 
     # No longer flagged, but today's order data is stale -- an "absent"
     # finding here might just be re-observing yesterday's stale snapshot.
-    case_engine.sync_cases([], [], [], data_fresh=False)
+    sync_covered_cases([], [], [], data_fresh=False)
 
     case = case_engine.get_case(case_id)
     assert case["status"] == "open"
@@ -401,10 +402,10 @@ def test_fresh_data_still_advances_a_weekly_cases_verification(appdb_reset, monk
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1), date(2026, 9, 2)]))
 
     f = _weekly_finding("cancellation_rate", "order_customer", "2026-09-01")
-    case_engine.sync_cases([], [], [f])
+    sync_covered_cases([], [], [f])
     case_id = f["case_id"]
 
-    case_engine.sync_cases([], [], [], data_fresh=True)
+    sync_covered_cases([], [], [], data_fresh=True)
 
     case = case_engine.get_case(case_id)
     assert case["status"] == "verification_pending"
@@ -427,13 +428,13 @@ def test_same_still_open_month_rerun_does_not_double_count_progress(appdb_reset,
                          lambda metric: [{"month": "2026-08", "value": 1, "is_partial": False}])
 
     f = _monthly_finding("revenue", "financial", "2026-07")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
-    case_engine.sync_cases([], [], [])  # day 1 of August: absent, fresh unit "2026-08"
+    sync_covered_cases([], [], [])  # day 1 of August: absent, fresh unit "2026-08"
     assert case_engine.get_case(case_id)["verification_progress"] == 1
 
-    case_engine.sync_cases([], [], [])  # day 2 of August: same trend row, same month
+    sync_covered_cases([], [], [])  # day 2 of August: same trend row, same month
     case = case_engine.get_case(case_id)
     assert case["verification_progress"] == 1  # NOT 2
     assert case["status"] == "verification_pending"  # not resolved yet
@@ -448,10 +449,10 @@ def test_same_day_rescan_with_newer_evidence_overwrites_the_days_observation(app
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1)]))
 
     f1 = _monthly_finding("revenue", "financial", "2026-09", current=8_000_000)
-    case_engine.sync_cases([f1], [], [])
+    sync_covered_cases([f1], [], [])
 
     f2 = _monthly_finding("revenue", "financial", "2026-09", current=7_500_000)  # a later same-day rescan
-    case_engine.sync_cases([f2], [], [])
+    sync_covered_cases([f2], [], [])
 
     observations = case_engine.get_case_observations(f1["case_id"])
     assert len(observations) == 1  # still one row for the day, not two
@@ -508,7 +509,7 @@ def test_legacy_improved_status_does_not_resolve_the_case(appdb_reset, monkeypat
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 8, 1), date(2026, 9, 1)]))
 
     f = _monthly_finding("revenue", "financial", "2026-08", current=8_000_000)
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
     # The LEGACY tracker independently marks this finding as a verified
@@ -542,15 +543,15 @@ def test_case_resolved_status_does_not_imply_a_legacy_verdict_exists(appdb_reset
     monkeypatch.setattr(case_engine.intelligence, "METRICS", {"revenue": _M()})
 
     f = _monthly_finding("revenue", "financial", "2026-07")
-    case_engine.sync_cases([f], [], [])
+    sync_covered_cases([f], [], [])
     case_id = f["case_id"]
 
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-08", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
     monkeypatch.setattr(case_engine.intelligence, "get_trend",
                          lambda metric: [{"month": "2026-09", "value": 1, "is_partial": False}])
-    case_engine.sync_cases([], [], [])
+    sync_covered_cases([], [], [])
 
     assert case_engine.get_case(case_id)["status"] == "resolved"
 
@@ -570,11 +571,11 @@ def test_notifications_do_not_re_flag_a_continuing_case_as_new(appdb_reset, monk
     monkeypatch.setattr(case_engine, "_business_today", _fake_date_sequence([date(2026, 9, 1), date(2026, 9, 2)]))
 
     scan1 = [_monthly_finding("revenue", "financial", "2026-09", impact=10.0)]
-    case_engine.sync_cases(scan1, [], [])
+    sync_covered_cases(scan1, [], [])
     case_id_1 = scan1[0]["case_id"]
 
     scan2 = [_monthly_finding("revenue", "financial", "2026-09", impact=10.0)]
-    case_engine.sync_cases(scan2, [], [])
+    sync_covered_cases(scan2, [], [])
 
     assert scan2[0]["case_id"] == case_id_1  # same case, continuation
     new_findings = notifications.diff_new_critical_findings(scan2, [], [], scan1, [], [])
@@ -588,7 +589,7 @@ def test_notifications_flag_a_genuinely_new_case_as_new(appdb_reset, monkeypatch
 
     prev_scan = [_monthly_finding("cancellation_rate", "order_customer", "2026-08", impact=10.0)]
     new_scan = [_monthly_finding("revenue", "financial", "2026-09", impact=10.0)]
-    case_engine.sync_cases(new_scan, [], [])
+    sync_covered_cases(new_scan, [], [])
 
     new_findings = notifications.diff_new_critical_findings(new_scan, [], [], prev_scan, [], [])
     assert len(new_findings) == 1

@@ -305,6 +305,65 @@
   color: var(--text-h);
 }
 
+/* Ask Celeste V2: the one navigation affordance a card carries, kept
+   visually distinct from the FOLLOW_UPS chip row below the message (that
+   asks another question; this one leaves chat) -- see chat/CardFooter.jsx. */
+.tool-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.tool-card-footer-label {
+  color: var(--text);
+  opacity: 0.7;
+}
+
+.tool-card-footer-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.tool-card-footer-link:hover {
+  text-decoration: underline;
+}
+
+/* Follow-up question chips (agent.py's FOLLOW_UPS trailer) -- deliberately
+   shaped as bordered pill BUTTONS, not underlined accent links, so they
+   never read the same as .tool-card-footer-link's navigation affordance:
+   a chip continues this conversation, a footer link leaves it. Sits
+   below the message bubble, not inside a .tool-card, so it never
+   competes for the same visual slot as a card's own footer either. */
+.followup-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.followup-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface, transparent);
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.followup-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .chart-card {
   border: 1px solid var(--border);
   border-radius: 10px;

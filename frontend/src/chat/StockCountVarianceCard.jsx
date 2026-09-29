@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
+import { ArrowRight } from "lucide-react";
 import HBarList from "../charts/HBarList";
 import Button from "../design/Button";
 import { formatCurrency, formatNumber } from "../format";
@@ -88,7 +90,10 @@ export default function StockCountVarianceCard({ result }) {
           <div className="mt-2">
             {saveState === "saved" ? (
               <span className="tool-card-notice">
-                Saved as case {savedCaseId} — visible in Investigate.
+                Saved as case {savedCaseId} —{" "}
+                <Link to={`/investigate/${encodeURIComponent(savedCaseId)}`} className="tool-card-footer-link">
+                  Open in Investigate <ArrowRight size={12} className="inline" />
+                </Link>
               </span>
             ) : (
               <Button size="sm" onClick={handleSave} disabled={saveState === "saving"}>

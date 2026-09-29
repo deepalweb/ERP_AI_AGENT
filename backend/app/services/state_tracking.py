@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta
 from backend.app.db import appdb
 from backend.app.services import finding_actions
 from backend.app.services.tracking import verdict_for_deviation
+from mcp_server.tools import measurement
 
 CHECK_AFTER_DAYS = 7  # same week-length cadence weekly_streaks/trailing windows already use elsewhere in this codebase
 
@@ -88,7 +89,7 @@ def record_new_findings(state_findings: list[dict]):
         )
 
 
-def check_outcomes(state_findings: list[dict]):
+def check_outcomes(state_findings: list[dict], *, measurements=None):
     """For every open tracked state finding: if it's absent from today's
     freshly recomputed state_findings list, the problem is gone — resolve
     immediately with verdict 'improved', no need to wait for
@@ -102,8 +103,14 @@ def check_outcomes(state_findings: list[dict]):
     open_rows = appdb.run_query("SELECT * FROM tracked_state_findings WHERE status = 'open'")
     for row in open_rows:
         current = current_by_metric.get(row["metric_id"])
+        if current is not None and measurements is not None:
+            source = next((m for m in measurements if m["metric_id"] == row["metric_id"]), {})
+            if source.get("freshness") != "fresh" or source.get("coverage") != "complete":
+                continue
 
         if current is None:
+            if not measurement.healthy(measurements, row["metric_id"], "snapshot"):
+                continue
             outcome_value = 0
             verdict = "improved"
         elif today_iso >= row["check_after_date"]:

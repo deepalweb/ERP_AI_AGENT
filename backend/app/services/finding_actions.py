@@ -12,7 +12,9 @@ Nothing here touches the customer's Odoo database; app.db (or
 APP_DATABASE_URL) is entirely separate app state, same as tracking.py.
 """
 
-from datetime import date, datetime
+import json
+import math
+from datetime import UTC, date, datetime
 
 from backend.app.db import appdb
 from backend.app.services.case_engine import COMPARISONS, MEASUREMENT_PERIODS
@@ -104,6 +106,8 @@ def _ensure_schema():
     # intelligence.METRICS -- see set_action); the outcome_* group is
     # filled in later by action_outcomes.check_outcomes().
     for column in (
+        "target_version INTEGER NOT NULL DEFAULT 0",
+        "outcome_target_version INTEGER",
         "completed_at TEXT",
         "intended_result TEXT",
         "target_metric_id TEXT",
@@ -141,7 +145,77 @@ def _ensure_schema():
             appdb.run_query(f"ALTER TABLE finding_actions ADD COLUMN {column}")
         except Exception:
             pass
+    appdb.run_query("""CREATE TABLE IF NOT EXISTS action_target_versions (
+        finding_id TEXT NOT NULL, version INTEGER NOT NULL, target TEXT NOT NULL,
+        created_at TEXT NOT NULL, superseded_at TEXT, completed_at TEXT,
+        PRIMARY KEY(finding_id, version))""")
+    appdb.run_query("""CREATE TABLE IF NOT EXISTS action_outcome_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, finding_id TEXT NOT NULL,
+        target_version INTEGER NOT NULL, recorded_at TEXT NOT NULL, outcome TEXT NOT NULL)""")
+    # Adopt legacy targets without changing their measurement window or verdict.
+    with appdb.get_engine().begin() as conn:
+        for row in appdb.run_query("SELECT * FROM finding_actions WHERE target_metric_id IS NOT NULL AND target_version=0", conn=conn):
+            appdb.run_query("UPDATE finding_actions SET target_version=1, outcome_target_version=CASE WHEN outcome_checked_at IS NOT NULL THEN 1 END WHERE finding_id=:f",
+                            {"f": row["finding_id"]}, conn=conn)
+            _insert_target_version(row, 1, row["updated_at"], conn)
+            if row.get("outcome_status"):
+                _append_outcome({**row, "target_version": 1}, conn)
     _SCHEMA_READY = True
+
+
+_TARGET_FIELDS = ("target_metric_id", "target_value", "target_comparison", "target_unit",
+                  "target_baseline_relative", "target_baseline_value", "target_measurement_period")
+_OUTCOME_FIELDS = ("outcome_checked_at", "outcome_value", "outcome_period", "outcome_verdict",
+                   "outcome_status", "outcome_confidence", "outcome_target_version")
+
+
+def _insert_target_version(row, version, now, conn):
+    appdb.run_query("INSERT OR IGNORE INTO action_target_versions (finding_id,version,target,created_at,completed_at) VALUES (:f,:v,:t,:at,:c)",
+        {"f": row["finding_id"], "v": version, "t": json.dumps({key: row.get(key) for key in _TARGET_FIELDS}),
+         "at": now, "c": row.get("completed_at")}, conn=conn)
+
+
+def _append_outcome(row, conn):
+    payload = {key: row.get(key) for key in _OUTCOME_FIELDS}
+    previous = appdb.run_query("SELECT outcome FROM action_outcome_history WHERE finding_id=:f AND target_version=:v ORDER BY id DESC LIMIT 1",
+                              {"f": row["finding_id"], "v": row["target_version"]}, conn=conn)
+    # Pending/blocked status repeated in successive scans is not a new event.
+    if previous and all(json.loads(previous[0]["outcome"]).get(k) == payload[k]
+                        for k in _OUTCOME_FIELDS if k != "outcome_checked_at"):
+        return
+    appdb.run_query("INSERT INTO action_outcome_history (finding_id,target_version,recorded_at,outcome) VALUES (:f,:v,:at,:o)",
+        {"f": row["finding_id"], "v": row["target_version"], "at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
+         "o": json.dumps(payload)}, conn=conn)
+    if row.get("case_id"):
+        from backend.app.services import case_engine
+        case_engine._log_history(row["case_id"], "outcome_measured", {
+            "finding_id": row["finding_id"], "target_version": row["target_version"], **payload,
+        }, conn=conn)
+
+
+def store_outcome(action, values):
+    """Publish the current projection and its versioned history atomically."""
+    with appdb.get_engine().begin() as conn:
+        row = appdb.run_query("SELECT * FROM finding_actions WHERE finding_id=:f", {"f": action["finding_id"]}, conn=conn)[0]
+        if row["target_version"] != action["target_version"] or row["status"] != "completed":
+            return False
+        values = {**values, "outcome_target_version": row["target_version"]}
+        if not values.keys() <= set(_OUTCOME_FIELDS):
+            raise ValueError("Unknown outcome field")
+        assignments = ", ".join(f"{key}=:{key}" for key in values)
+        appdb.run_query(f"UPDATE finding_actions SET {assignments} WHERE finding_id=:f",
+                        {**values, "f": action["finding_id"]}, conn=conn)
+        _append_outcome({**row, **values}, conn)
+        return True
+
+
+def get_target_history(finding_id):
+    _ensure_schema()
+    versions = appdb.run_query("SELECT * FROM action_target_versions WHERE finding_id=:f ORDER BY version", {"f": finding_id})
+    outcomes = appdb.run_query("SELECT * FROM action_outcome_history WHERE finding_id=:f ORDER BY id", {"f": finding_id})
+    return [{**v, "target": json.loads(v["target"]),
+             "outcomes": [json.loads(o["outcome"]) for o in outcomes if o["target_version"] == v["version"]]}
+            for v in versions]
 
 
 def _is_overdue(deadline: str | None, status: str) -> bool:
@@ -182,10 +256,9 @@ def set_action(
     definition -- target_unit is ALWAYS derived from
     intelligence.METRICS[target_metric_id].unit server-side, never
     trusted from a caller, so a target can't be recorded against the
-    wrong unit (see Task 2d review, scenario K). completed_at is set
-    ONCE, the first time status becomes 'completed' -- distinct from
-    updated_at, which changes on every edit, and never overwritten by a
-    later edit that keeps status='completed'.
+    wrong unit. completed_at is stable within a completion cycle. Reopening
+    clears the current completion and preserves it on the superseded target
+    version. A changed target starts a new version and measurement window.
 
     conn is optional -- omitted, this opens/commits its own connection as
     always; passed (an active transaction from get_engine().begin()), this
@@ -194,25 +267,36 @@ def set_action(
     save_action_with_verification, which needs this row's write and its
     decision-snapshot history entry to succeed or fail together)."""
     _ensure_schema()
+    if conn is None:
+        arguments = locals().copy()
+        with appdb.get_engine().begin() as transaction:
+            arguments["conn"] = transaction
+            return set_action(**arguments)
     if status not in STATUSES:
         raise ValueError(f"Unknown status: {status}")
     if action_kind is not None and action_kind not in ACTION_KINDS:
         raise ValueError(f"Unknown action_kind: {action_kind}")
 
     existing_rows = appdb.run_query(
-        "SELECT completed_at FROM finding_actions WHERE finding_id=:f", {"f": finding_id}, conn=conn,
+        "SELECT * FROM finding_actions WHERE finding_id=:f", {"f": finding_id}, conn=conn,
     )
-    existing_completed_at = existing_rows[0]["completed_at"] if existing_rows else None
+    existing = existing_rows[0] if existing_rows else {}
+    existing_completed_at = existing.get("completed_at")
+    reopened = existing.get("status") == "completed" and status != "completed"
     if status == "completed":
-        completed_at = existing_completed_at or datetime.utcnow().isoformat()
+        completed_at = existing_completed_at or datetime.now(UTC).replace(tzinfo=None).isoformat()
     else:
-        completed_at = existing_completed_at
+        completed_at = None
 
     target_unit = None
     target_baseline_value = None
     measurement_period = None
     has_target = target_metric_id is not None
+    if not has_target and (target_value is not None or target_comparison is not None):
+        raise ValueError("A target value/comparison requires target_metric_id.")
     if has_target:
+        if target_value is not None and not math.isfinite(target_value):
+            raise ValueError("Target must be a finite number.")
         if target_value is None or target_comparison is None:
             raise ValueError("target_metric_id requires target_value and target_comparison.")
         if target_comparison not in COMPARISONS:
@@ -227,12 +311,43 @@ def set_action(
         if measurement_period == "weekly" and metric.short_term_trend_sql is None:
             raise ValueError(f"{target_metric_id} doesn't support weekly outcome measurement; use monthly.")
         if target_baseline_relative:
-            if measurement_period == "weekly":
+            same_target = all((existing.get(key) or False) == value for key, value in (
+                ("target_metric_id", target_metric_id), ("target_value", target_value),
+                ("target_comparison", target_comparison), ("target_baseline_relative", True),
+                ("target_measurement_period", measurement_period),
+            ))
+            if same_target:
+                target_baseline_value = existing.get("target_baseline_value")
+            elif measurement_period == "weekly":
                 weekly_trend, _as_of = intelligence.get_trailing_trend(metric)
                 target_baseline_value = weekly_trend[-1]["value"] if weekly_trend else None
             else:
                 non_partial = [r for r in intelligence.get_trend(metric) if not r.get("is_partial")]
                 target_baseline_value = non_partial[-1]["value"] if non_partial else None
+            if target_baseline_value is None:
+                raise ValueError("A relative target requires a measured baseline.")
+
+    target = dict(zip(_TARGET_FIELDS, (
+        target_metric_id, target_value, target_comparison, target_unit,
+        int(target_baseline_relative), target_baseline_value, measurement_period,
+    ))) if has_target else {key: existing.get(key) for key in _TARGET_FIELDS}
+    signature = [key for key in _TARGET_FIELDS if key != "target_baseline_value"]
+    changed = has_target and any(target[key] != existing.get(key) for key in signature)
+    if not changed and existing:
+        target_baseline_value = existing.get("target_baseline_value")
+        target["target_baseline_value"] = target_baseline_value
+    new_version = bool(target.get("target_metric_id")) and (changed or reopened)
+    now = datetime.now(UTC).replace(tzinfo=None).isoformat()
+    if changed and existing and status == "completed":
+        completed_at = now  # a newly agreed target starts a new measurement cycle
+    if new_version:
+        if existing.get("target_version"):
+            appdb.run_query("UPDATE action_target_versions SET superseded_at=:at, completed_at=:c WHERE finding_id=:f AND version=:v",
+                {"at": now, "c": existing_completed_at, "f": finding_id, "v": existing["target_version"]}, conn=conn)
+        version = existing.get("target_version", 0) + 1
+        _insert_target_version({"finding_id": finding_id, "completed_at": completed_at, **target}, version, now, conn)
+    else:
+        version = existing.get("target_version", 0)
 
     appdb.run_query(
         """
@@ -287,10 +402,23 @@ def set_action(
             "target_measurement_period": measurement_period,
             "evidence_verified": None if evidence_verified is None else (1 if evidence_verified else 0),
             "evidence_version": evidence_version,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
         },
         conn=conn,
     )
+    appdb.run_query("UPDATE finding_actions SET target_version=:v WHERE finding_id=:f",
+                    {"v": version, "f": finding_id}, conn=conn)
+    if new_version:
+        resets = ", ".join(f"{key}=NULL" for key in _OUTCOME_FIELDS)
+        appdb.run_query(f"UPDATE finding_actions SET {resets} WHERE finding_id=:f", {"f": finding_id}, conn=conn)
+        appdb.run_query("UPDATE finding_actions SET outcome_status='pending' WHERE finding_id=:f", {"f": finding_id}, conn=conn)
+    if version and completed_at:
+        appdb.run_query("UPDATE action_target_versions SET completed_at=:c WHERE finding_id=:f AND version=:v",
+                        {"c": completed_at, "f": finding_id, "v": version}, conn=conn)
+    if (new_version or reopened) and (case_id or existing.get("case_id")):
+        from backend.app.services import case_engine
+        case_engine._log_history(case_id or existing["case_id"], "action_reopened" if reopened else "target_changed",
+            {"finding_id": finding_id, "target_version": version, "prior_completed_at": existing_completed_at}, conn=conn)
 
 
 def _action_row_to_dict(row: dict, include_finding_id: bool = False) -> dict:
@@ -305,6 +433,8 @@ def _action_row_to_dict(row: dict, include_finding_id: bool = False) -> dict:
         "completed_at": row.get("completed_at"),
         "intended_result": row.get("intended_result"),
         "target_metric_id": row.get("target_metric_id"),
+        "target_version": row.get("target_version", 0),
+        "outcome_target_version": row.get("outcome_target_version"),
         "target_value": row.get("target_value"),
         "target_comparison": row.get("target_comparison"),
         "target_unit": row.get("target_unit"),
@@ -350,7 +480,8 @@ def get_actions_for_case(case_id: str) -> list[dict]:
         "SELECT * FROM finding_actions WHERE case_id = :case_id ORDER BY updated_at ASC",
         {"case_id": case_id},
     )
-    return [_action_row_to_dict(row, include_finding_id=True) for row in rows]
+    return [{**_action_row_to_dict(row, include_finding_id=True),
+             "target_history": get_target_history(row["finding_id"])} for row in rows]
 
 
 def get_latest_action_for_cases(case_ids: list[str]) -> dict[str, dict]:

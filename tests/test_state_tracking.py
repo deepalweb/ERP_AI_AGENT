@@ -4,7 +4,9 @@ fresh every scan instead of following a calendar period."""
 
 from datetime import date, timedelta
 
-from backend.app.services import finding_actions, state_tracking as st
+from backend.app.services import finding_actions
+from backend.app.services import state_tracking as st
+from mcp_server.tools.measurement import observation
 
 TODAY = date.today()
 
@@ -35,8 +37,8 @@ def test_record_new_findings_does_not_reopen_or_overwrite_existing_open_row(appd
 def test_finding_absent_from_todays_scan_resolves_immediately_as_improved(appdb_reset):
     st.record_new_findings([_finding("stock_availability", 12)])
     # Resolved well before check_after_date (7 days out) -- absence itself
-    # is the signal, no need to wait.
-    st.check_outcomes([])  # today's scan no longer produces this metric at all
+    # plus successful explicit coverage is the signal, no need to wait.
+    st.check_outcomes([], measurements=[observation("stock_availability", "snapshot", "measured_healthy")])  # today's scan no longer produces this metric at all
     rows = st.get_tracking_history()
     assert rows[0]["status"] == "resolved"
     assert rows[0]["verdict"] == "improved"
@@ -89,14 +91,14 @@ def test_worsened_outcome_is_not_marked_resolved(appdb_reset):
 def test_action_status_during_run_is_captured_on_resolution(appdb_reset):
     st.record_new_findings([_finding("stock_availability", 12)])
     finding_actions.set_action("stock_availability-" + TODAY.isoformat(), True, "in_progress", None)
-    st.check_outcomes([])
+    st.check_outcomes([], measurements=[observation("stock_availability", "snapshot", "measured_healthy")])
     rows = st.get_tracking_history()
     assert rows[0]["action_status_during_run"] == "in_progress"
 
 
 def test_a_recurring_problem_after_full_resolution_opens_a_fresh_row(appdb_reset):
     st.record_new_findings([_finding("stock_availability", 12)])
-    st.check_outcomes([])  # resolves it
+    st.check_outcomes([], measurements=[observation("stock_availability", "snapshot", "measured_healthy")])  # resolves it
     st.record_new_findings([_finding("stock_availability", 8)])  # flagged again later
     rows = st.get_tracking_history()
     assert len(rows) == 2

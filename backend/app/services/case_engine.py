@@ -26,6 +26,7 @@ same-day-observation dedupe and the verification-window count.
 """
 
 import json
+import math
 import os
 import uuid
 from contextlib import contextmanager
@@ -37,7 +38,7 @@ from sqlalchemy.exc import IntegrityError
 
 from backend.app.db import appdb
 from backend.app.services import related_signals
-from mcp_server.tools import intelligence
+from mcp_server.tools import intelligence, measurement
 
 GRACE_PERIOD_DAYS = 30  # how far back a closed case is still considered for recurrence/reopen matching
 VERIFICATION_WINDOW = 2  # consecutive fresh, clean cadence units required before auto-resolving
@@ -186,6 +187,7 @@ def _ensure_schema():
     # retrospective "recovered"/"captured" for a case closed before this
     # distinction existed -- see Phase 2d's migration notes.
     for column in (
+        "last_measurement TEXT",
         "resolution_verdict TEXT",
         "objective_metric_id TEXT",
         "objective_target_value REAL",
@@ -194,6 +196,7 @@ def _ensure_schema():
         "objective_baseline_relative INTEGER",
         "objective_baseline_value REAL",
         "objective_source_finding_id TEXT",
+        "objective_target_version INTEGER",
     ):
         try:
             appdb.run_query(f"ALTER TABLE business_cases ADD COLUMN {column}")
@@ -463,13 +466,19 @@ def _touch_case(case: dict, finding: dict, scope_status: str, scope_segments: li
     through the same verification path as any other active case."""
     now = datetime.utcnow().isoformat()
     reverting = case["status"] == "verification_pending"
+    changes = {key: {"before": case.get(key), "after": finding.get(key)}
+               for key in ("category", "priority", "business_impact_score")
+               if case.get(key) != finding.get(key)}
+    if changes:
+        _log_history(case["case_id"], "case_changed", changes)
     reset_sql = ", status='open', verification_progress=0, last_verified_period=NULL" if reverting else ""
     appdb.run_query(
-        "UPDATE business_cases SET last_seen_at=:t, category=:cat, priority=:pr, "
+        "UPDATE business_cases SET last_seen_at=:t, category=:cat, priority=:pr, resolution_policy=:policy, "
         f"business_impact_score=:bi, scope_status=:ss, scope_segments=:seg{reset_sql} WHERE case_id=:id",
         {
             "t": now,
             "cat": finding.get("category"),
+            "policy": _RESOLUTION_POLICY_NAME.get(finding.get("category"), "problem_recovery"),
             "pr": finding.get("priority"),
             "bi": finding.get("business_impact_score"),
             "ss": scope_status,
@@ -485,11 +494,12 @@ def _reopen_case(case_id: str, finding: dict, scope_status: str, scope_segments:
     now = datetime.utcnow().isoformat()
     appdb.run_query(
         "UPDATE business_cases SET status='reopened', closed_at=NULL, dismissed_reason=NULL, "
-        "verification_progress=0, last_verified_period=NULL, last_seen_at=:t, category=:cat, "
+        "verification_progress=0, last_verified_period=NULL, last_seen_at=:t, category=:cat, resolution_policy=:policy, "
         "priority=:pr, business_impact_score=:bi, scope_status=:ss, scope_segments=:seg WHERE case_id=:id",
         {
             "t": now,
             "cat": finding.get("category"),
+            "policy": _RESOLUTION_POLICY_NAME.get(finding.get("category"), "problem_recovery"),
             "pr": finding.get("priority"),
             "bi": finding.get("business_impact_score"),
             "ss": scope_status,
@@ -520,6 +530,19 @@ def _record_observation(case_id: str, scan_run_id: str, finding: dict) -> None:
     unlike observed_at (wall-clock time) it is guaranteed distinct
     between the morning's and an afternoon's same-day rescan even if both
     happen to land in the same clock tick (see verify_evidence_version)."""
+    previous = appdb.run_query(
+        "SELECT snapshot FROM case_observations WHERE case_id=:c ORDER BY observed_at DESC LIMIT 1",
+        {"c": case_id},
+    )
+    if previous:
+        old = json.loads(previous[0]["snapshot"])
+        keys = ("confirm", "root_cause", "impact")
+        changed = [key for key in keys if old.get(key) != finding.get(key)]
+        if changed:
+            _log_history(case_id, "evidence_changed", {
+                "fields": changed, "before": {key: old.get(key) for key in changed},
+                "after": {key: finding.get(key) for key in changed},
+            })
     appdb.run_query(
         """
         INSERT INTO case_observations (case_id, scan_run_id, finding_id, observed_at, snapshot)
@@ -551,11 +574,9 @@ def _current_cadence_unit(horizon: str, metric_id: str, scan_run_id: str, data_f
     data_fresh is False -- the underlying order data itself is stale (see
     brain._data_freshness), so an "absent" finding today might just be a
     re-observation of the same stale snapshot as yesterday, not a real
-    new measurement. An incomplete/failed source is a stronger version of
-    the same problem, and is already handled one level up: a raised
-    exception aborts the whole scan before sync_cases() is ever called
-    (see brain._compute_daily_brief's ordering), so this function is only
-    ever reached with a successfully-completed scan's output."""
+    new measurement. sync_cases requires complete, fresh, explicitly healthy
+    coverage before this cadence gate is reached. Monthly verification uses
+    the period in that receipt, not a second query that could see newer data."""
     if horizon == "monthly":
         metric = intelligence.METRICS.get(metric_id)
         if metric is None:
@@ -610,6 +631,12 @@ class OpportunityPolicy:
 
     def resolve(self, case: dict) -> str | None:
         if case.get("objective_source_finding_id"):
+            action = appdb.run_query("SELECT * FROM finding_actions WHERE finding_id=:f",
+                                     {"f": case["objective_source_finding_id"]})
+            if not action or action[0].get("case_id") != case["case_id"] or not action[0].get("relevant"):
+                return None
+            if case.get("objective_target_version") != action[0].get("target_version"):
+                return None  # target changed; a manager must designate the new version
             return _resolve_from_action_outcome(case["objective_source_finding_id"])
         if case.get("objective_metric_id"):
             return _resolve_case_direct_objective(case)
@@ -746,6 +773,8 @@ def set_case_objective(case_id: str, metric_id: str, target_value: float, compar
     row in between -- the same class of race save_action_with_
     verification was already fixed against."""
     _ensure_schema()
+    if not math.isfinite(target_value):
+        raise ValueError("Target must be a finite number.")
     if comparison not in COMPARISONS:
         raise ValueError(f"Unknown comparison: {comparison}")
     metric = intelligence.METRICS.get(metric_id)
@@ -768,11 +797,13 @@ def set_case_objective(case_id: str, metric_id: str, target_value: float, compar
             else:
                 non_partial = [r for r in intelligence.get_trend(metric) if not r.get("is_partial")]
                 baseline_value = non_partial[-1]["value"] if non_partial else None
+            if baseline_value is None:
+                raise ValueError("A relative objective requires a measured baseline.")
 
         appdb.run_query(
             "UPDATE business_cases SET objective_metric_id=:m, objective_target_value=:t, objective_comparison=:c, "
             "objective_unit=:u, objective_baseline_relative=:br, objective_baseline_value=:bv, "
-            "objective_source_finding_id=NULL WHERE case_id=:id",
+            "objective_source_finding_id=NULL, objective_target_version=NULL WHERE case_id=:id",
             {"m": metric_id, "t": target_value, "c": comparison, "u": metric.unit,
              "br": 1 if baseline_relative else 0, "bv": baseline_value, "id": case_id},
         )
@@ -792,23 +823,33 @@ def designate_case_objective_from_action(case_id: str, finding_id: str) -> None:
     _ensure_schema()
     _ensure_finding_actions_schema()
     with _case_write_lock():
-        if get_case(case_id) is None:
+        case = get_case(case_id)
+        if case is None:
             raise ValueError(f"No such case: {case_id}")
         rows = appdb.run_query("SELECT * FROM finding_actions WHERE finding_id=:f", {"f": finding_id})
         if not rows:
             raise ValueError(f"No such action: {finding_id}")
         action = rows[0]
+        if action.get("case_id") != case_id:
+            raise ValueError("The objective action must belong to this case.")
+        if not action.get("relevant"):
+            raise ValueError("The objective action must be relevant to this case.")
+        if case["category"] != "opportunity" or case["horizon"] == "snapshot":
+            raise ValueError("Action objectives require a trend opportunity case.")
+        if (action.get("target_measurement_period") or "monthly") != case["horizon"]:
+            raise ValueError("The objective measurement cadence must match the case.")
         if not action.get("target_metric_id"):
             raise ValueError("This action has no validated target to designate as the case objective.")
 
         appdb.run_query(
             "UPDATE business_cases SET objective_metric_id=:m, objective_target_value=:t, objective_comparison=:c, "
             "objective_unit=:u, objective_baseline_relative=:br, objective_baseline_value=:bv, "
-            "objective_source_finding_id=:f WHERE case_id=:id",
+            "objective_source_finding_id=:f, objective_target_version=:version WHERE case_id=:id",
             {
                 "m": action["target_metric_id"], "t": action["target_value"], "c": action["target_comparison"],
                 "u": action["target_unit"], "br": action.get("target_baseline_relative"),
                 "bv": action.get("target_baseline_value"), "f": finding_id, "id": case_id,
+                "version": action["target_version"],
             },
         )
         _log_history(case_id, "objective_designated_from_action", {"finding_id": finding_id})
@@ -839,7 +880,7 @@ def correct_resolution(case_id: str, new_verdict: str, reason: str) -> None:
     _log_history(case_id, "resolution_corrected", {"old_verdict": old_verdict, "new_verdict": new_verdict, "reason": reason})
 
 
-def _advance_verification(case: dict, scan_run_id: str, data_fresh: bool) -> None:
+def _advance_verification(case: dict, scan_run_id: str, data_fresh: bool, measured_period: str | None = None) -> None:
     """Runs only for a case whose (metric_id, domain, horizon) was NOT
     matched by any finding this cycle -- i.e. it's no longer flagged.
     Rejects both of the auto-closure shortcuts this was reviewed against:
@@ -860,7 +901,8 @@ def _advance_verification(case: dict, scan_run_id: str, data_fresh: bool) -> Non
     metric side is already satisfied at that point, so what's left to
     change is purely whether the action's outcome has resolved since --
     which can happen days before the next calendar month rolls over."""
-    current_unit = _current_cadence_unit(case["horizon"], case["metric_id"], scan_run_id, data_fresh)
+    current_unit = (measured_period if case["horizon"] == "monthly" else
+                    _current_cadence_unit(case["horizon"], case["metric_id"], scan_run_id, data_fresh))
     if current_unit is None:
         return
 
@@ -995,11 +1037,28 @@ def save_ad_hoc_case(finding: dict) -> str:
     today = _business_today()
     scan_run_id = today.isoformat()
     horizon = finding.get("horizon") or "snapshot"
-    return _ingest_finding(finding, horizon, scan_run_id, today)
+    with _case_write_lock():
+        case_id = _ingest_finding(finding, horizon, scan_run_id, today)
+        _record_measurement(case_id, measurement.observation(
+            finding["metric_id"], horizon, "measured_actionable", scope=finding["metric_id"],
+            period=scan_run_id, reason="Manually measured scope; requires explicit remeasurement.",
+        ))
+        return case_id
+
+
+def _record_measurement(case_id: str, record: dict) -> None:
+    prior = get_case(case_id).get("last_measurement")
+    previous = json.loads(prior) if prior else {}
+    keys = ("measurement_status", "coverage", "freshness", "reason")
+    if any(previous.get(key) != record.get(key) for key in keys):
+        _log_history(case_id, "measurement_changed", record)
+    appdb.run_query("UPDATE business_cases SET last_measurement=:m WHERE case_id=:c",
+                    {"m": json.dumps(record), "c": case_id})
 
 
 def sync_cases(investigations: list[dict] = None, state_findings: list[dict] = None,
-                short_term_findings: list[dict] = None, data_fresh: bool = True) -> list[str]:
+                short_term_findings: list[dict] = None, data_fresh: bool = True,
+                measurements: list[dict] | None = None) -> list[str]:
     """Called once per daily scan (brain._compute_daily_brief, after every
     finding list is finalized). Mutates each finding in place with a
     'case_id' -- additive, so /brief's existing shape is unchanged for any
@@ -1030,6 +1089,11 @@ def sync_cases(investigations: list[dict] = None, state_findings: list[dict] = N
         key = (finding["metric_id"], finding.get("domain") or "unclassified", horizon)
         seen_keys.add(key)
         case_id = _ingest_finding(finding, horizon, scan_run_id, today)
+        record = finding.get("measurement") or measurement.observation(
+            finding["metric_id"], horizon, "measured_actionable", period=scan_run_id,
+            freshness="fresh" if data_fresh else "unknown",
+        )
+        _record_measurement(case_id, record)
         synced_case_ids.append(case_id)
 
     active_rows = appdb.run_query(f"SELECT * FROM business_cases WHERE status IN {_ACTIVE_STATUSES_SQL}")
@@ -1037,7 +1101,17 @@ def sync_cases(investigations: list[dict] = None, state_findings: list[dict] = N
         key = (case["metric_id"], case["domain"], case["horizon"])
         if key in seen_keys:
             continue  # already handled above as a continuation this cycle
-        _advance_verification(case, scan_run_id, data_fresh)
+        record = next((m for m in measurements or []
+                       if m["metric_id"] == case["metric_id"] and m["horizon"] == case["horizon"]), None)
+        record = dict(record) if record else measurement.observation(
+            case["metric_id"], case["horizon"], "not_remeasured", coverage="unknown",
+            freshness="unknown", reason="No successful measurement covers this case's scope.",
+        )
+        if not data_fresh and case["horizon"] != "monthly":
+            record.update(freshness="unknown", reason="Source freshness is not established.")
+        _record_measurement(case["case_id"], record)
+        if measurement.healthy([record], case["metric_id"], case["horizon"]):
+            _advance_verification(case, scan_run_id, data_fresh, record.get("period"))
 
     return synced_case_ids
 
@@ -1461,6 +1535,7 @@ def get_case_detail(case_id: str) -> dict | None:
             "impact": latest_snapshot.get("impact"),
             "how": latest_snapshot.get("how"),
             "recommendations": latest_snapshot.get("recommendations"),
+            "recommendation_generation": latest_snapshot.get("recommendation_generation"),
             "breakdowns": latest_snapshot.get("breakdowns"),
             # Celeste Investigate Phase 3 (revenue investigation): the
             # metric's own multi-month trend series -- already computed and
@@ -1516,7 +1591,9 @@ def get_case_detail(case_id: str) -> dict | None:
 
     return {
         "case": case,
-        "resolution_policy": {"name": case["resolution_policy"], "verification_window": VERIFICATION_WINDOW},
+        "resolution_policy": {"name": _RESOLUTION_POLICY_NAME.get(case["category"], "problem_recovery"), "verification_window": VERIFICATION_WINDOW},
+        "measurement": json.loads(case["last_measurement"]) if case.get("last_measurement") else None,
+        "verification_explanation": verification_explanation(case),
         "latest": latest,
         "observations": observations,
         "observations_note": OBSERVATIONS_NOTE,
@@ -1530,7 +1607,28 @@ def get_case_detail(case_id: str) -> dict | None:
 def get_case(case_id: str) -> dict | None:
     _ensure_schema()
     rows = appdb.run_query("SELECT * FROM business_cases WHERE case_id=:id", {"id": case_id})
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    rows[0]["resolution_policy"] = _RESOLUTION_POLICY_NAME.get(rows[0]["category"], "problem_recovery")
+    return rows[0]
+
+
+def verification_explanation(case):
+    if case["status"] == "resolved":
+        if case.get("resolution_verdict") == "recovered":
+            return "Condition recovered: the detector measured clean observations. This does not prove the underlying cause was resolved."
+        return "Closed under the case's objective policy; see the recorded outcome."
+    if case["status"] == "dismissed":
+        return "Dismissed by a manager; recovery has not been verified."
+    record = json.loads(case["last_measurement"]) if case.get("last_measurement") else {}
+    if record.get("measurement_status") == "measured_actionable":
+        return "Still open because the most recent measurement detected the condition."
+    if not measurement.healthy([record] if record else [], case["metric_id"], case["horizon"]):
+        return "Verification paused: " + (record.get("reason") or "this scope has not been successfully remeasured.")
+    if case["verification_progress"] >= VERIFICATION_WINDOW:
+        return "The condition cleared; awaiting the declared objective's measurement or designation of its current target version."
+    unit = "complete monthly period" if case["horizon"] == "monthly" else "fresh daily measurement"
+    return f"Awaiting the next {unit}; {case['verification_progress']} of {VERIFICATION_WINDOW} clean observations recorded."
 
 
 def get_case_observations(case_id: str) -> list[dict]:
