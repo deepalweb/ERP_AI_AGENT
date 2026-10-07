@@ -12,23 +12,16 @@ export const BANDS = [
  * area, with the active count at the right. Each row is a button, so the list works with
  * the keyboard and the bars carry the numbers in their titles. */
 export default function InvestigationDomains({ rows, selected, onSelect, loading, error, onRetry }) {
-  if (loading) return <p role="status" className="text-sm text-foreground-subtle">Loading business areas…</p>;
-  if (error || !rows) {
+  // "All domains" is always available, even while the per-area breakdown is loading or
+  // failed to load: it needs none of that data, and the page should never block the
+  // simplest, safest choice on a fetch that didn't succeed.
+  const allRow = (() => {
+    const all = scopeTotals(rows ?? [], "");
     return (
-      <div role="alert" className="text-sm text-warning">
-        Business-area summary unavailable.{" "}
-        <button type="button" className="underline" onClick={onRetry}>Retry</button>
-      </div>
-    );
-  }
-  const areas = domainBreakdown(rows).map((band) => ({ id: band.domain, label: band.label, ...band }));
-  const scale = Math.max(1, ...areas.map((a) => a.active + a.verification));
-  const all = scopeTotals(rows, "");
-  return (
-    <div className="space-y-2">
       <button
         type="button"
         aria-pressed={selected === ""}
+        aria-label="All domains"
         onClick={() => onSelect("")}
         className={`flex w-full flex-wrap items-baseline justify-between gap-2 rounded-lg px-3 py-2 text-left hover:bg-surface-sunken ${selected === "" ? "bg-accent-soft" : ""}`}
       >
@@ -37,6 +30,33 @@ export default function InvestigationDomains({ rows, selected, onSelect, loading
           <span className="text-base font-semibold tabular-nums text-foreground-strong">{formatNumber(all.active)}</span> open · <span className="text-critical">{formatNumber(all.urgent)} critical / high</span> · {formatNumber(all.verification)} verifying
         </span>
       </button>
+    );
+  })();
+
+  if (loading) {
+    return (
+      <div className="space-y-2">
+        {allRow}
+        <p role="status" className="text-sm text-foreground-subtle">Loading business areas…</p>
+      </div>
+    );
+  }
+  if (error || !rows) {
+    return (
+      <div className="space-y-2">
+        {allRow}
+        <div role="alert" className="text-sm text-warning">
+          Business-area summary unavailable.{" "}
+          <button type="button" className="underline" onClick={onRetry}>Retry</button>
+        </div>
+      </div>
+    );
+  }
+  const areas = domainBreakdown(rows).map((band) => ({ id: band.domain, label: band.label, ...band }));
+  const scale = Math.max(1, ...areas.map((a) => a.active + a.verification));
+  return (
+    <div className="space-y-2">
+      {allRow}
       {areas.map((area) => {
         const pressed = selected === area.id;
         return (
@@ -44,6 +64,7 @@ export default function InvestigationDomains({ rows, selected, onSelect, loading
             key={area.id}
             type="button"
             aria-pressed={pressed}
+            aria-label={`${area.label}: ${formatNumber(area.active)} active cases`}
             onClick={() => onSelect(area.id)}
             className={`grid w-full grid-cols-[minmax(0,12rem)_minmax(0,1fr)_2.5rem] items-center gap-3 rounded-lg px-3 py-1.5 text-left hover:bg-surface-sunken ${pressed ? "bg-accent-soft" : ""}`}
           >

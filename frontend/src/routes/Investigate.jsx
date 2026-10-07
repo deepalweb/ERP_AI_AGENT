@@ -82,7 +82,9 @@ export default function Investigate() {
   // have it silently reappear from a stale URL on the next render.
   const [searchParams, setSearchParams] = useSearchParams();
   const [metricId, setMetricId] = useState(() => searchParams.get("metric") || "");
-  const [showSignals, setShowSignals] = useState(false);
+  // Open by default (2026-10-01 decision: surface the in-progress period everywhere,
+  // not hidden behind a toggle) -- the user can still collapse it manually.
+  const [showSignals, setShowSignals] = useState(true);
   const [status, setStatus] = useState("active");
   const [domain, setDomain] = useState("");
   const [priority, setPriority] = useState("");
@@ -156,7 +158,7 @@ export default function Investigate() {
   }
   const familiesQuery = useQuery({ queryKey: ["management", "families"], queryFn: fetchManagementFamilies });
   const cases = summaryQuery.data?.status === "ok" ? summaryQuery.data.cases : null;
-  const families = familiesQuery.data?.status === "ok" ? familiesQuery.data.families : [];
+  const families = (familiesQuery.data?.status === "ok" ? familiesQuery.data.families : null) ?? [];
   const selectedFamily = families.find((family) => family.key === familyKey) ?? null;
 
   // Stable-referenced (not a fresh [] every render) so the useMemo hooks

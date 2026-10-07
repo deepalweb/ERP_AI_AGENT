@@ -27,15 +27,15 @@ test('domains summarize all cases and separate provisional signals from saved ev
     return route.fulfill({contentType:'application/json',body:JSON.stringify(body)});
   });
   await page.goto('/investigate');
-  const domains=page.getByRole('region',{name:'Investigation domains'});
+  const domains=page.getByRole('region',{name:'Business areas'});
   await expect(domains.getByRole('button',{name:'Revenue & Profitability: 25 active cases'})).toBeVisible();
-  await expect(domains.getByText('3 verifying · 9 resolved / dismissed')).toBeVisible();
-  await expect(page.getByRole('region',{name:'Business impact and duration'})).toHaveCount(0);
   await domains.getByRole('button',{name:'Revenue & Profitability: 25 active cases'}).click();
-  await expect(page.getByText('19 days',{exact:true})).toBeVisible();
-  await expect(page.getByText('2026-09-01 → 2026-09-20 · 2 saved observations',{exact:true})).toBeVisible();
-  await expect(page.getByRole('link',{name:/Stock exposure/})).toHaveCount(0);
-  await expect(page.getByRole('link',{name:/Revenue exposure/})).toHaveAttribute('href','/investigate/impact-1');
+  // Scope summary for the selected area replaces the old "Business impact and
+  // duration" panel (removed -- it duplicated the case detail page's own
+  // history/timing section; see CaseDetail.jsx's "Case history" block).
+  const summary=page.getByRole('region',{name:'Revenue & Profitability summary'});
+  await expect(summary.getByRole('button',{name:'Open cases 25'})).toBeVisible();
+  await expect(page.getByRole('region',{name:'Needs attention'}).getByText('3 cases awaiting verification')).toBeVisible();
   await expect.poll(()=>requests.at(-1)).toBe('financial');
   await expect(page.getByRole('link',{name:/Revenue declined/})).toHaveAttribute('href','/investigate/case-1');
   // Open by default now, filtered to the selected domain (2026-10-01: surfacing
@@ -48,9 +48,9 @@ test('domains summarize all cases and separate provisional signals from saved ev
   // open, just unfiltered now, so the previously-hidden Returns item appears.
   await expect(page.getByRole('article',{name:'Returns',exact:true})).toBeVisible();
   // The user can still manually collapse it; collapsing it is not forced on them.
-  await page.getByText('Early signals — current period',{exact:true}).click();
+  await page.getByText('Early signals',{exact:true}).click();
   await expect(page.getByRole('region',{name:'Current period investigations'})).toHaveCount(0);
-  await page.getByText('Early signals — current period',{exact:true}).click();
+  await page.getByText('Early signals',{exact:true}).click();
   await page.setViewportSize({width:390,height:844});
   await page.screenshot({path:'test-results/investigate-domains-mobile.png',fullPage:true});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();

@@ -66,7 +66,10 @@ async function mockBackend(page, { staleOnce = false } = {}) {
   await page.route("**/api/intelligence/current-period**", (route) => mockJson(route, emptyCurrentPeriod));
   await page.route(`**/api/cases?**`, (route) => {
     const status = new URL(route.request().url()).searchParams.get("status");
-    return mockJson(route, status && status !== "open" ? { status: "ok", items: [], total: 0, limit: 20, offset: 0 } : caseListFixture());
+    // "active" (open + reopened + verification_pending) is the page's long-standing
+    // default status filter, not "open" -- this mock predates that and only ever
+    // matched by accident of "open" being a substring check nobody noticed was wrong.
+    return mockJson(route, status && status !== "open" && status !== "active" ? { status: "ok", items: [], total: 0, limit: 20, offset: 0 } : caseListFixture());
   });
   await page.route(`**/api/cases/${CASE_ID}`, (route) => mockJson(route, caseDetailFixture({ actions: state.actions })));
 
