@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, ArrowLeft, MapPin } from "lucide-react";
 import {
   acceptRecommendation, designateCaseObjectiveFromAction, dismissCase, fetchCaseDetail, fetchMetricDefinitions,
-  reopenCase, updateFindingAction,
+  fetchTransferAccountability, reopenCase, updateFindingAction,
 } from "../api";
+import TransferAccountabilityPanel from "../design/TransferAccountabilityPanel";
+import TransferFilterBar from "../design/TransferFilterBar";
 import Badge, { toneForPriority } from "../design/Badge";
 import Button from "../design/Button";
 import { caseStatusMeta } from "../design/caseStatus";
@@ -15,6 +17,8 @@ import { caseEvolutionStages } from "../design/caseEvolution";
 import { OUTCOME_STATUS_META, OUTCOME_VERDICT_META, RESOLUTION_VERDICT_TEXT } from "../design/outcomeStatus";
 import {
   additionalObservationsText, baselineVolatilityCaution, controlsExecutiveText, controlsResolutionText,
+  transferDiscrepancyExecutiveText, transferDiscrepancyNextDecisionText,
+  extremeEventExecutiveText, extremeEventNextDecisionText,
   decisionPromptText, evidenceRollupText, financialImpactText, headlineFor, metricSnapshotText, negativeStockText,
 } from "../design/plainLanguage";
 import InvestigationResults from "../design/InvestigationResults";
@@ -25,6 +29,9 @@ import StockCountInvestigationPanel from "../design/StockCountInvestigationPanel
 import ControlsInvestigationPanel from "../design/ControlsInvestigationPanel";
 import CompletedVarianceInvestigationPanel from "../design/CompletedVarianceInvestigationPanel";
 import IncidentInvestigationPanel from "../design/IncidentInvestigationPanel";
+import TransferDiscrepancyInvestigationPanel from "../design/TransferDiscrepancyInvestigationPanel";
+import ExtremeEventInvestigationPanel from "../design/ExtremeEventInvestigationPanel";
+import InventoryCaseView from "../design/InventoryCaseView";
 import SupplierInvestigationPanel from "../design/SupplierInvestigationPanel";
 import { BusinessBrief, CaseStatusPanel, EvidenceKnowledge, PrimaryMetricStrip, TechnicalDetails } from "../design/CaseVisuals";
 import { primaryMetricsFor } from "../design/caseTemplates";
@@ -525,7 +532,7 @@ export default function CaseDetail() {
   const { caseId } = useParams();
   const queryClient = useQueryClient();
   const detailQuery = useQuery({ queryKey: ["caseDetail", caseId], queryFn: () => fetchCaseDetail(caseId) });
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const targetAction = searchParams.get("action");
   useEffect(() => {
     if (targetAction && detailQuery.data) document.getElementById(`action-${targetAction}`)?.scrollIntoView({ block: "center" });
@@ -535,6 +542,32 @@ export default function CaseDetail() {
   // entirely from this, never a hardcoded or guessed metric list. Rarely
   // changes, so a plain query with no case-specific key is fine.
   const metricsQuery = useQuery({ queryKey: ["metricDefinitions"], queryFn: fetchMetricDefinitions });
+  // Accountability filters live in the page URL, so a filtered view can be shared and the back button works.
+  const accountabilityFilters = {
+    outlet: searchParams.getAll("outlet"),
+    product: searchParams.getAll("product"),
+    person: searchParams.getAll("person"),
+    from: searchParams.get("from") ?? "",
+    to: searchParams.get("to") ?? "",
+    recurring: searchParams.get("recurring") === "1",
+  };
+  const updateAccountabilityFilters = (next) => setSearchParams((prev) => {
+    const params = new URLSearchParams(prev);
+    for (const key of ["outlet", "product", "person", "from", "to", "recurring"]) params.delete(key);
+    for (const id of next.outlet) params.append("outlet", id);
+    for (const key of next.product) params.append("product", key);
+    for (const who of next.person) params.append("person", who);
+    if (next.from) params.set("from", next.from);
+    if (next.to) params.set("to", next.to);
+    if (next.recurring) params.set("recurring", "1");
+    return params;
+  }, { replace: true });
+  const accountabilityQuery = useQuery({
+    queryKey: ["management", "transfer-accountability", accountabilityFilters],
+    queryFn: () => fetchTransferAccountability(accountabilityFilters),
+    placeholderData: keepPreviousData,
+    enabled: detailQuery.data?.case?.metric_id?.startsWith?.("transfer_discrepancy_") || detailQuery.data?.case?.metric_id?.startsWith?.("extreme_event_") || false,
+  });
 
   function refresh() {
     return Promise.all([
@@ -770,6 +803,11 @@ export default function CaseDetail() {
   // product/hour (incident_s{store_id}_p{product_id}_h{hour}) -- never a
   // fixed string, so it can't be matched like the ones above.
   const isIncidentCase = typeof c.metric_id === "string" && c.metric_id.startsWith("incident_");
+  // transfer_discrepancy synthesizes a scope-specific metric_id per outlet/
+  // reason (transfer_discrepancy_s{store_id}_{reason}) -- same convention
+  // as incident_engine's isIncidentCase above.
+  const isTransferDiscrepancyCase = typeof c.metric_id === "string" && c.metric_id.startsWith("transfer_discrepancy_");
+  const isExtremeEventCase = typeof c.metric_id === "string" && c.metric_id.startsWith("extreme_event_");
   const isControlsCase = c.domain === "controls";
   const isSupplierCase = c.domain === "supplier";
   const hasTrendResults = ["monthly", "weekly"].includes(c.horizon) && latest && (latest.confirm?.baseline != null || latest.trend?.length || latest.breakdowns?.length || latest.how?.stages?.length);
@@ -780,12 +818,80 @@ export default function CaseDetail() {
   // existing generic text is always the fallback, never silently blank.
   const controlsExecText = isControlsCase ? controlsExecutiveText(latest) : null;
   const controlsResText = isControlsCase ? controlsResolutionText(latest, c.status) : null;
+  const transferDiscrepancyExecText = isTransferDiscrepancyCase ? transferDiscrepancyExecutiveText(latest) : null;
+  // Same "don't duplicate a real recommendation" rule nextDecision already
+  // follows (see its own comment below) -- only fills in when there's no
+  // real recommendation action to show instead.
+  const transferDiscrepancyDecision = isTransferDiscrepancyCase && !latest?.recommendations?.[0]?.action
+    ? transferDiscrepancyNextDecisionText(latest, c.status) : null;
+  const extremeEventExecText = isExtremeEventCase ? extremeEventExecutiveText(latest) : null;
+  const extremeEventDecision = isExtremeEventCase && !latest?.recommendations?.[0]?.action
+    ? extremeEventNextDecisionText(latest, c.status) : null;
 
   // Case Detail V3's Primary Metric Strip: one finding-type-specific KPI
   // row (design/caseTemplates.js) instead of a fixed 4-card shape forced
   // onto every metric -- see that file for what each type gets. Empty for
   // a controls case (its own panel already has this row -- see below).
   const primaryMetrics = primaryMetricsFor({ c, latest, statusLabel: statusMeta.label });
+
+  const isInventoryCase = c.domain === "inventory";
+  const followUpBlock = (
+          <Section title="Management follow-up">
+            {actions?.length > 0 ? (
+              <div className="space-y-4">
+                {actions.map((action) => (
+                  <ExistingCaseAction
+                    key={action.finding_id}
+                    action={action}
+                    staleWarning={staleWarning}
+                    onUpdate={handleUpdateAction}
+                    metrics={metricsQuery.data?.metrics ?? []}
+                    caseId={caseId}
+                    onDesignateObjective={handleDesignateObjective}
+                    confirmStaleSave={confirmStaleSave}
+                    reviewFreshEvidence={reviewFreshEvidence}
+                  />
+                ))}
+              </div>
+            ) : latest?.finding_id ? (
+              // A brand-new case has no finding_actions row for anything yet
+              // -- without this, there was no way to record a FIRST action
+              // on a case at all (found via the Phase 2e post-acceptance
+              // browser test). latest.finding_id is the most recent
+              // evidence's own finding id (see case_engine._summarize_
+              // snapshot), the same id an action save would resolve to this
+              // case through (case_engine.get_case_id_for_finding). Routed
+              // through the same ExistingCaseAction as a real row (not a
+              // bare ActionTracker) so the stale-evidence banner -- which
+              // only that wrapper renders -- still works on a first save;
+              // an earlier version of this fallback used ActionTracker
+              // directly and silently dropped that warning (also found via
+              // the browser test).
+              <div>
+                <p className="text-sm text-foreground-subtle">No management action recorded yet.</p>
+                <div className="mt-2">
+                  <ExistingCaseAction
+                    action={{ ...DEFAULT_NEW_ACTION, finding_id: latest.finding_id }}
+                    staleWarning={staleWarning}
+                    onUpdate={handleUpdateAction}
+                    metrics={metricsQuery.data?.metrics ?? []}
+                    caseId={caseId}
+                    onDesignateObjective={handleDesignateObjective}
+                    confirmStaleSave={confirmStaleSave}
+                    reviewFreshEvidence={reviewFreshEvidence}
+                  />
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-foreground-subtle">No action recorded yet.</p>
+            )}
+          </Section>
+  );
+
+  const periodTrendBlock = ["monthly", "weekly"].includes(c.horizon) ? (<>
+        <CurrentPeriodInvestigations metricId={c.metric_id} />
+        <p className="mt-4 text-sm text-foreground-subtle">Saved case evidence below: {formatConfirmPeriod(latest?.confirm?.period)}. Actions and targets below use that saved evidence, separately from the provisional current-period check.</p>
+</>) : null;
 
   return (
     <div className="workspace-page case-detail-page">
@@ -832,6 +938,8 @@ export default function CaseDetail() {
         />
       </div>
 
+      {!isInventoryCase && (
+<>
       <section className="panel mt-4 p-4" aria-label="Measurement and verification">
         <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
           <span>Last verification check: <strong>{detailQuery.data.measurement?.observed_at ? fmtDateTime(detailQuery.data.measurement.observed_at) : "Not recorded"}</strong></span>
@@ -847,11 +955,10 @@ export default function CaseDetail() {
           </details>
         )}
       </section>
+</>
+      )}
 
-      {["monthly", "weekly"].includes(c.horizon) && <>
-        <CurrentPeriodInvestigations metricId={c.metric_id} />
-        <p className="mt-4 text-sm text-foreground-subtle">Saved case evidence below: {formatConfirmPeriod(latest?.confirm?.period)}. Actions and targets below use that saved evidence, separately from the provisional current-period check.</p>
-      </>}
+      {!isInventoryCase && periodTrendBlock}
 
       {/* 2. Business brief -- what happened, why uncertain, impact, and a
           standalone next-decision line. controlsExecText overrides the
@@ -859,21 +966,32 @@ export default function CaseDetail() {
           nextDecision is the same for every case type (a real
           recommendation when one exists, else the generic decision
           prompt). */}
+      {!isInventoryCase && (
+<>
       {(controlsExecText || genericBrief) && (
         <div className="mt-4">
           <Section title="Business brief">
-            <BusinessBrief brief={controlsExecText || genericBrief} nextDecision={nextDecision} />
+            <BusinessBrief
+              brief={controlsExecText || transferDiscrepancyExecText || extremeEventExecText || genericBrief}
+              nextDecision={transferDiscrepancyDecision ?? extremeEventDecision ?? nextDecision}
+            />
           </Section>
         </div>
+      )}
+</>
       )}
 
       {/* 3. Primary metrics -- one finding-type-specific KPI row (see
           design/caseTemplates.js), empty for a controls case since its own
           panel below already has one. */}
+      {!isInventoryCase && (
+<>
       {primaryMetrics.length > 0 && (
         <div className="mt-4">
           <PrimaryMetricStrip cards={primaryMetrics} />
         </div>
+      )}
+</>
       )}
 
       {/* Investigation + decision, side by side: what happened/what we
@@ -881,6 +999,23 @@ export default function CaseDetail() {
           the right (the deciding half) -- Case Detail V4's management-
           flow layout, replacing the earlier equal-weighted vertical stack
           of same-width cards. */}
+      {isInventoryCase ? (
+        <InventoryCaseView
+          latest={latest}
+          primaryMetrics={primaryMetrics}
+          nextDecision={transferDiscrepancyDecision ?? extremeEventDecision ?? nextDecision}
+          followUp={followUpBlock}
+          trendNode={periodTrendBlock}
+          measurement={detailQuery.data.measurement}
+          verificationText={detailQuery.data.verification_explanation || "Awaiting a successful measurement of this case scope."}
+          accountabilityNode={accountabilityQuery.data ? <TransferAccountabilityPanel data={accountabilityQuery.data} /> : null}
+          transferView={accountabilityQuery.data?.options ? {
+            filters: accountabilityFilters,
+            options: accountabilityQuery.data.options,
+            filterBar: <TransferFilterBar options={accountabilityQuery.data.options} value={accountabilityFilters} onChange={updateAccountabilityFilters} />,
+          } : null}
+        />
+      ) : (
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-12">
         <div className="flex min-w-0 flex-col gap-4 lg:col-span-8">
           {/* Investigation content -- rendered directly, no "Visual
@@ -889,7 +1024,7 @@ export default function CaseDetail() {
               at all; a metric with neither renders nothing here rather
               than an empty labeled box. */}
           {(isStuckStockCount || isInventoryStockOut || isRevenueCase || isCompletedVarianceCase || isIncidentCase
-            || isControlsCase || isSupplierCase || (!hasTrendResults && trendPoints.length > 1)) && (
+            || isTransferDiscrepancyCase || isExtremeEventCase || isControlsCase || isSupplierCase || (!hasTrendResults && trendPoints.length > 1)) && (
             <Section title={isControlsCase ? "Control investigation" : "Investigation"}>
               {isStuckStockCount ? (
                 <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
@@ -901,6 +1036,10 @@ export default function CaseDetail() {
                 <CompletedVarianceInvestigationPanel latest={latest} />
               ) : isIncidentCase ? (
                 <IncidentInvestigationPanel latest={latest} />
+              ) : isTransferDiscrepancyCase ? (
+                <TransferDiscrepancyInvestigationPanel latest={latest} />
+              ) : isExtremeEventCase ? (
+                <ExtremeEventInvestigationPanel latest={latest} />
               ) : isControlsCase ? (
                 <ControlsInvestigationPanel latest={latest} statusLabel={statusMeta.label} />
               ) : isSupplierCase ? (
@@ -959,56 +1098,7 @@ export default function CaseDetail() {
 
           {/* Was "Actions taken (N)" -- a manager's own next step, not a
               log entry; relabeled to read as a follow-up prompt. */}
-          <Section title="Management follow-up">
-            {actions?.length > 0 ? (
-              <div className="space-y-4">
-                {actions.map((action) => (
-                  <ExistingCaseAction
-                    key={action.finding_id}
-                    action={action}
-                    staleWarning={staleWarning}
-                    onUpdate={handleUpdateAction}
-                    metrics={metricsQuery.data?.metrics ?? []}
-                    caseId={caseId}
-                    onDesignateObjective={handleDesignateObjective}
-                    confirmStaleSave={confirmStaleSave}
-                    reviewFreshEvidence={reviewFreshEvidence}
-                  />
-                ))}
-              </div>
-            ) : latest?.finding_id ? (
-              // A brand-new case has no finding_actions row for anything yet
-              // -- without this, there was no way to record a FIRST action
-              // on a case at all (found via the Phase 2e post-acceptance
-              // browser test). latest.finding_id is the most recent
-              // evidence's own finding id (see case_engine._summarize_
-              // snapshot), the same id an action save would resolve to this
-              // case through (case_engine.get_case_id_for_finding). Routed
-              // through the same ExistingCaseAction as a real row (not a
-              // bare ActionTracker) so the stale-evidence banner -- which
-              // only that wrapper renders -- still works on a first save;
-              // an earlier version of this fallback used ActionTracker
-              // directly and silently dropped that warning (also found via
-              // the browser test).
-              <div>
-                <p className="text-sm text-foreground-subtle">No management action recorded yet.</p>
-                <div className="mt-2">
-                  <ExistingCaseAction
-                    action={{ ...DEFAULT_NEW_ACTION, finding_id: latest.finding_id }}
-                    staleWarning={staleWarning}
-                    onUpdate={handleUpdateAction}
-                    metrics={metricsQuery.data?.metrics ?? []}
-                    caseId={caseId}
-                    onDesignateObjective={handleDesignateObjective}
-                    confirmStaleSave={confirmStaleSave}
-                    reviewFreshEvidence={reviewFreshEvidence}
-                  />
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-foreground-subtle">No action recorded yet.</p>
-            )}
-          </Section>
+          {followUpBlock}
 
           {/* Resolution -- stays visible (this is part of "was it
               resolved", not audit trail); the business objective and any
@@ -1094,12 +1184,13 @@ export default function CaseDetail() {
             </summary>
             <p className="mt-2 text-sm text-foreground-subtle">{priorityReasoning(latest)}</p>
             <p className="mt-2 text-xs text-foreground-subtle">
-              Internal priority score: {c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "not scored"}
+              Attention score (ranking only, not a financial figure): {c.business_impact_score != null ? Number(c.business_impact_score).toFixed(1) : "not scored"}
               {" "}-- for Celeste's own case ranking only, never a currency figure or a probability.
             </p>
           </details>
         </div>
       </div>
+      )}
 
       {/* 10. History and technical details, collapsed by default -- case
           evolution, where/when/scope, full audit log, and observation

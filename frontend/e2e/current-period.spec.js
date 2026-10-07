@@ -19,6 +19,9 @@ test("September is visible with matched dates, unavailable sources and explicit 
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
   await page.goto("/investigate");
+  await page.getByRole("button", { name: "All domains", exact: true }).click();
+  // Open by default now (2026-10-01: surfacing the in-progress month everywhere,
+  // not just on Home) -- no click needed to reveal it.
   const region = page.getByRole("region", { name: "Current period investigations" });
   await expect(region.getByText("Provisional", { exact: true })).toBeVisible();
   await expect(region.getByText("Source unavailable", { exact: true })).toBeVisible();
