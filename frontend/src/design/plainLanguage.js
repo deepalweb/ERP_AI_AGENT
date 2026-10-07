@@ -58,6 +58,28 @@ export function headlineFor(finding) {
   return `This just showed up — ${urgency}.`;
 }
 
+/** Maps a confirmed check's own `source` field to the specific WHAT it
+ * establishes -- never the why. The docstring below predicted this: "If a
+ * future evidence check type ever emits 'confirmed' for something other
+ * than concentration, this function needs revisiting alongside it." That
+ * happened twice since (2026-10-01, caught on the exact scenario a manager
+ * asked about live): incident_engine.py's time_lock/sku_cause/persistence
+ * checks and transfer_discrepancy.py's recurrence check all emit
+ * "confirmed" for claims that are not concentration at all. Before this,
+ * evidenceRollupText unconditionally said "confirms where this is
+ * concentrated" for EVERY confirmed check regardless of source -- for a
+ * transfer_discrepancy case (recurrence-only, no concentration check even
+ * exists) that produced a flatly wrong executive sentence. Unrecognized/
+ * future sources fall back to a generic-but-still-honest phrase rather than
+ * silently mislabeling them as concentration again. */
+function confirmedClaimFor(source) {
+  if (source?.endsWith("_concentration")) return "where this is concentrated";
+  if (source === "recurrence" || source === "persistence") return "that this is a recurring pattern, not an isolated event";
+  if (source === "time_lock") return "that the spike is tied to a specific hour, not spread evenly across the day";
+  if (source === "sku_cause") return "that the pattern is specific to this product, not general";
+  return "part of what the evidence shows";
+}
+
 /** One deterministic sentence on what the evidence has and hasn't
  * established — same verdict vocabulary confidenceLabelFor (SignalCard.jsx)
  * already uses for a single badge, extended here to a full sentence for the
@@ -72,35 +94,27 @@ export function headlineFor(finding) {
  * settled cause -- exactly the overclaim this app is designed to avoid.
  *
  * Visual Investigation V2, Phase 1 (confirmed regression, caught on the real
- * stuck_stock_count case, but structural everywhere): a "confirmed" verdict
- * in this app is EXCLUSIVELY produced by the concentration checks
- * (segment_concentration_checks / current_total_concentration_checks) --
- * evidence_engine.py's own module docstring states this twice, once for the
- * vocabulary itself ("'confirmed' (own-breakdown concentration only...)")
- * and once for the sibling corroboration check ("cross_metric_corroboration_
- * checks never emits 'confirmed'... co-location... is evidence of an
- * affected segment, not evidence of a cause"). So "confirmed" always means
- * WHERE the move is concentrated, never WHY it happened -- the previous
- * wording ("the underlying cause is confirmed") collapsed those two
- * different claims into one. If a future evidence check type ever emits
- * "confirmed" for something other than concentration, this function needs
- * revisiting alongside it. */
+ * stuck_stock_count case, but structural everywhere): "confirmed" always
+ * means WHAT was established (confirmedClaimFor, above), never WHY it
+ * happened -- the previous wording ("the underlying cause is confirmed")
+ * collapsed those two different claims into one. */
 export function evidenceRollupText(rootCause) {
   const checks = rootCause?.checks;
   if (!checks || checks.length === 0) return "No evidence checks have been recorded yet.";
-  const confirmedCount = checks.filter((c) => c.verdict === "confirmed").length;
+  const confirmed = checks.filter((c) => c.verdict === "confirmed");
   const possibleCount = checks.filter((c) => c.verdict === "possible_contributor").length;
+  const claims = () => [...new Set(confirmed.map((c) => confirmedClaimFor(c.source)))].join(" and ");
 
-  if (confirmedCount === checks.length) {
-    return "The evidence confirms where this is concentrated; it does not establish why it happened.";
+  if (confirmed.length > 0 && confirmed.length === checks.length) {
+    return `The evidence confirms ${claims()}; it does not establish why it happened.`;
   }
-  if (confirmedCount > 0) {
-    return "The evidence confirms where part of this is concentrated; the rest, and why it happened, remain unconfirmed.";
+  if (confirmed.length > 0) {
+    return `The evidence confirms ${claims()}; the rest, and why it happened, remain unconfirmed.`;
   }
   if (possibleCount > 0) {
-    return "Possible contributing factors have been identified, but none is confirmed -- including where this is concentrated.";
+    return "Possible contributing factors have been identified, but none is confirmed yet.";
   }
-  return "Where this is concentrated, and why it happened, have not yet been established.";
+  return "What's driving this, and why it happened, have not yet been established.";
 }
 
 /** The executive conclusion's impact clause -- deliberately checks
@@ -282,6 +296,75 @@ export function controlsResolutionText(latest, status) {
   return null;
 }
 
+/** Incident cards (IncidentInvestigationPanel.jsx) showed the hourly
+ * pct-change but never the incident_score itself or which band it cleared --
+ * the one number incident_engine.py actually ranks and gates findings on
+ * (hourly z-score x product lift x sqrt(order count), then a persistence
+ * multiplier). Band cutoffs mirror incident_engine.py's own SCORE_CONFIRMED/
+ * SCORE_ESCALATE/SCORE_AUTO_ALERT constants -- restated here for the same
+ * cross-Python/JS-boundary reason baselineVolatilityCaution's Z_THRESHOLD
+ * is. SCORE_WATCHLIST (5) is omitted: build_incident_findings() only ever
+ * returns findings that already cleared SCORE_CONFIRMED (15), so a card can
+ * never actually be in the watchlist band. */
+const INCIDENT_SCORE_BANDS = [
+  { min: 200, label: "auto-alert tier" },
+  { min: 50, label: "escalation tier" },
+  { min: 15, label: "confirmed tier" },
+];
+
+export function incidentScoreText(score) {
+  if (score == null) return null;
+  const band = INCIDENT_SCORE_BANDS.find((b) => score >= b.min) ?? INCIDENT_SCORE_BANDS[INCIDENT_SCORE_BANDS.length - 1];
+  return `Incident score ${score.toFixed(1)} (${band.label}) -- one ranking number combining how unusual this `
+    + `hour is, how specific to this product, order volume, and how many days it has recurred. Not an external `
+    + `probability or a promise that a notification was sent.`;
+}
+
+/** transfer_discrepancy.py's cases fell through to the generic headline
+ * chain ("Detected in today's snapshot -- needs attention now") -- accurate
+ * but says nothing case-specific, when every number a manager actually
+ * needs (lines, units, days, Rs exposure, what's established vs. not) is
+ * already sitting on the finding. Same purpose-built-sentence pattern as
+ * controlsExecutiveText; returns null for anything that isn't this case
+ * type, so the generic chain stays the fallback. */
+export function transferDiscrepancyExecutiveText(latest) {
+  if (!latest || !latest.persistence) return null;
+  const { days_appeared, days_observed } = latest.persistence;
+  const lines = latest.confirm?.current;
+  const units = latest.impact?.units_affected;
+  const rs = latest.impact?.financial_impact_rs;
+  const outlets = latest.outlet_rows ?? [];
+  if (lines == null) return null;
+  const valuedPct = latest.impact?.valued_units_pct;
+  const exposure = rs != null && (valuedPct ?? 0) >= 50
+    ? `, with an estimated exposure of ${formatByUnit(rs, "currency")} at current catalog cost (${valuedPct}% of affected units had usable cost)`
+    : `, with value mostly not established (only ${valuedPct ?? 0}% of affected units have a usable catalog cost); rely on the unit count`;
+  const rated = outlets.filter((o) => o.unit_rate != null).sort((a, b) => b.unit_rate - a.unit_rate);
+  const top = rated[0];
+  const topText = top ? ` ${top.outlet.replace("Celeste Daily", "").replace(/^[\s-]+/, "").trim()} has the highest rate, at ${top.unit_rate}% of the units it received.` : "";
+  const excludedLines = latest.impact?.excluded_lines ?? 0;
+  const excludedText = excludedLines
+    ? ` ${formatNumber(excludedLines)} more line${excludedLines === 1 ? " is" : "s are"} on cancelled or not-yet-received receipts and excluded from these figures.`
+    : "";
+  return `${formatNumber(lines)} ${(latest.reason ?? "shortage").toLowerCase()} line${lines === 1 ? "" : "s"} `
+    + `${units != null ? `(${formatNumber(units)} units) ` : ""}were recorded at outlet receiving across ${outlets.length} outlet${outlets.length === 1 ? "" : "s"}. `
+    + `They fall on ${days_appeared} of the ${days_observed} days in the window that had a warehouse transfer${exposure}.`
+    + topText + excludedText
+    + " Where in the pick-load-transport-receive process the gap begins is not yet known.";
+}
+
+/** Counterpart to transferDiscrepancyExecutiveText -- a concrete next step
+ * instead of the generic "review the evidence" prompt, grounded only in
+ * fields already on the finding (the top affected product, if any). Never
+ * claims a cause; the ask is to compare records, not "investigate theft"
+ * or similar. Null for a closed case, same as decisionPromptText. */
+export function transferDiscrepancyNextDecisionText(latest, status) {
+  if (status !== "open" && status !== "reopened") return null;
+  const topProduct = latest?.breakdowns?.find((b) => b.dimension === "product")?.top_contributors?.[0]?.name?.split(" - Celeste Daily")[0];
+  return `Review the affected transfer records, comparing warehouse picking/loading quantities against outlet `
+    + `receiving records${topProduct ? ` -- starting with ${topProduct}, the most-affected product` : ""}.`;
+}
+
 export function baselineVolatilityCaution(confirm) {
   const Z_THRESHOLD = 1.5;
   const PCT_THRESHOLD = 15;
@@ -291,4 +374,116 @@ export function baselineVolatilityCaution(confirm) {
   return `This percentage was driven by the pct-change rule alone (z-score ${confirm.z_score.toFixed(2)}, `
     + `below the ${Z_THRESHOLD} significance threshold) -- the baseline months varied enough that the `
     + `percentage may overstate how unusual this period really was.`;
+}
+
+export function extremeEventExecutiveText(latest) {
+  const rows = latest?.extreme_rows;
+  if (!rows?.length) return null;
+  const units = rows.reduce((sum, r) => sum + r.recorded_qty, 0);
+  const outlets = latest.breakdowns?.find((b) => b.dimension === "outlet")?.top_contributors ?? [];
+  const products = latest.breakdowns?.find((b) => b.dimension === "product")?.top_contributors ?? [];
+  const cancelled = rows.filter((r) => r.receipt_status === "cancel").length;
+  const mismatched = rows.filter((r) => r.flags?.some((f) => f.startsWith("Quantity does not match"))).length;
+  const topOutlet = outlets[0];
+  const topProduct = products[0];
+  const parts = [
+    `${rows.length} transfer ${rows.length === 1 ? "line" : "lines"} recorded unusually large Missing Item shortages `
+      + `(${formatNumber(units)} units) across ${outlets.length} outlet${outlets.length === 1 ? "" : "s"} in the last 30 days.`,
+  ];
+  if (topOutlet) {
+    parts.push(`Most units are at ${topOutlet.name} (${formatNumber(topOutlet.current)} units)`
+      + (topProduct ? `, mainly ${topProduct.name.split(" - Celeste Daily")[0]} (${formatNumber(topProduct.current)} units).` : "."));
+  }
+  if (cancelled) parts.push(`${cancelled} ${cancelled === 1 ? "is" : "are"} on receipts Odoo shows as cancelled.`);
+  if (mismatched) parts.push(`${mismatched} record a quantity that does not match expected minus received.`);
+  parts.push("Whether these are real losses, and who sent the stock, is not established from this data.");
+  return parts.join(" ");
+}
+
+export function extremeEventNextDecisionText(latest, status) {
+  if (status !== "open" && status !== "reopened") return null;
+  const rows = latest?.extreme_rows ?? [];
+  const cancelled = rows.filter((r) => r.receipt_status === "cancel").length;
+  if (cancelled) {
+    return "Check the cancelled receipts first: confirm whether the goods arrived, starting with the largest line.";
+  }
+  const topProduct = latest?.breakdowns?.find((b) => b.dimension === "product")?.top_contributors?.[0]?.name?.split(/\s+-\s+(?:Celeste\b|SKU\b)/)[0];
+  return `Check the largest receipts against physical counts${topProduct ? `, starting with ${topProduct}` : ""}.`;
+}
+
+const shortName = (name) => (name ?? "").split(/\s+-\s+(?:Celeste\b|SKU\b)/)[0];
+const shortOutletName = (name) => (name ?? "").replace("Celeste Daily", "").replace(/^[\s-]+/, "").trim() || name;
+
+/** One-sentence answer for an inventory transfer case: what, where, what first. */
+export function inventoryAnswerText(latest) {
+  if (!latest) return null;
+  const rows = latest.extreme_rows ?? [];
+  const isExtreme = rows.length > 0;
+  const outlets = latest.outlet_rows ?? [];
+  const products = latest.breakdowns?.find((b) => b.dimension === "product")?.top_contributors ?? [];
+  const units = latest.impact?.units_affected;
+  const outletCount = isExtreme
+    ? new Set(rows.map((r) => r.outlet)).size
+    : outlets.length;
+  if (isExtreme) {
+    if (!rows.length) return null;
+    const largest = rows[0];
+    return `${formatNumber(rows.length)} unusually large Missing Item ${rows.length === 1 ? "line" : "lines"} `
+      + `affected ${formatNumber(units ?? 0)} units across ${outletCount} outlet${outletCount === 1 ? "" : "s"}; `
+      + `the largest is ${shortName(largest.product)} at ${shortOutletName(largest.outlet)}. `
+      + "Verify those receiving records first.";
+  }
+  if (!outlets.length) return null;
+  const lines = latest.confirm?.current ?? 0;
+  const reason = (latest.reason ?? "shortage").toLowerCase();
+  const rated = outlets.filter((o) => o.unit_rate != null).sort((a, b) => b.unit_rate - a.unit_rate);
+  const topRate = rated[0];
+  const topText = topRate ? `, highest discrepancy rate at ${shortOutletName(topRate.outlet)}` : "";
+  const productText = products.length >= 2
+    ? `most affected products are ${shortName(products[0].name)} and ${shortName(products[1].name)}`
+    : products.length === 1 ? `most affected product is ${shortName(products[0].name)}` : null;
+  return `${formatNumber(lines)} ${reason} ${lines === 1 ? "line" : "lines"} show ${formatNumber(units ?? 0)} units missing `
+    + `across ${outletCount} outlet${outletCount === 1 ? "" : "s"}${topText}`
+    + (productText ? `; ${productText}` : "")
+    + ". Review the largest receipts and receiving records first.";
+}
+
+/** Footer line: exposure at current catalog cost, with the valued share beside it. */
+export function inventoryExposureLine(latest) {
+  const amount = latest?.impact?.financial_impact_rs;
+  let coverage = latest?.impact?.valued_units_pct;
+  if (coverage == null && latest?.extreme_rows?.length) {
+    const total = latest.extreme_rows.reduce((sum, r) => sum + r.recorded_qty, 0);
+    const valued = latest.extreme_rows.filter((r) => r.unit_cost).reduce((sum, r) => sum + r.recorded_qty, 0);
+    coverage = total ? Math.round((valued / total) * 1000) / 10 : null;
+  }
+  const amountText = amount != null ? `Estimated exposure at current catalog cost: ${formatByUnit(amount, "currency")}` : "Exposure not quantified";
+  const coverageText = coverage != null ? ` · ${coverage}% of affected units valued` : "";
+  return `${amountText}${coverageText} · not confirmed loss`;
+}
+
+/** Type-specific next check for an inventory case. Null when the case type has no
+ * specific wording, so the caller keeps its own prompt. */
+export function inventoryNextCheckText(latest) {
+  if (!latest) return null;
+  const kind = latest.impact?.kind;
+  const topStore = latest.breakdowns?.find((b) => b.dimension === "store" || b.dimension === "outlet")?.top_contributors?.[0]?.name;
+  const storeText = topStore ? topStore.replace("Celeste Daily", "").replace(/^[\s-]+/, "").trim() : null;
+  if (kind === "products_out_of_stock") {
+    return "Check the highest-impact products first: confirm stock on hand against the last 7 days of sales, and reorder where cover is short.";
+  }
+  if (kind === "top_sellers_out_of_stock") {
+    const top = latest.breakdowns?.[0]?.top_contributors?.[0]?.name?.split(/\s+-\s+(?:Celeste\b|SKU\b)/)[0];
+    return `Check replenishment for these top sellers first${top ? `, starting with ${top}` : ""}: confirm the purchase order and its receiving status.`;
+  }
+  if (kind === "stuck_stock_count_value_at_risk") {
+    return `Finish or close the unfinished counts first${storeText ? `, starting with ${storeText}` : ""}: confirm which unscanned lines still have stock.`;
+  }
+  if (kind === "inventory_value_at_risk") {
+    return "Confirm whether the dead and overstocked lines can be sold, returned, or written off, starting with the largest lines.";
+  }
+  if (kind === "completed_stock_count_variance") {
+    return `Review the count sheets${storeText ? ` for ${storeText}` : ""} first: compare each counted quantity with the system quantity and check the receiving records for the same products.`;
+  }
+  return null;
 }

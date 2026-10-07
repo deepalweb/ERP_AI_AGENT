@@ -55,16 +55,13 @@ LIFT_GATE = 1.0  # a candidate below this isn't over-represented in cancellation
 
 SCORE_WATCHLIST = 5.0
 SCORE_CONFIRMED = 15.0
-SCORE_ESCALATE = 50.0
-SCORE_AUTO_ALERT = 200.0
 MAX_LLM_CALLS_PER_SCAN = 10  # bounds recommendation-call cost if many incidents qualify on the same day
 
 
+# Replayed over Mar-Oct 2026 (28 weekly dates): no score reached 50, so the
+# high/critical bands have no historical evidence yet. Every incident is
+# medium until a calibrated band is shown to mark a real jump in severity.
 def _priority_for_score(score: float) -> str:
-    if score >= SCORE_AUTO_ALERT:
-        return "critical"
-    if score >= SCORE_ESCALATE:
-        return "high"
     return "medium"
 
 
@@ -87,7 +84,8 @@ def _hourly_rates(as_of, window_start):
         JOIN sale_order_line sol ON sol.order_id = so.id
         JOIN product_product pp ON pp.id = sol.product_id
         JOIN product_template pt ON pt.id = pp.product_tmpl_id
-        WHERE so.store_id = ANY(:stores) AND so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)}
+        WHERE pt.type = 'consu'
+          AND so.store_id = ANY(:stores) AND so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)}
           AND so.date_order >= :window_start AND so.date_order <= :as_of
         GROUP BY 1, 2, 3, 4
         """,
@@ -279,8 +277,8 @@ def _generate_incident_recommendations(evidence: dict) -> list[dict]:
         return recommendation_schema.Recommendations()
 
 
-def build_incident_findings() -> list[dict]:
-    as_of = _as_of()
+def build_incident_findings(as_of=None) -> list[dict]:
+    as_of = as_of or _as_of()
     if as_of is None:
         return []
     window_start = as_of - timedelta(days=INCIDENT_WINDOW_DAYS)

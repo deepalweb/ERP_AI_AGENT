@@ -419,7 +419,10 @@ function CustomerRow({ row, expanded, onToggle }) {
       <tr className="cursor-pointer border-t border-border hover:bg-background" onClick={onToggle}>
         <td className="py-2 pr-2">
           <div className="font-medium text-foreground-strong">{row.name}</div>
-          <div className="text-xs text-foreground/50">
+          <div
+            className="text-xs text-foreground/50"
+            title="Confidence is based on how many orders this customer has, not on measured prediction accuracy -- this is a heuristic window, not a calibrated probability."
+          >
             {row.order_count} orders &middot; {row.confidence === "high" ? "High confidence" : "Moderate confidence"}
           </div>
         </td>

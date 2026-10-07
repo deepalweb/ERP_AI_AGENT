@@ -5,8 +5,8 @@ import {
   financialImpactText, metricSnapshotText, negativeStockText,
 } from "./plainLanguage.js";
 
-function check(verdict) {
-  return { source: verdict, verdict, detail: `a ${verdict} check` };
+function check(verdict, source = "store_concentration") {
+  return { source, verdict, detail: `a ${verdict} check` };
 }
 
 test("no root_cause at all is reported honestly, not invented as a cause", () => {
@@ -18,19 +18,36 @@ test("root_cause with an empty checks array is reported the same way, not as a c
   assert.equal(evidenceRollupText({ checks: [] }), "No evidence checks have been recorded yet.");
 });
 
-test("all checks confirmed: concentration is stated as fact, causation is explicitly not", () => {
-  // Regression (Visual Investigation V2, Phase 1): "confirmed" is exclusively
-  // produced by the concentration checks (evidence_engine.py's own
-  // docstring) -- it must never be reworded into "the cause is confirmed".
+test("all checks confirmed (concentration source): concentration is stated as fact, causation is explicitly not", () => {
+  // Regression (Visual Investigation V2, Phase 1): "confirmed" must never be
+  // reworded into "the cause is confirmed".
   const text = evidenceRollupText({ checks: [check("confirmed"), check("confirmed")] });
   assert.match(text, /confirms where this is concentrated/);
   assert.doesNotMatch(text, /cause is confirmed/);
   assert.doesNotMatch(text, /underlying cause is confirmed/);
 });
 
+test("REGRESSION (2026-10-01): a confirmed recurrence check (transfer_discrepancy.py) is never mislabeled as concentration", () => {
+  // The exact bug found live: a transfer_discrepancy case has ONLY a
+  // recurrence check (no concentration check exists for this case type at
+  // all), but evidenceRollupText used to unconditionally say "confirms
+  // where this is concentrated" for every confirmed check regardless of
+  // source -- a flatly wrong executive sentence for this case shape.
+  const text = evidenceRollupText({ checks: [check("confirmed", "recurrence")] });
+  assert.match(text, /confirms that this is a recurring pattern, not an isolated event/);
+  assert.doesNotMatch(text, /concentrated/);
+  assert.doesNotMatch(text, /cause is confirmed/);
+});
+
+test("REGRESSION (2026-10-01): incident_engine.py's time_lock/sku_cause/persistence confirmed checks are each labeled for what they actually establish, not concentration", () => {
+  assert.match(evidenceRollupText({ checks: [check("confirmed", "time_lock")] }), /tied to a specific hour/);
+  assert.match(evidenceRollupText({ checks: [check("confirmed", "sku_cause")] }), /specific to this product/);
+  assert.match(evidenceRollupText({ checks: [check("confirmed", "persistence")] }), /recurring pattern, not an isolated event/);
+});
+
 test("a mix of confirmed and unconfirmed checks does not overclaim full confirmation", () => {
   const text = evidenceRollupText({ checks: [check("confirmed"), check("no_evidence_found")] });
-  assert.match(text, /confirms where part of this is concentrated.*remain unconfirmed/);
+  assert.match(text, /confirms where this is concentrated.*remain unconfirmed/);
   assert.doesNotMatch(text, /cause is confirmed/);
 });
 
@@ -53,7 +70,7 @@ test("a mix of possible_contributor and no_evidence_found (no confirmed) still o
 
 test("only no_evidence_found / unknown / related_not_independent: nothing established, nothing invented", () => {
   const text = evidenceRollupText({ checks: [check("no_evidence_found"), check("unknown"), check("related_not_independent")] });
-  assert.equal(text, "Where this is concentrated, and why it happened, have not yet been established.");
+  assert.equal(text, "What's driving this, and why it happened, have not yet been established.");
 });
 
 test("financialImpactText: no impact object at all -> not quantified", () => {

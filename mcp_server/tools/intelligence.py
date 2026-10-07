@@ -65,7 +65,7 @@ class Dimension:
 class MetricDef:
     id: str
     label: str
-    unit: Literal["percent", "currency", "count"]
+    unit: Literal["percent", "currency", "count", "minutes"]
     direction: Direction
     trend_sql: str  # (month, numerator[, denominator]) across full history
     is_rate: bool = False
@@ -216,6 +216,170 @@ METRICS: dict[str, MetricDef] = {
                 """,
             ),
         ],
+    ),
+    "stockout_cancellation_rate": MetricDef(
+        id="stockout_cancellation_rate",
+        zero_baseline_threshold=5.0,
+        independence_reviewed=True,
+        label="Out-of-stock cancellation rate",
+        unit="percent",
+        direction="higher_is_bad",
+        is_rate=True,
+        impact_kind="lost_orders",
+        # Same base sale_order rows as cancellation_rate -- this is a SUBSET
+        # of it (only the cancel_info='Customer Request due to Out of
+        # Stock' cause), never independent corroboration of it.
+        independence_group="order_funnel",
+        # Outlet-operations investigation (2026-09-29): cancel_reason (what
+        # cancellation_rate's own "reason" breakdown above already uses) has
+        # essentially one real value in this data ("ITEM_ISSUE" on
+        # everything) -- cancel_info is the genuinely granular field, and
+        # checked live before registering this: "Customer Request due to
+        # Out of Stock" alone is 3,862 cancellations, by far the single
+        # largest cancellation cause in the whole business, bigger than
+        # every other reason combined. cancellation_rate's own blended
+        # number can't isolate this; a manager reading it has no way to
+        # tell how much of it is stock-outs specifically.
+        trend_sql=f"""
+            SELECT date_trunc('month', date_order) AS month,
+                   COUNT(*) FILTER (WHERE state = 'cancel' AND cancel_info = 'Customer Request due to Out of Stock') AS numerator,
+                   COUNT(*) AS denominator
+            FROM sale_order
+            WHERE state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND store_id IN {CELESTE_STORE_IDS}
+            GROUP BY 1 ORDER BY 1
+        """,
+        dimensions=[
+            Dimension(
+                id="store",
+                label="Store",
+                mode="rate",
+                sql=f"""
+                    SELECT COALESCE(rs.name, 'Unknown store') AS name,
+                           COUNT(*) FILTER (WHERE so.state = 'cancel' AND so.cancel_info = 'Customer Request due to Out of Stock') AS numerator,
+                           COUNT(*) AS denominator
+                    FROM sale_order so
+                    LEFT JOIN res_store rs ON rs.id = so.store_id
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND so.store_id IN {CELESTE_STORE_IDS}
+                      AND so.date_order >= :start AND so.date_order < :end
+                    GROUP BY rs.name
+                """,
+            ),
+            Dimension(
+                id="product",
+                label="Product",
+                mode="contribution",
+                sql=f"""
+                    SELECT pt.name->>'en_US' AS name, COUNT(*) AS value
+                    FROM sale_order_line sol
+                    JOIN sale_order so ON so.id = sol.order_id
+                    JOIN product_product pp ON pp.id = sol.product_id
+                    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                    WHERE so.state = 'cancel' AND so.cancel_info = 'Customer Request due to Out of Stock'
+                      AND so.store_id IN {CELESTE_STORE_IDS}
+                      AND so.date_order >= :start AND so.date_order < :end
+                    GROUP BY pt.name
+                """,
+            ),
+        ],
+        notes="Scoped to the single cancel_info value 'Customer Request due to Out of Stock' -- "
+        "the customer's own stated reason, not an inference. Domain-tagged as inventory, not "
+        "order_customer like cancellation_rate: the fix for this lives in stock availability, "
+        "not order handling.",
+    ),
+    "return_rate": MetricDef(
+        id="return_rate",
+        zero_baseline_threshold=5.0,
+        independence_reviewed=True,
+        label="Customer return rate",
+        unit="percent",
+        direction="higher_is_bad",
+        is_rate=True,
+        # Same order-funnel population as cancellation_rate/order_volume for
+        # its denominator -- not independent corroboration of them.
+        independence_group="order_funnel",
+        # Outlet-operations investigation (2026-09-29): checked live before
+        # registering -- non-supplier returns have grown every single month
+        # (11 -> 55 -> 131 -> 191 -> 221 -> 219), a real, worsening,
+        # company-wide trend, not noise. return_order has no direct
+        # sale_order link (it's warehouse-side, via operation_type_id ->
+        # stock_picking_type -> warehouse_id -> res_store, the same
+        # multi-brand-per-warehouse fan-out documented in loss_and_damage.py)
+        # -- rate is computed against that same month/store's total
+        # confirmed order count, not a per-order join.
+        trend_sql=f"""
+            WITH orders AS (
+                SELECT date_trunc('month', date_order) AS month, COUNT(*) AS total
+                FROM sale_order
+                WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
+                GROUP BY 1
+            ),
+            returns AS (
+                SELECT date_trunc('month', ro.date) AS month, COUNT(DISTINCT ro.id) AS n
+                FROM return_order ro
+                JOIN stock_picking_type spt ON spt.id = ro.operation_type_id
+                JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+                WHERE rs.id IN {CELESTE_STORE_IDS} AND NOT ro.is_supplier_return
+                GROUP BY 1
+            )
+            SELECT o.month AS month, COALESCE(r.n, 0) AS numerator, o.total AS denominator
+            FROM orders o LEFT JOIN returns r ON r.month = o.month
+            ORDER BY 1
+        """,
+        dimensions=[
+            Dimension(
+                id="store",
+                label="Store",
+                mode="rate",
+                sql=f"""
+                    WITH orders AS (
+                        SELECT rs.name AS outlet, COUNT(*) AS total
+                        FROM sale_order so LEFT JOIN res_store rs ON rs.id = so.store_id
+                        WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
+                          AND so.date_order >= :start AND so.date_order < :end
+                        GROUP BY rs.name
+                    ),
+                    returns AS (
+                        SELECT rs.name AS outlet, COUNT(DISTINCT ro.id) AS n
+                        FROM return_order ro
+                        JOIN stock_picking_type spt ON spt.id = ro.operation_type_id
+                        JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+                        WHERE rs.id IN {CELESTE_STORE_IDS} AND NOT ro.is_supplier_return
+                          AND ro.date >= :start AND ro.date < :end
+                        GROUP BY rs.name
+                    )
+                    SELECT o.outlet AS name, COALESCE(r.n, 0) AS numerator, o.total AS denominator
+                    FROM orders o LEFT JOIN returns r ON r.outlet = o.outlet
+                """,
+            ),
+            # 2026-10-01: return_order itself has no reason/cause field anywhere in
+            # this schema (checked live) -- only return_order_line.product_id, so
+            # "by reason" isn't buildable, only "by product". Contribution (a raw
+            # line count per product), not rate -- there's no clean per-product
+            # order-count denominator the way the store dimension has one.
+            Dimension(
+                id="product",
+                label="Product",
+                mode="contribution",
+                sql=f"""
+                    SELECT pt.name->>'en_US' AS name, COUNT(*) AS value
+                    FROM return_order_line rol
+                    JOIN return_order ro ON ro.id = rol.order_id
+                    JOIN stock_picking_type spt ON spt.id = ro.operation_type_id
+                    JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+                    JOIN product_product pp ON pp.id = rol.product_id
+                    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                    WHERE rs.id IN {CELESTE_STORE_IDS} AND NOT ro.is_supplier_return
+                      AND ro.date >= :start AND ro.date < :end
+                    GROUP BY pt.name
+                """,
+            ),
+        ],
+        notes="Non-supplier returns (91% of all returns in this data) only -- excludes returns to "
+        "a supplier, which are a purchasing concern, not a customer/fulfillment one. Rate is "
+        "against that period's total confirmed order count, not a per-order match to a specific "
+        "return (return_order has no direct sale_order link in this schema). The product "
+        "breakdown is a count of return lines, not a return rate per product -- there's no "
+        "reason/cause field recorded anywhere in this schema to break down by.",
     ),
     "revenue": MetricDef(
         id="revenue",
@@ -383,6 +547,68 @@ METRICS: dict[str, MetricDef] = {
         ],
         notes="Delay measured against the picking's scheduled_date; only gaps over 24h count "
         "as 'delayed' — the typical processing gap is a few minutes and isn't meaningful lateness.",
+        # dispatch_wait_minutes (below) is mechanically derived from the same
+        # stock_picking rows this metric reads -- a long dispatch wait is one
+        # direct contributor to date_done landing late. Not independent
+        # corroboration of each other; both sides of the pair are marked.
+        independence_group="delivery_pipeline",
+    ),
+    "dispatch_wait_minutes": MetricDef(
+        id="dispatch_wait_minutes",
+        independence_reviewed=True,
+        independence_group="delivery_pipeline",
+        label="Average wait for dispatch after packing",
+        unit="minutes",
+        direction="higher_is_bad",
+        # Outlet-operations investigation (2026-09-29): stage-timing data
+        # already existed (operations.STAGE_TIMING_BY_STORE_SQL), but was
+        # only ever computed reactively, as a "how" explanation attached
+        # AFTER delayed_delivery_rate had already flagged a store -- never
+        # its own tracked metric. Checked live before registering: dispatch
+        # wait is 3-5x longer than picking+handoff+packing combined at every
+        # outlet (5.8-7.9 real minutes vs. under 3 for the rest of the
+        # pipeline) -- the dominant, currently-invisible-unless-something-
+        # else-triggers-a-look delay stage, not a minor one.
+        trend_sql=f"""
+            SELECT date_trunc('month', so.dispatch_datetime) AS month,
+                   PERCENTILE_CONT(0.5) WITHIN GROUP (
+                       ORDER BY EXTRACT(EPOCH FROM (so.dispatch_datetime - so.packing_datetime)) / 60
+                   ) AS numerator
+            FROM sale_order so
+            WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
+              AND so.dispatch_datetime IS NOT NULL AND so.packing_datetime IS NOT NULL
+              AND so.dispatch_datetime >= so.packing_datetime
+            GROUP BY 1 ORDER BY 1
+        """,
+        dimensions=[
+            Dimension(
+                id="store",
+                label="Store",
+                # median, not mean -- a handful of bad timestamps (a real
+                # data-quality issue found while building this: one month's
+                # average was distorted to 4,670 minutes by outliers, vs. a
+                # real ~18-22 elsewhere) would otherwise swing an average
+                # wildly. Same choice operations.STAGE_TIMING_BY_STORE_SQL
+                # already made for the same underlying columns.
+                mode="contribution",
+                sql=f"""
+                    SELECT COALESCE(rs.name, 'Unknown store') AS name,
+                           PERCENTILE_CONT(0.5) WITHIN GROUP (
+                               ORDER BY EXTRACT(EPOCH FROM (so.dispatch_datetime - so.packing_datetime)) / 60
+                           ) AS value
+                    FROM sale_order so LEFT JOIN res_store rs ON rs.id = so.store_id
+                    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
+                      AND so.dispatch_datetime IS NOT NULL AND so.packing_datetime IS NOT NULL
+                      AND so.dispatch_datetime >= so.packing_datetime
+                      AND so.dispatch_datetime >= :start AND so.dispatch_datetime < :end
+                    GROUP BY rs.name
+                """,
+            ),
+        ],
+        notes="Time between an order finishing packing and actually leaving for delivery -- "
+        "waiting on a rider/vehicle, not a picking or packing delay. Checked against real "
+        "data before registering: this is the single largest stage in the fulfillment "
+        "pipeline at every outlet, 3-5x picking+handoff+packing combined.",
     ),
     "uber_failure_rate": MetricDef(
         id="uber_failure_rate",
@@ -702,6 +928,27 @@ METRICS: dict[str, MetricDef] = {
                     WHERE po.state = 'purchase' AND po.price_difference_percent != 0
                       AND po.date_order >= :start AND po.date_order < :end
                     GROUP BY rp.name
+                """,
+            ),
+            # 2026-10-01: price_difference_percent is a PER-PO value, identical
+            # across every line of the same order (checked live) -- original_price_unit
+            # (which would give a true per-SKU price delta) is unpopulated in this
+            # data. So this counts, per product, how many lines it appeared on
+            # within a mismatched PO -- which products are most often bought via a
+            # price-mismatched PO, not the size of any per-SKU price jump.
+            Dimension(
+                id="product",
+                label="Product",
+                mode="contribution",
+                sql="""
+                    SELECT pt.name->>'en_US' AS name, COUNT(*) AS value
+                    FROM purchase_order_line pol
+                    JOIN purchase_order po ON po.id = pol.order_id
+                    JOIN product_product pp ON pp.id = pol.product_id
+                    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                    WHERE po.state = 'purchase' AND po.price_difference_percent != 0
+                      AND po.date_order >= :start AND po.date_order < :end
+                    GROUP BY pt.name
                 """,
             ),
         ],
@@ -1030,6 +1277,46 @@ def get_trailing_breakdown(dim: Dimension, as_of, moved_up: bool, window_days: i
         baseline_start.isoformat(), baseline_end.isoformat(), moved_up,
     )
     result["baseline_period_label"] = f"{baseline_start:%b %d} – {baseline_end:%b %d}"
+    return result
+
+
+def get_month_to_date_breakdown(dim: Dimension, moved_up: bool = True):
+    """Month-to-date counterpart to get_breakdown() -- 'current' is the
+    in-progress month from its 1st through the data's own latest point
+    (as_of), 'baseline' is the SAME elapsed portion of the prior month, not
+    the prior month in full. Same elapsed-time-matched principle
+    current_period.py already applies company-wide (see its own window_sql
+    docstring) -- this is that same comparison per segment, reusing each
+    MetricDef's existing dimension SQL unchanged (it already takes :start/
+    :end bind params for a full month; nothing stops it taking a partial-
+    month window instead). Built for OutletPerformancePanel (Home.jsx): a
+    raw month-to-date ranking would repeat the exact "partial month reads as
+    a decline" distortion get_trend()'s own is_partial flag exists to avoid
+    -- comparing the SAME elapsed window on both sides is what makes this
+    honest instead. as_of anchors to the data's own latest order (same
+    principle brain.py's data_freshness and get_trailing_trend both use),
+    never wall-clock time."""
+    rows = reporting.run_query(
+        "SELECT MAX(date_order) AS as_of FROM sale_order WHERE store_id = ANY(:stores)",
+        {"stores": list(CELESTE_STORE_IDS)},
+    )
+    as_of = rows[0]["as_of"] if rows else None
+    if as_of is None:
+        return {"dimension": dim.id, "label": dim.label, "mode": dim.mode, "top_contributors": [], "as_of": None}
+
+    current_start = as_of.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    current_end = as_of + timedelta(microseconds=1)
+    baseline_start = (current_start.replace(year=current_start.year - 1, month=12) if current_start.month == 1
+                       else current_start.replace(month=current_start.month - 1))
+    baseline_end = baseline_start + (current_end - current_start)
+
+    result = _rank_contributors(
+        dim, current_start.isoformat(), current_end.isoformat(),
+        baseline_start.isoformat(), baseline_end.isoformat(), moved_up,
+    )
+    result["as_of"] = as_of.isoformat()
+    result["period_start"] = current_start.isoformat()
+    result["baseline_period_label"] = f"{baseline_start:%b %d} - {baseline_end:%b %d}"
     return result
 
 

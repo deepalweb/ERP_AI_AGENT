@@ -36,6 +36,53 @@ export function primaryMetricsFor({ c, latest, statusLabel }) {
     ];
   }
 
+  if (c.metric_id.startsWith("extreme_event_")) {
+    // The card date is when the largest event happened, not when data was synced:
+    // the investigation sync time is shown in the page header instead.
+    const rows = latest?.extreme_rows ?? [];
+    const latestEvent = rows.map((r) => r.date).filter(Boolean).sort().pop();
+    return [
+      { label: "Unusual lines", value: formatNumber(latest?.confirm?.current) },
+      { label: "Units affected", value: formatNumber(latest?.impact?.units_affected) },
+      { label: "Latest event", value: latestEvent ?? "Not recorded", caption: "Date the most recent line was recorded" },
+      {
+        label: "Estimated exposure",
+        value: latest?.impact?.financial_impact_rs != null ? formatCurrency(latest.impact.financial_impact_rs) : "Not quantified",
+        caption: "At current catalog cost; not confirmed loss",
+      },
+    ];
+  }
+
+  if (c.metric_id.startsWith("transfer_discrepancy_")) {
+    // 2026-10-01, manager review: the generic 3-card fallback showed only
+    // "Current measurement: 34" (the line count) and spent a card slot on
+    // Status, which the header badge already shows. Units affected is
+    // arguably more operationally telling than the line count alone (34
+    // lines/294 units reads differently than 34 lines/34 units) -- both
+    // belong on the strip, and "Transfer days affected" makes the
+    // recurrence pattern a headline fact instead of only prose below.
+    return [
+      { label: "Discrepancy lines", value: formatNumber(latest.confirm?.current) },
+      {
+        label: "Missing units",
+        value: formatNumber(latest.impact?.units_affected),
+        caption: latest.impact?.unit_rate != null ? `${latest.impact.unit_rate}% of units received at outlets` : undefined,
+      },
+      { label: "Transfer days affected", value: latest.persistence ? `${latest.persistence.days_appeared} of last ${latest.persistence.days_observed}` : "—" },
+      {
+        label: "Estimated exposure",
+        value: latest.impact?.financial_impact_rs == null
+          ? "Not quantified"
+          : (latest.impact.valued_units_pct ?? 0) < 50
+            ? "Mostly unvalued"
+            : formatCurrency(latest.impact.financial_impact_rs),
+        caption: (latest.impact?.valued_units_pct ?? 0) < 50
+          ? `Only ${latest.impact?.valued_units_pct ?? 0}% of units have a usable cost; rely on units`
+          : `At current catalog cost, ${latest.impact?.valued_units_pct ?? 0}% of units valued; not confirmed loss`,
+      },
+    ];
+  }
+
   // Generic trend/snapshot fallback -- current measurement (+ change vs
   // baseline when one exists), financial impact, case status. This is the
   // same 4-field shape every metric without a dedicated slot above already

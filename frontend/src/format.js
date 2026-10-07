@@ -37,6 +37,7 @@ export function formatByUnit(value, unit) {
   if (value === null || value === undefined) return "n/a";
   if (unit === "currency") return formatCurrency(value);
   if (unit === "percent") return `${Number(value).toFixed(2)}%`;
+  if (unit === "minutes") return formatDuration(value);
   return formatNumber(value);
 }
 
