@@ -566,7 +566,10 @@ export default function CaseDetail() {
     queryKey: ["management", "transfer-accountability", accountabilityFilters],
     queryFn: () => fetchTransferAccountability(accountabilityFilters),
     placeholderData: keepPreviousData,
-    enabled: detailQuery.data?.case?.metric_id?.startsWith?.("transfer_discrepancy_") || detailQuery.data?.case?.metric_id?.startsWith?.("extreme_event_") || false,
+    enabled: detailQuery.data?.case?.metric_id?.startsWith?.("transfer_discrepancy_")
+      || detailQuery.data?.case?.metric_id?.startsWith?.("extreme_event_")
+      || detailQuery.data?.case?.metric_id === "dispatch_pattern"
+      || false,
   });
 
   function refresh() {

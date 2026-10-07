@@ -62,6 +62,18 @@ const RECORD_COLUMNS_DISPATCH = [
   { key: "receipt", label: "Receipt (in)" },
 ];
 
+const RECORD_COLUMNS_PATTERN = [
+  { key: "dispatcher", label: "Dispatcher", format: personLabel },
+  { key: "product", label: "Product", format: (v) => shortProduct(v) },
+  { key: "rate_pct", label: "Rate on this product", format: (v) => `${v}%` },
+  { key: "own_rate_pct", label: "Their own overall rate", format: (v) => `${v}%` },
+  { key: "ratio", label: "Times their own rate", format: (v) => (v == null ? "n/a" : `${v}x`) },
+  { key: "expected_units", label: "Handled", format: (v) => formatNumber(v) },
+  { key: "missing_units", label: "Missing", format: (v) => formatNumber(v) },
+  { key: "short_lines", label: "Short lines", format: (v) => formatNumber(v) },
+  { key: "outlets", label: "Outlets", format: (v) => formatNumber(v) },
+];
+
 const RECORD_COLUMNS_EXTREME = [
   { key: "date", label: "Date" },
   { key: "outlet", label: "Outlet", format: (v) => shortOutlet(v) },
@@ -121,6 +133,13 @@ function answerFor(latest) {
     return `${formatNumber(latest.impact.count)} outbound line(s) were sent well above their planned quantity`
       + (top ? `, led by ${shortProduct(top.name)} (${formatNumber(top.current)} units over plan)` : "")
       + ". Check the dispatch before treating the extra stock as real.";
+  }
+  if (kind === "dispatch_pattern") {
+    const top = topOf(latest.breakdowns?.find((b) => b.dimension === "person"));
+    return `${formatNumber(latest.impact.count)} dispatcher/product pattern(s) show a miss rate well above that `
+      + "person's own overall rate"
+      + (top ? `, led by ${personLabel(top.name)} (${formatNumber(top.current)} missing units)` : "")
+      + ". See the company-wide panel below to check the lines behind each pattern.";
   }
   return latest?.title ?? "No summary available for this case yet.";
 }
@@ -257,10 +276,11 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
   const isTransfer = TRANSFER_KINDS.has(kind) || (latest?.extreme_rows ?? []).length > 0;
   const isExtreme = (latest?.extreme_rows ?? []).length > 0;
   const isDispatchOverage = kind === "dispatch_over_plan";
+  const isDispatchPattern = kind === "dispatch_pattern";
   const transferFiltersOn = isTransfer && isFilterActive(transferView?.filters);
   const traceRows = isTransfer ? filterTraceRows(latest?.trace_rows ?? [], transferView?.filters, transferView?.options) : [];
   const transferSummary = transferFiltersOn ? summarizeTraceRows(traceRows) : null;
-  const records = isExtreme ? latest.extreme_rows : isDispatchOverage ? (latest.dispatch_rows ?? []) : traceRows;
+  const records = isExtreme ? latest.extreme_rows : isDispatchOverage ? (latest.dispatch_rows ?? []) : isDispatchPattern ? (latest.pattern_rows ?? []) : traceRows;
   const valueLine = valueLineFor(latest);
   const isMoney = MONEY_KINDS.has(kind);
   const storeBreakdown = latest?.breakdowns?.find((b) => b.dimension === "store" || b.dimension === "outlet");
@@ -288,16 +308,18 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
         )}
       </section>
 
-      {isTransfer && transferView?.filterBar && (
+      {(isTransfer || isDispatchPattern) && transferView?.filterBar && (
         <section aria-label="Filter this result" className="rounded-xl border border-border bg-surface p-4">
           <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-foreground-subtle">Filter this result</h2>
           {transferView.filterBar}
           <p className="mt-3 text-xs text-foreground-subtle">
-            {transferFiltersOn
+            {!isTransfer
+              ? "Filters apply to the company-wide panel below."
+              : transferFiltersOn
               ? `Showing ${formatNumber(traceRows.length)} of ${formatNumber(latest?.trace_rows?.length ?? 0)} lines in this finding, and the company-wide panel below. The headline figures above cover the whole finding.`
               : "Filters apply to the lines in this finding and to the company-wide panel below."}
           </p>
-          {transferFiltersOn && traceRows.length === 0 && <p className="mt-3 text-sm text-foreground">No lines in this finding match these filters.</p>}
+          {isTransfer && transferFiltersOn && traceRows.length === 0 && <p className="mt-3 text-sm text-foreground">No lines in this finding match these filters.</p>}
         </section>
       )}
 
@@ -334,7 +356,7 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
           const total = rows.reduce((sum, r) => sum + Math.abs(r.current ?? 0), 0);
           const isCover = rows.some((r) => r.days_of_cover != null);
           const valueOf = (r) => (isCover ? r.days_of_cover : r.current);
-          const valueHeader = isMoney ? "Value" : isCover ? "Days of cover" : isTransfer ? "Missing units" : isDispatchOverage ? "Units over plan" : "Units in stock";
+          const valueHeader = isMoney ? "Value" : isCover ? "Days of cover" : isTransfer ? "Missing units" : isDispatchOverage ? "Units over plan" : isDispatchPattern ? "Missing units" : "Units in stock";
           return (
             <div key={breakdown.label} className="mb-4 last:mb-0">
               <p className="mb-2 text-xs font-semibold text-foreground-subtle">{breakdown.label}</p>
@@ -344,7 +366,7 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
                     <tr>
                       <th className="pb-2 pr-3 font-medium">{breakdown.dimension === "product" ? "Product" : "Name"}</th>
                       <th className="pb-2 pr-3 text-right font-medium">{valueHeader}</th>
-                      {(isMoney || isTransfer || isDispatchOverage) && <th className="pb-2 pr-3 text-right font-medium">Share</th>}
+                      {(isMoney || isTransfer || isDispatchOverage || isDispatchPattern) && <th className="pb-2 pr-3 text-right font-medium">Share</th>}
                       {rows.some((r) => r.lines != null) && <th className="pb-2 text-right font-medium">Lines</th>}
                     </tr>
                   </thead>
@@ -353,7 +375,7 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
                       <tr key={`${r.name}-${r.sku ?? ""}`} className="border-t border-border">
                         <td className="py-1.5 pr-3 text-foreground">{shortProduct(r.name)}</td>
                         <td className="py-1.5 pr-3 text-right tabular-nums">{isMoney ? formatCurrency(r.current) : isCover ? formatNumber(valueOf(r)) : formatNumber(r.current)}</td>
-                        {(isMoney || isTransfer || isDispatchOverage) && <td className="py-1.5 pr-3 text-right tabular-nums">{total ? `${Math.round((Math.abs(r.current) / total) * 1000) / 10}%` : "n/a"}</td>}
+                        {(isMoney || isTransfer || isDispatchOverage || isDispatchPattern) && <td className="py-1.5 pr-3 text-right tabular-nums">{total ? `${Math.round((Math.abs(r.current) / total) * 1000) / 10}%` : "n/a"}</td>}
                         {rows.some((x) => x.lines != null) && <td className="py-1.5 text-right tabular-nums">{r.lines ?? ""}</td>}
                       </tr>
                     ))}
@@ -392,10 +414,10 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
 
       {records.length > 0 && (
         <details className="rounded-xl border border-border bg-surface p-4">
-          <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">View {isExtreme ? "receiving records" : isDispatchOverage ? "dispatch records, line by line" : "transfer trace, line by line"} ({formatNumber(records.length)})</summary>
+          <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">View {isExtreme ? "receiving records" : isDispatchOverage ? "dispatch records, line by line" : isDispatchPattern ? "dispatcher/product pairs" : "transfer trace, line by line"} ({formatNumber(records.length)})</summary>
           <div className="mt-3">
             <div className="overflow-x-auto">
-              <AffectedRecordTable columns={isExtreme ? RECORD_COLUMNS_EXTREME : isDispatchOverage ? RECORD_COLUMNS_DISPATCH : RECORD_COLUMNS_TRANSFER} rows={records} rowKey="id" />
+              <AffectedRecordTable columns={isExtreme ? RECORD_COLUMNS_EXTREME : isDispatchOverage ? RECORD_COLUMNS_DISPATCH : isDispatchPattern ? RECORD_COLUMNS_PATTERN : RECORD_COLUMNS_TRANSFER} rows={records} rowKey={isDispatchPattern ? "sku" : "id"} />
             </div>
           </div>
         </details>
@@ -420,6 +442,7 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
           {isTransfer && <p>Plan is the quantity on the transfer note, Sent is the quantity completed on that note, and Received is the quantity completed on the receipt. Planned by is the note creator. Sent by and Received by are the people who moved each Odoo record to Done, taken from its status history. They show who closed the record, not who physically carried the goods. Accounts marked shared are device or team logins, so the individual cannot be identified from this data.</p>}
           {isTransfer && <p>Discrepancy rates divide the units recorded missing by the units received over the same window, counting only received receipts. Estimated exposure uses the current catalog cost; lines without a cost are not valued.</p>}
           {isDispatchOverage && <p>This flags an outbound line sent at least 5x its planned quantity and at least 50 units over plan -- the top ~0.3% of all outbound lines by this measure over the last 6 months, not routine rounding. It does not establish whether the extra quantity is a real top-up, a picking error, or a unit mismatch on the transfer note.</p>}
+          {isDispatchPattern && <p>This flags a dispatcher's miss rate on one specific recurring product when it is at least 5% and at least 5x that dispatcher's own overall rate across everything else they handle, with at least 50 units handled on the pair. Raw concentration (one person sending most of a product) is not used: dispatchers are tied to fixed routes, so that is usually just who is on the route, not a behavior signal.</p>}
         </div>
       </details>
     </div>

@@ -34,6 +34,11 @@ export function titleFor(item) {
     if (outlets == null) return fallback;
     return `Sent far above plan · ${plural(outlets, "outlet")} · last 14 days`;
   }
+  if (id === "dispatch_pattern") {
+    const count = latest?.confirm?.current;
+    if (count == null) return fallback;
+    return `Dispatcher pattern on recurring products · ${plural(count, "pair")} · last 14 days`;
+  }
   if (kind === "top_sellers_out_of_stock") {
     if (impact.count == null || impact.total_top_sellers == null) return fallback;
     return `Top sellers out of stock · ${formatNumber(impact.count)} of ${formatNumber(impact.total_top_sellers)}`;
@@ -63,6 +68,7 @@ export function typeKeyFor(item) {
   const id = item.metric_id ?? "";
   if (item.category === "opportunity") return "opportunity";
   if (id.startsWith("extreme_event_") || id === "dispatch_sent_above_plan") return "extreme";
+  if (id === "dispatch_pattern") return "recurring";
   if (id.startsWith("incident_") || id.startsWith("transfer_discrepancy_")) return "recurring";
   if (id === "stuck_stock_count" || id === "completed_stock_count_variance") return "control";
   if (item.domain === "controls") return "control";

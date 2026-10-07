@@ -203,6 +203,8 @@ def family_for(item):
             return "transfer_damage"
     if metric_id == "dispatch_sent_above_plan":
         return "warehouse_dispatch_overage"
+    if metric_id == "dispatch_pattern":
+        return "warehouse_transfer_shortages"
     if metric_id in ("stock_availability", "top_seller_stock"):
         return "stock_availability"
     if metric_id in ("stuck_stock_count", "completed_stock_count_variance"):

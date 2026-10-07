@@ -1624,6 +1624,7 @@ def get_case_detail(case_id: str) -> dict | None:
             "transfer_rows": latest_snapshot.get("transfer_rows"),
             "trace_rows": latest_snapshot.get("trace_rows"),
             "dispatch_rows": latest_snapshot.get("dispatch_rows"),
+            "pattern_rows": latest_snapshot.get("pattern_rows"),
         }
 
     # Cross-domain investigation v1 (2026-09-27): computed fresh on every

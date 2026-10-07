@@ -26,7 +26,7 @@ from backend.app.services import (
     tracking,
     weekly_streaks,
 )
-from mcp_server.tools import dispatch_overage, extreme_event, incident_engine, investigation, measurement, state_findings, transfer_discrepancy
+from mcp_server.tools import dispatch_overage, dispatch_pattern, extreme_event, incident_engine, investigation, measurement, state_findings, transfer_discrepancy
 
 STALE_AFTER = timedelta(hours=24)
 
@@ -216,6 +216,7 @@ def _compute_daily_brief():
         transfer_discrepancy.build_transfer_discrepancy_findings(),
         extreme_event.build_extreme_event_findings(),
         dispatch_overage.build_dispatch_overage_findings(),
+        dispatch_pattern.build_dispatch_pattern_findings(),
     ])
     data_freshness = _data_freshness()
     if data_freshness.get("status") != "fresh":
