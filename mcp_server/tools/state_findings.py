@@ -163,6 +163,28 @@ def _stock_availability_finding():
             "top_contributors": by_outlet,
         }
     ]
+    # Stock position tag audit (2026-10-08): the recommendation above already
+    # names real products (alerts["top_out_of_stock"]) -- same fix as
+    # stuck_stock_count's product breakdown, closing the "What is driving it"
+    # dead end for this finding too. Grouped by product since the same SKU
+    # can appear once per affected outlet in this top-10-by-demand list;
+    # sold_30d (not a count) is the ranking value -- there's no Rs figure
+    # here, and lost DEMAND is the real magnitude question for a stockout.
+    by_product: dict[str, dict] = {}
+    for item in alerts.get("top_out_of_stock") or []:
+        p = by_product.setdefault(item["sku"] or item["name"], {"name": item["name"], "sold_30d": 0.0, "outlets": 0})
+        p["sold_30d"] += item["sold_30d"]
+        p["outlets"] += 1
+    if by_product:
+        product_rows = sorted(by_product.values(), key=lambda p: p["sold_30d"], reverse=True)
+        breakdowns.append({
+            "dimension": "product",
+            "label": "Out-of-stock top sellers, by recent demand",
+            "mode": "contribution",
+            "baseline_month": None,
+            "total": round(sum(p["sold_30d"] for p in product_rows), 2),
+            "top_contributors": [{"name": p["name"], "current": round(p["sold_30d"], 2), "delta": round(p["sold_30d"], 2)} for p in product_rows],
+        })
 
     evidence = evidence_engine.build_snapshot_evidence(breakdowns, alerts["as_of_date"])
     priority = "critical" if total_out >= 10 else "high"

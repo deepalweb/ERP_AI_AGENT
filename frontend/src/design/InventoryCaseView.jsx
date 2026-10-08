@@ -3,6 +3,7 @@ import RankedBarChart from "../charts/RankedBarChart";
 import { formatCurrency, formatNumber } from "../format";
 import { AffectedRecordTable, PrimaryMetricStrip } from "./CaseVisuals";
 import TransferFlowCharts from "./TransferFlowCharts";
+import { INVENTORY_TAGS, tagFor } from "./inventoryTags";
 import { inventoryAnswerText, inventoryExposureLine, inventoryNextCheckText } from "./plainLanguage";
 import { filterTraceRows, isFilterActive, summarizeTraceRows } from "./transferFilters";
 
@@ -13,7 +14,9 @@ const plainUnknown = (text) => {
   return stripped.charAt(0).toUpperCase() + stripped.slice(1);
 };
 
-const TRANSFER_KINDS = new Set(["transfer_discrepancy"]);
+// MONEY_KINDS stays a plain kind set, not tag-driven: it's a THIRD, orthogonal
+// axis (does this finding carry a real Rs figure) that cuts across tags --
+// WRITE_OFF and most of STOCK_POSITION are count-only, not money.
 const MONEY_KINDS = new Set(["stuck_stock_count_value_at_risk", "completed_stock_count_variance", "inventory_value_at_risk", "damage_writeoff"]);
 
 function formatWhen(value) {
@@ -128,7 +131,7 @@ function answerFor(latest) {
   const kind = latest?.impact?.kind;
   const stores = latest?.breakdowns?.find((b) => b.dimension === "store")?.top_contributors ?? [];
   const topStore = stores[0] ? `${shortOutlet(stores[0].name)} (${formatNumber(stores[0].current)})` : null;
-  if (TRANSFER_KINDS.has(kind) || (latest?.extreme_rows ?? []).length) return inventoryAnswerText(latest);
+  if (tagFor(latest?.metric_id, { hasExtremeRows: (latest?.extreme_rows ?? []).length > 0 }) === INVENTORY_TAGS.TRANSFER_TRACE) return inventoryAnswerText(latest);
   if (kind === "products_out_of_stock") {
     const products = latest.impact.distinct_products;
     return `${formatNumber(products)} products are out of stock at one or more stores (${formatNumber(latest.impact.count)} product-store stockouts)`
@@ -178,7 +181,7 @@ function answerFor(latest) {
 
 function valueLineFor(latest) {
   const kind = latest?.impact?.kind;
-  if (TRANSFER_KINDS.has(kind) || (latest?.extreme_rows ?? []).length) return inventoryExposureLine(latest);
+  if (tagFor(latest?.metric_id, { hasExtremeRows: (latest?.extreme_rows ?? []).length > 0 }) === INVENTORY_TAGS.TRANSFER_TRACE) return inventoryExposureLine(latest);
   if (kind === "stuck_stock_count_value_at_risk") {
     const v = latest.impact.valuation_coverage ?? {};
     const total = v.total_unscanned_lines ?? 0;
@@ -312,21 +315,23 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
   if (latest?.category === "opportunity") return <OpportunityView latest={latest} followUp={followUp} trendNode={trendNode} />;
 
   const kind = latest?.impact?.kind;
-  const isTransfer = TRANSFER_KINDS.has(kind) || (latest?.extreme_rows ?? []).length > 0;
-  const isExtreme = (latest?.extreme_rows ?? []).length > 0;
-  const isDispatchOverage = kind === "dispatch_over_plan";
-  const isDispatchPattern = kind === "dispatch_pattern";
-  // Both of these have a FEW named, wildly uneven records behind an
+  const hasExtremeRows = (latest?.extreme_rows ?? []).length > 0;
+  const tag = tagFor(latest?.metric_id, { hasExtremeRows });
+  const isTransfer = tag === INVENTORY_TAGS.TRANSFER_TRACE;
+  const isExtreme = isTransfer && hasExtremeRows;
+  const isDispatchOverage = tag === INVENTORY_TAGS.DISPATCH && kind === "dispatch_over_plan";
+  const isDispatchPattern = tag === INVENTORY_TAGS.DISPATCH && kind === "dispatch_pattern";
+  // NAMED_INCIDENT has a FEW named, wildly uneven records behind an
   // outlet-level total (one stuck count can be 90%+ of the whole case --
-  // confirmed live) -- an outlet bar chart hides exactly that, so these
-  // two rank the real records instead of the outlet aggregate, and get
-  // their own detail table below like the transfer/extreme/dispatch kinds
-  // already do. This is the fix for findings that genuinely looked
-  // identical case to case: same generic outlet bar chart regardless of
-  // what was actually driving the number.
-  const isStuckSessions = kind === "stuck_stock_count_value_at_risk" && (latest?.sessions ?? []).length > 0;
-  const isCompletedSessions = kind === "completed_stock_count_variance" && (latest?.sessions ?? []).length > 0;
-  const isDamageWriteoff = kind === "damage_writeoff";
+  // confirmed live) -- an outlet bar chart hides exactly that, so this tag
+  // ranks the real records instead of the outlet aggregate, and gets its
+  // own detail table below like TRANSFER_TRACE/DISPATCH already do. This
+  // is the fix for findings that genuinely looked identical case to case:
+  // same generic outlet bar chart regardless of what was actually driving
+  // the number.
+  const isStuckSessions = tag === INVENTORY_TAGS.NAMED_INCIDENT && kind === "stuck_stock_count_value_at_risk" && (latest?.sessions ?? []).length > 0;
+  const isCompletedSessions = tag === INVENTORY_TAGS.NAMED_INCIDENT && kind === "completed_stock_count_variance" && (latest?.sessions ?? []).length > 0;
+  const isDamageWriteoff = tag === INVENTORY_TAGS.WRITE_OFF;
   const transferFiltersOn = isTransfer && isFilterActive(transferView?.filters);
   const traceRows = isTransfer ? filterTraceRows(latest?.trace_rows ?? [], transferView?.filters, transferView?.options) : [];
   const transferSummary = transferFiltersOn ? summarizeTraceRows(traceRows) : null;
@@ -414,7 +419,15 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
           const total = rows.reduce((sum, r) => sum + Math.abs(r.current ?? 0), 0);
           const isCover = rows.some((r) => r.days_of_cover != null);
           const valueOf = (r) => (isCover ? r.days_of_cover : r.current);
-          const valueHeader = isMoney ? "Value" : isCover ? "Days of cover" : isTransfer ? "Missing units" : isDispatchOverage ? "Units over plan" : isDispatchPattern ? "Missing units" : "Units in stock";
+          const valueHeader = isMoney ? "Value" : isCover ? "Days of cover" : isTransfer ? "Missing units" : isDispatchOverage ? "Units over plan"
+            : isDispatchPattern ? "Missing units"
+            // products_out_of_stock's product breakdown (added alongside the
+            // stuck_stock_count product-breakdown fix) ranks by recent
+            // demand, not current stock -- every row is already at/below
+            // zero stock by definition, so "Units in stock" would mislabel
+            // the actual sold_30d values shown.
+            : kind === "products_out_of_stock" && breakdown.dimension === "product" ? "Recent demand (30d)"
+            : "Units in stock";
           return (
             <div key={breakdown.label} className="mb-4 last:mb-0">
               <p className="mb-2 text-xs font-semibold text-foreground-subtle">{breakdown.label}</p>

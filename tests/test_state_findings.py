@@ -58,6 +58,57 @@ def _stub_snapshot_evidence(monkeypatch):
     )
 
 
+# ---------------------------------------------------------------------------
+# _stock_availability_finding -- Stock position tag audit: "What is driving
+# it" previously showed a dead-end "product list is not stored" message
+# even though the recommendation text right above it already named real
+# products (alerts["top_out_of_stock"]). Same fix as stuck_stock_count's
+# product breakdown.
+
+def _alerts(segments, top_out_of_stock=None, as_of_date="2026-10-08"):
+    return {
+        "as_of_date": as_of_date,
+        "segments_by_outlet": segments,
+        "distinct_out_of_stock_products": sum(s["out_of_stock"] for s in segments),
+        "top_out_of_stock": top_out_of_stock or [],
+        "top_low_stock": [],
+        "low_stock_threshold_days": 3,
+    }
+
+
+def test_stock_availability_finding_adds_a_product_breakdown_from_top_out_of_stock(monkeypatch):
+    _stub_snapshot_evidence(monkeypatch)
+    segments = [{"outlet": "Celeste Daily - Attidiya", "out_of_stock": 2, "low_stock": 0}]
+    top = [
+        {"outlet": "Celeste Daily - Attidiya", "name": "Carrot 250-300G", "sku": "000083", "qty": 0, "sold_30d": 900.0},
+        {"outlet": "Celeste Daily - Attidiya", "name": "Set Yogurt 80G", "sku": "000638", "qty": -1, "sold_30d": 500.0},
+    ]
+    monkeypatch.setattr(sf, "get_stock_alerts", lambda: _alerts(segments, top))
+
+    finding = sf._stock_availability_finding()
+    product_breakdown = next(b for b in finding["breakdowns"] if b["dimension"] == "product")
+    assert product_breakdown["top_contributors"][0] == {"name": "Carrot 250-300G", "current": 900.0, "delta": 900.0}
+    assert product_breakdown["top_contributors"][1]["name"] == "Set Yogurt 80G"
+
+
+def test_stock_availability_finding_combines_the_same_product_across_outlets(monkeypatch):
+    _stub_snapshot_evidence(monkeypatch)
+    segments = [
+        {"outlet": "Celeste Daily - Attidiya", "out_of_stock": 1, "low_stock": 0},
+        {"outlet": "Celeste Daily Colombo 6", "out_of_stock": 1, "low_stock": 0},
+    ]
+    top = [
+        {"outlet": "Celeste Daily - Attidiya", "name": "Carrot 250-300G", "sku": "000083", "qty": 0, "sold_30d": 600.0},
+        {"outlet": "Celeste Daily Colombo 6", "name": "Carrot 250-300G", "sku": "000083", "qty": 0, "sold_30d": 300.0},
+    ]
+    monkeypatch.setattr(sf, "get_stock_alerts", lambda: _alerts(segments, top))
+
+    finding = sf._stock_availability_finding()
+    product_breakdown = next(b for b in finding["breakdowns"] if b["dimension"] == "product")
+    assert len(product_breakdown["top_contributors"]) == 1
+    assert product_breakdown["top_contributors"][0]["current"] == 900.0
+
+
 def test_no_stuck_sessions_returns_none(monkeypatch):
     monkeypatch.setattr(sf.stock_counts, "get_stuck_stock_counts", lambda: _scan_result([], 0.0))
     assert sf._stuck_stock_count_finding() is None
