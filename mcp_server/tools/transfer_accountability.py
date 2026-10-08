@@ -316,8 +316,29 @@ def _raw_rows():
     return _cache["rows"]
 
 
-def over_plan_summary(rows) -> dict:
+def _matches_over_plan(row, f: Filters) -> bool:
+    """Same shape as _matches, narrowed to what an OVER_PLAN_SQL row actually
+    carries: no receipt_completed_by (it's an outbound-only signal, there is
+    no receiving person on these rows) and no done_at (not queried), so
+    person filtering checks the dispatcher only and date filtering doesn't
+    apply here. Without this, 'Sent above plan' ignored every filter and
+    always showed company-wide lines -- confirmed live: filtering a
+    dispatch_pattern case to 2 dispatchers still showed a 3rd, unrelated
+    dispatcher's line here, the same "contradicts the finding above" gap
+    the person-filter default was built to fix elsewhere on this panel."""
+    if f.outlets and str(row["store_id"]) not in f.outlets:
+        return False
+    if f.products and _product_key(row) not in f.products:
+        return False
+    if f.people and (row["dispatch_completed_by"] or NOT_RECORDED) not in f.people:
+        return False
+    return True
+
+
+def over_plan_summary(rows, filters: Filters | None = None) -> dict:
     """Outbound lines sent above their plan. Pure over OVER_PLAN_SQL rows."""
+    f = filters or Filters()
+    rows = [r for r in rows if _matches_over_plan(r, f)]
     by_dispatcher = defaultdict(lambda: {"lines": 0, "units_over": 0.0})
     lines = []
     for row in rows:
@@ -380,6 +401,6 @@ def build(filters: Filters | None = None) -> dict:
             "recurring_only": f.recurring_only,
         },
         "options": _options(raw, recurring_keys),
-        "over_plan": over_plan_summary(_cache["over"] or []),
+        "over_plan": over_plan_summary(_cache["over"] or [], f),
         "not_on_plan": not_on_plan_summary(raw),
     }

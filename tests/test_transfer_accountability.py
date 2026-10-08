@@ -104,6 +104,29 @@ def test_over_plan_summary_counts_units_above_plan_by_dispatcher():
     assert out["by_dispatcher"][0] == {"person": "gayan@x", "lines": 1, "units_over": 1998}
 
 
+def test_over_plan_summary_respects_the_person_filter():
+    # Previously over_plan_summary never filtered at all -- confirmed live,
+    # filtering a dispatch_pattern case to 2 dispatchers still showed a 3rd,
+    # unrelated dispatcher's line in "Sent above plan", contradicting the
+    # finding directly above it on the same page.
+    rows = [
+        {"transfer_out": "A", "outlet": "X", "store_id": 1, "product": "P", "sku": "1", "plan": 2, "sent": 2000, "dispatch_completed_by": "gayan@x"},
+        {"transfer_out": "B", "outlet": "Y", "store_id": 2, "product": "Q", "sku": "2", "plan": 10, "sent": 15, "dispatch_completed_by": "sandya@x"},
+    ]
+    out = ta.over_plan_summary(rows, ta.make_filters(person=["sandya@x"]))
+    assert out["lines"] == 1
+    assert out["top_lines"][0]["dispatch_completed_by"] == "sandya@x"
+
+
+def test_over_plan_summary_respects_the_outlet_and_product_filters():
+    rows = [
+        {"transfer_out": "A", "outlet": "X", "store_id": 1, "product": "P", "sku": "1", "plan": 2, "sent": 2000, "dispatch_completed_by": "gayan@x"},
+        {"transfer_out": "B", "outlet": "Y", "store_id": 2, "product": "Q", "sku": "2", "plan": 10, "sent": 15, "dispatch_completed_by": "sandya@x"},
+    ]
+    assert ta.over_plan_summary(rows, ta.make_filters(outlet=["2"]))["lines"] == 1
+    assert ta.over_plan_summary(rows, ta.make_filters(product=["1"]))["lines"] == 1
+
+
 def test_not_on_plan_counts_receipt_lines_whose_note_has_no_such_product():
     rows = [
         {"transfer_out": "A", "out_lines": 0, "received": 5},

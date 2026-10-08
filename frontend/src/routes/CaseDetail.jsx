@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, ArrowLeft, MapPin } from "lucide-react";
@@ -571,6 +571,32 @@ export default function CaseDetail() {
       || detailQuery.data?.case?.metric_id === "dispatch_pattern"
       || false,
   });
+  // dispatch_pattern is about a FEW specific dispatchers, not the whole
+  // company -- unfiltered, this panel defaults to every dispatcher's
+  // activity over the whole window (confirmed live: 302,434 units expected
+  // company-wide vs. the 763 missing units the actual pattern is about),
+  // which reads as contradictory noise directly under a narrow finding
+  // (real user complaint: "Products with the most missing units" showing a
+  // product that isn't even one of the flagged pairs). Seeds the person
+  // filter from the finding's own dispatcher breakdown, once per case --
+  // a ref, not just "the URL has no filter yet," so deliberately clearing
+  // the filter to see company-wide data isn't silently re-applied.
+  const autoScopedCaseId = useRef(null);
+  useEffect(() => {
+    if (detailQuery.data?.case?.metric_id !== "dispatch_pattern") return;
+    if (autoScopedCaseId.current === caseId) return;
+    const hasAnyFilter = accountabilityFilters.outlet.length || accountabilityFilters.product.length
+      || accountabilityFilters.person.length || accountabilityFilters.from || accountabilityFilters.to;
+    if (hasAnyFilter) {
+      autoScopedCaseId.current = caseId;
+      return;
+    }
+    const dispatchers = detailQuery.data?.latest?.breakdowns
+      ?.find((b) => b.dimension === "person")?.top_contributors?.map((c) => c.name) ?? [];
+    if (!dispatchers.length) return;
+    autoScopedCaseId.current = caseId;
+    updateAccountabilityFilters({ ...accountabilityFilters, person: dispatchers });
+  }, [caseId, detailQuery.data]);
 
   function refresh() {
     return Promise.all([
