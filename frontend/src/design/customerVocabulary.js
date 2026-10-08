@@ -13,3 +13,7 @@ export const LIFECYCLE_LABEL = {
 export const VALUE_TIER_LABEL = { high: "High value", mid: "Mid value", low: "Low value" };
 
 export const NEXT_BASKET_LABEL = { overdue: "Overdue", due: "Due", on_track: "On track" };
+
+// Standard Odoo helpdesk.ticket priority selection (0-3). Falls back to the
+// raw code for any value outside this range rather than hiding it.
+export const TICKET_PRIORITY_LABEL = { "0": "Low", "1": "Medium", "2": "High", "3": "Urgent" };

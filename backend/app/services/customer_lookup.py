@@ -65,6 +65,48 @@ PARTNER_IDENTITY_SQL = f"""
     FROM res_partner rp WHERE rp.id = :partner_id
 """
 
+# Customer Intelligence review, 2026-10-08: returns/support/loyalty are
+# real but small signals (89/1,038 returns, 31/79 tickets, 505/77,745
+# loyalty cards are actually tied to a customer -- checked live) -- too
+# small for a population-level rate or detector, but genuinely useful on
+# ONE customer's own profile: did THIS lapsing customer also file a
+# complaint, return something, or have loyalty points sitting unused.
+# 'done'/'refunded' are return_order's only confirmed-outcome states
+# (checked live: draft/to_dispatch/confirm/approval/final_approval are
+# still in progress) -- same discipline as excluding unconfirmed states
+# elsewhere in this app (e.g. damage_writeoff's DAMAGE_CONFIRMED_STATES).
+RETURNS_FOR_CUSTOMER_SQL = """
+    SELECT id, name, date, state, amount_total
+    FROM return_order
+    WHERE partner_id = :partner_id AND state IN ('done', 'refunded')
+    ORDER BY date DESC
+"""
+
+# helpdesk_stage.fold marks the kanban-folded ("done" column) stages --
+# Solved and Cancelled, checked live -- the standard Odoo convention for
+# "this card is no longer active work," reused here as "closed" rather
+# than inventing a second status vocabulary.
+TICKETS_FOR_CUSTOMER_SQL = """
+    SELECT ht.id, ht.name, ht.priority, ht.create_date, ht.close_date,
+           hs.name->>'en_US' AS stage_name, hs.fold AS stage_closed
+    FROM helpdesk_ticket ht
+    JOIN helpdesk_stage hs ON hs.id = ht.stage_id
+    WHERE ht.partner_id = :partner_id
+    ORDER BY ht.create_date DESC
+"""
+
+# program_type='loyalty' only -- the other loyalty_card rows (type
+# promotion/buy_x_get_y, ~77,240 of 77,745) are one-time free-item
+# redemptions tied to an ORDER, not a customer (partner_id is null on
+# every one, checked live); counting them here would silently credit
+# promo codes to a random customer or nobody.
+LOYALTY_FOR_CUSTOMER_SQL = """
+    SELECT lc.points, lp.name->>'en_US' AS program_name
+    FROM loyalty_card lc
+    JOIN loyalty_program lp ON lp.id = lc.program_id
+    WHERE lc.partner_id = :partner_id AND lp.program_type = 'loyalty' AND lc.active = true
+"""
+
 _SCHEMA_READY = False
 
 
@@ -170,6 +212,42 @@ def _deterioration(partner_id: int, lifecycle_row: dict | None, window_days: int
     }
 
 
+def _customer_context(partner_id: int) -> dict:
+    """Returns/support tickets/loyalty for this one customer -- see the
+    module-level SQL constants' own docstrings for why these are kept to
+    individual-profile context rather than a population detector."""
+    returns_rows = reporting.run_query(RETURNS_FOR_CUSTOMER_SQL, {"partner_id": partner_id})
+    ticket_rows = reporting.run_query(TICKETS_FOR_CUSTOMER_SQL, {"partner_id": partner_id})
+    loyalty_rows = reporting.run_query(LOYALTY_FOR_CUSTOMER_SQL, {"partner_id": partner_id})
+
+    returns = {
+        "count": len(returns_rows),
+        "total_value": round(sum(float(r["amount_total"] or 0) for r in returns_rows), 2),
+        "recent": [
+            {"name": r["name"], "date": r["date"].isoformat() if r["date"] else None,
+             "amount": round(float(r["amount_total"] or 0), 2)}
+            for r in returns_rows[:3]
+        ],
+    }
+    support_tickets = {
+        "count": len(ticket_rows),
+        "open_count": sum(1 for t in ticket_rows if not t["stage_closed"]),
+        "recent": [
+            {"name": t["name"], "stage": t["stage_name"], "priority": t["priority"],
+             "created": t["create_date"].isoformat() if t["create_date"] else None}
+            for t in ticket_rows[:3]
+        ],
+    }
+    loyalty = None
+    if loyalty_rows:
+        loyalty = {
+            "points": round(sum(float(r["points"] or 0) for r in loyalty_rows), 2),
+            "programs": sorted({r["program_name"] for r in loyalty_rows if r["program_name"]}),
+        }
+
+    return {"returns": returns, "support_tickets": support_tickets, "loyalty": loyalty}
+
+
 def _customer_profile(partner_id: int, name: str, phone: str | None, order_count: int) -> tuple[dict, str | None]:
     rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS, "partner_id": partner_id})
     row = rows[0] if rows else None
@@ -207,6 +285,7 @@ def _customer_profile(partner_id: int, name: str, phone: str | None, order_count
         "value_tier": value_tier,
         "next_basket": get_predicted_next_basket(partner_id),
         "deterioration": _deterioration(partner_id, row),
+        "context": _customer_context(partner_id),
     }
     return profile, (as_of_date.date().isoformat() if as_of_date else None)
 

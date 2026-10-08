@@ -19,7 +19,7 @@ import CustomerGrowthOverview from "../design/CustomerGrowthOverview";
 import Pill from "../design/Pill";
 import DonutChart from "../charts/DonutChart";
 import OrderForecastChart from "../charts/OrderForecastChart";
-import { LIFECYCLE_LABEL, VALUE_TIER_LABEL } from "../design/customerVocabulary";
+import { LIFECYCLE_LABEL, TICKET_PRIORITY_LABEL, VALUE_TIER_LABEL } from "../design/customerVocabulary";
 import { formatCurrency, formatDate, formatNumber } from "../format";
 
 const STATUS_TABS = [
@@ -258,7 +258,63 @@ function CustomerProfileSection({ partnerId }) {
         </div>
       )}
 
+      <CustomerContextSection context={c.context} />
+
       <p className="text-xs text-foreground/40">Data through {profile.data.as_of ?? "unknown"}</p>
+    </div>
+  );
+}
+
+/** Returns/support tickets/loyalty points for this one customer -- small,
+ * individually-real signals (checked live: 89/1,038 returns, 31/79
+ * tickets, 505/77,745 loyalty cards are actually tied to a customer),
+ * too thin for a population-level rate but genuinely useful here: did
+ * THIS lapsing customer also file a complaint or return something. */
+function CustomerContextSection({ context }) {
+  if (!context) return null;
+  const { returns, support_tickets: tickets, loyalty } = context;
+  const hasAnything = returns.count > 0 || tickets.count > 0 || loyalty;
+
+  return (
+    <div>
+      <div className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Returns, support &amp; loyalty</div>
+      {!hasAnything ? (
+        <p className="mt-1 text-sm text-foreground/50">No returns, support tickets, or loyalty activity on record.</p>
+      ) : (
+        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div className="rounded-lg border border-border p-3">
+            <div className="text-xs text-foreground/50">Returns</div>
+            <div className="mt-1 text-foreground-strong">{formatNumber(returns.count)}</div>
+            {returns.count > 0 && <div className="text-xs text-foreground/50">{formatCurrency(returns.total_value)} total</div>}
+            {returns.recent.map((r) => (
+              <div key={r.name} className="mt-1 text-xs text-foreground/60">{r.name} · {formatDate(r.date)} · {formatCurrency(r.amount)}</div>
+            ))}
+          </div>
+          <div className="rounded-lg border border-border p-3">
+            <div className="text-xs text-foreground/50">Support tickets</div>
+            <div className="mt-1 text-foreground-strong">
+              {formatNumber(tickets.count)}
+              {tickets.open_count > 0 && <span className="ml-1 text-warning">({tickets.open_count} open)</span>}
+            </div>
+            {tickets.recent.map((t) => (
+              <div key={t.name} className="mt-1 text-xs text-foreground/60">
+                {t.name} · {t.stage ?? "Unknown stage"} · {TICKET_PRIORITY_LABEL[t.priority] ?? t.priority}
+              </div>
+            ))}
+          </div>
+          <div className="rounded-lg border border-border p-3">
+            <div className="text-xs text-foreground/50">Loyalty</div>
+            {loyalty ? (
+              <>
+                <div className="mt-1 text-foreground-strong">{formatNumber(loyalty.points)} points</div>
+                <div className="text-xs text-foreground/50">{loyalty.programs.join(", ")}</div>
+              </>
+            ) : (
+              <div className="mt-1 text-sm text-foreground/50">Not a member</div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

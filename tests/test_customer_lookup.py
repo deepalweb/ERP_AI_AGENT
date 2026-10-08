@@ -15,16 +15,27 @@ def _lifecycle_row(as_of_date, revenue=1000.0, last_order=None):
     return {"revenue": revenue, "last_order": last_order, "as_of_date": as_of_date}
 
 
-def _fake_run_query(lifecycle_rows, percentile_rows, identity_rows=None):
+def _fake_run_query(lifecycle_rows, percentile_rows, identity_rows=None,
+                     returns_rows=None, ticket_rows=None, loyalty_rows=None):
     """Dispatches on a distinguishing keyword, same pattern as
     test_data_controls.py's _fake_run_query -- LIFECYCLE_SQL,
-    VALUE_PERCENTILE_SQL, and PARTNER_IDENTITY_SQL each issue their own
-    query."""
+    VALUE_PERCENTILE_SQL, PARTNER_IDENTITY_SQL, and the three
+    _customer_context queries each issue their own query. The three
+    context fixtures default to [] (not lifecycle_rows) -- without this,
+    every existing single-match test would feed a lifecycle row's shape
+    into _customer_context's return_order/helpdesk_ticket/loyalty_card
+    parsing and KeyError."""
     def run_query(sql, params=None):
         if "PERCENTILE_CONT" in sql:
             return percentile_rows
         if "res_partner" in sql and "WHERE rp.id" in sql:
             return identity_rows or []
+        if "FROM return_order" in sql:
+            return returns_rows or []
+        if "FROM helpdesk_ticket" in sql:
+            return ticket_rows or []
+        if "FROM loyalty_card" in sql:
+            return loyalty_rows or []
         return lifecycle_rows
     return run_query
 
@@ -247,3 +258,82 @@ def test_multiple_matches_does_not_log_access(monkeypatch):
     cl.get_customer_lookup(name="Ann")
 
     assert calls == []  # masked search alone is not logged, only the single-match detail path
+
+
+# ---------------------------------------------------------------------------
+# _customer_context -- returns/support tickets/loyalty for one customer's
+# own profile. Small, individually-real signals (see the module's own SQL
+# constant docstrings for why these never become a population detector).
+
+def _return_row(name="RO/2026/0001", date="2026-09-17", amount=1000.0):
+    return {"id": 1, "name": name, "date": __import__("datetime").date.fromisoformat(date), "state": "done", "amount_total": amount}
+
+
+def _ticket_row(name="T1", stage="New", closed=False, priority="2"):
+    return {"id": 1, "name": name, "priority": priority,
+            "create_date": __import__("datetime").datetime(2026, 6, 3, 10, 0), "close_date": None,
+            "stage_name": stage, "stage_closed": closed}
+
+
+def _loyalty_row(points=10.0, program="Non-Woven Bag - Free issue"):
+    return {"points": points, "program_name": program}
+
+
+def _fake_context_run_query(returns_rows=None, ticket_rows=None, loyalty_rows=None):
+    def run_query(sql, params=None):
+        if "FROM return_order" in sql:
+            return returns_rows or []
+        if "FROM helpdesk_ticket" in sql:
+            return ticket_rows or []
+        if "FROM loyalty_card" in sql:
+            return loyalty_rows or []
+        raise AssertionError(f"unexpected query: {sql[:60]}")
+    return run_query
+
+
+def test_customer_context_counts_and_totals_returns(monkeypatch):
+    monkeypatch.setattr(cl.reporting, "run_query", _fake_context_run_query(
+        returns_rows=[_return_row(amount=500.0), _return_row(amount=300.0)],
+    ))
+    ctx = cl._customer_context(1)
+    assert ctx["returns"]["count"] == 2
+    assert ctx["returns"]["total_value"] == 800.0
+    assert len(ctx["returns"]["recent"]) == 2
+
+
+def test_customer_context_counts_open_tickets_by_fold(monkeypatch):
+    monkeypatch.setattr(cl.reporting, "run_query", _fake_context_run_query(
+        ticket_rows=[_ticket_row(closed=False), _ticket_row(closed=True)],
+    ))
+    ctx = cl._customer_context(1)
+    assert ctx["support_tickets"]["count"] == 2
+    assert ctx["support_tickets"]["open_count"] == 1  # only the non-folded (not closed) one
+
+
+def test_customer_context_sums_loyalty_points_across_programs(monkeypatch):
+    monkeypatch.setattr(cl.reporting, "run_query", _fake_context_run_query(
+        loyalty_rows=[_loyalty_row(points=10.0, program="A"), _loyalty_row(points=5.0, program="B")],
+    ))
+    ctx = cl._customer_context(1)
+    assert ctx["loyalty"]["points"] == 15.0
+    assert ctx["loyalty"]["programs"] == ["A", "B"]
+
+
+def test_customer_context_loyalty_is_none_when_not_a_member(monkeypatch):
+    monkeypatch.setattr(cl.reporting, "run_query", lambda sql, params=None: [])
+    ctx = cl._customer_context(1)
+    assert ctx["loyalty"] is None
+    assert ctx["returns"]["count"] == 0
+    assert ctx["support_tickets"]["count"] == 0
+
+
+def test_customer_profile_includes_context(monkeypatch):
+    monkeypatch.setattr(cl, "search_customers", lambda **kw: [_match(partner_id=9)])
+    monkeypatch.setattr(cl.reporting, "run_query", lambda sql, params=None: [])
+    monkeypatch.setattr(cl, "get_predicted_next_basket", lambda partner_id: None)
+    monkeypatch.setattr(cl, "get_deterioration_window", lambda partner_id, window_days=60: [])
+    monkeypatch.setattr(cl.appdb, "run_query", lambda sql, params=None: None)
+
+    result = cl.get_customer_lookup(name="Ann")
+    assert "context" in result["customer"]
+    assert result["customer"]["context"]["returns"]["count"] == 0
