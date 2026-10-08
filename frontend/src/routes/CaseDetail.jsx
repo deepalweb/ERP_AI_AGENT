@@ -562,14 +562,28 @@ export default function CaseDetail() {
     if (next.recurring) params.set("recurring", "1");
     return params;
   }, { replace: true });
-  const accountabilityQuery = useQuery({
-    queryKey: ["management", "transfer-accountability", accountabilityFilters],
-    queryFn: () => fetchTransferAccountability(accountabilityFilters),
-    placeholderData: keepPreviousData,
-    enabled: detailQuery.data?.case?.metric_id?.startsWith?.("transfer_discrepancy_")
+  // Real bug, caught live: CaseDetail is one component instance reused for
+  // EVERY case (the route only swaps :caseId), so navigating from a
+  // dispatch_pattern/transfer case to an unrelated one (stuck_stock_count,
+  // damage_writeoff, ...) doesn't remount anything. With enabled:false on
+  // the new case, this query never refetches -- and placeholderData:
+  // keepPreviousData is specifically built to keep showing the LAST
+  // successful result until a new one arrives, so the old case's company-
+  // wide panel just kept rendering on every later case page, unrelated or
+  // not. caseId in the key (not just the filters) gives every case its own
+  // cache slot, and isAccountabilityEligible is checked again at the render
+  // site below -- not just here -- so stale cross-case data can never
+  // satisfy the render gate even for one stale paint before a refetch lands.
+  const isAccountabilityEligible = Boolean(
+    detailQuery.data?.case?.metric_id?.startsWith?.("transfer_discrepancy_")
       || detailQuery.data?.case?.metric_id?.startsWith?.("extreme_event_")
       || detailQuery.data?.case?.metric_id === "dispatch_pattern"
-      || false,
+  );
+  const accountabilityQuery = useQuery({
+    queryKey: ["management", "transfer-accountability", caseId, accountabilityFilters],
+    queryFn: () => fetchTransferAccountability(accountabilityFilters),
+    placeholderData: keepPreviousData,
+    enabled: isAccountabilityEligible,
   });
   // dispatch_pattern is about a FEW specific dispatchers, not the whole
   // company -- unfiltered, this panel defaults to every dispatcher's
@@ -1037,8 +1051,8 @@ export default function CaseDetail() {
           trendNode={periodTrendBlock}
           measurement={detailQuery.data.measurement}
           verificationText={detailQuery.data.verification_explanation || "Awaiting a successful measurement of this case scope."}
-          accountabilityNode={accountabilityQuery.data ? <TransferAccountabilityPanel data={accountabilityQuery.data} /> : null}
-          transferView={accountabilityQuery.data?.options ? {
+          accountabilityNode={isAccountabilityEligible && accountabilityQuery.data ? <TransferAccountabilityPanel data={accountabilityQuery.data} /> : null}
+          transferView={isAccountabilityEligible && accountabilityQuery.data?.options ? {
             filters: accountabilityFilters,
             options: accountabilityQuery.data.options,
             filterBar: <TransferFilterBar options={accountabilityQuery.data.options} value={accountabilityFilters} onChange={updateAccountabilityFilters} />,
