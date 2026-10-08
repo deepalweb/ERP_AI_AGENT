@@ -589,6 +589,23 @@ async def customer_lifecycle_segment(category: str, value_tier: str | None = Non
         return {"status": "error", "detail": "Could not load customers for this segment."}
 
 
+@app.get("/customers/second-order-conversion")
+async def customer_second_order_conversion():
+    """Second-order conversion: of customers whose first order is old
+    enough to judge, what share placed a second order within 30 days --
+    plus the same calculation by acquisition month and 30/60/90-day
+    window. A live, retrospective query (not part of the daily scan
+    cache) — see customer_predictions.get_second_order_intelligence()."""
+    try:
+        result = await anyio.to_thread.run_sync(customer_predictions.get_second_order_intelligence)
+        if result is None:
+            return {"status": "error", "detail": "No order history available."}
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("second order conversion failed")
+        return {"status": "error", "detail": "Could not load second-order conversion."}
+
+
 @app.get("/customers/outlet-behavior")
 async def customer_outlet_behavior():
     """Per-outlet customer behavior (orders, cancellations, unique

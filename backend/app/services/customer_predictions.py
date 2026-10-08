@@ -772,6 +772,32 @@ VALUE_PERCENTILE_SQL = customer_order_query(f"""
     ) x
 """)
 
+# Customer Intelligence review, 2026-10-08: first and second order per
+# customer, plus the data's own as_of_date -- the one raw fetch both
+# get_second_order_conversion() (a single window, e.g. "42% within 30d")
+# and get_second_order_cohorts() (grouped by acquisition month, several
+# windows) are built from, so the two never risk computing "second order"
+# two different ways. A RETROSPECTIVE calculation deliberately: every
+# customer's first/second order is already fully recorded history, so
+# unlike lifecycle deterioration this needs no fresh daily data to be
+# honest -- only elapsed time since each customer's own first order,
+# which has already happened for most of the population regardless of
+# whether new orders are currently landing.
+SECOND_ORDER_SQL = customer_order_query(f"""
+    WITH ordered AS (
+        SELECT partner_id, date_order,
+               ROW_NUMBER() OVER (PARTITION BY partner_id ORDER BY date_order) AS rn
+        FROM customer_orders
+        WHERE state IN {SALE_ORDER_LIVE_STATES}
+    ),
+    bounds AS (SELECT MAX(date_order) AS as_of_date FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES})
+    SELECT o1.partner_id, o1.date_order AS first_order, o2.date_order AS second_order, b.as_of_date
+    FROM ordered o1
+    LEFT JOIN ordered o2 ON o2.partner_id = o1.partner_id AND o2.rn = 2
+    CROSS JOIN bounds b
+    WHERE o1.rn = 1
+""")
+
 DETERIORATION_WINDOW_DAYS_DEFAULT = 60
 
 # Customer deterioration, measurement layer only -- Wave 1 Customer Phase B,
@@ -1051,6 +1077,84 @@ def list_customers_by_segment(category: str, value_tier: str | None = None) -> d
         "as_of_date": as_of_date.date().isoformat() if hasattr(as_of_date, "date") else as_of_date,
         "total": total,
         "customers": customers,
+    }
+
+
+SECOND_ORDER_HEADLINE_WINDOW_DAYS = 30
+SECOND_ORDER_COHORT_WINDOWS = (30, 60, 90)
+SECOND_ORDER_COHORT_MONTHS = 12
+# Same posture as intelligence.py's MIN_SEGMENT_VOLUME: a rate computed
+# from a handful of customers isn't a rate, it's noise -- shown as
+# unavailable (null) rather than a real-looking percentage. The most
+# recent 1-2 cohort months are the common case this guards (too few
+# customers have even reached day 30 yet), not an edge case.
+SECOND_ORDER_MIN_ELIGIBLE = 15
+
+
+def get_second_order_intelligence() -> dict | None:
+    """Second-order conversion: of customers whose first order is old
+    enough to judge, what share placed a second order within the window --
+    the headline rate at SECOND_ORDER_HEADLINE_WINDOW_DAYS, plus the same
+    calculation broken out by acquisition month and by 30/60/90-day window
+    (the cohort table). One fetch (SECOND_ORDER_SQL) for both, since
+    they're the same per-customer (first_order, second_order) data grouped
+    two different ways -- see that query's own docstring for why this is
+    safe to treat as historical fact even while Odoo's live feed is stale."""
+    rows = reporting.run_query(SECOND_ORDER_SQL)
+    if not rows:
+        return None
+    as_of_date = rows[0]["as_of_date"]
+
+    headline_eligible = 0
+    headline_converted = 0
+    cohorts: dict[str, dict] = {}
+    for r in rows:
+        first_order = r["first_order"]
+        second_order = r["second_order"]
+        days_since_first = (as_of_date - first_order).total_seconds() / 86400.0
+        gap = (second_order - first_order).total_seconds() / 86400.0 if second_order is not None else None
+
+        if days_since_first >= SECOND_ORDER_HEADLINE_WINDOW_DAYS:
+            headline_eligible += 1
+            if gap is not None and gap <= SECOND_ORDER_HEADLINE_WINDOW_DAYS:
+                headline_converted += 1
+
+        month_key = first_order.strftime("%Y-%m")
+        cohort = cohorts.setdefault(month_key, {
+            "customers": 0,
+            "eligible": {w: 0 for w in SECOND_ORDER_COHORT_WINDOWS},
+            "converted": {w: 0 for w in SECOND_ORDER_COHORT_WINDOWS},
+        })
+        cohort["customers"] += 1
+        for w in SECOND_ORDER_COHORT_WINDOWS:
+            if days_since_first < w:
+                continue
+            cohort["eligible"][w] += 1
+            if gap is not None and gap <= w:
+                cohort["converted"][w] += 1
+
+    cohort_rows = []
+    for month_key in sorted(cohorts)[-SECOND_ORDER_COHORT_MONTHS:]:
+        c = cohorts[month_key]
+        windows = {}
+        for w in SECOND_ORDER_COHORT_WINDOWS:
+            eligible = c["eligible"][w]
+            windows[str(w)] = {
+                "eligible": eligible,
+                "converted": c["converted"][w],
+                "rate_pct": round(c["converted"][w] / eligible * 100, 1) if eligible >= SECOND_ORDER_MIN_ELIGIBLE else None,
+            }
+        cohort_rows.append({"month": month_key, "customers": c["customers"], "windows": windows})
+
+    return {
+        "as_of_date": as_of_date.date().isoformat() if hasattr(as_of_date, "date") else as_of_date,
+        "headline": {
+            "window_days": SECOND_ORDER_HEADLINE_WINDOW_DAYS,
+            "eligible": headline_eligible,
+            "converted": headline_converted,
+            "rate_pct": round(headline_converted / headline_eligible * 100, 1) if headline_eligible >= SECOND_ORDER_MIN_ELIGIBLE else None,
+        },
+        "cohorts": cohort_rows,
     }
 
 

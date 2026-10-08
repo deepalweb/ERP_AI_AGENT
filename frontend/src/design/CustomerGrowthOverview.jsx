@@ -1,8 +1,14 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchCustomerLifecycleSegment } from "../api";
+import { fetchCustomerLifecycleSegment, fetchSecondOrderConversion } from "../api";
 import Card from "./Card";
 import { formatCurrency, formatDate, formatNumber } from "../format";
+
+const SECOND_ORDER_WINDOWS = [30, 60, 90];
+function formatMonthLabel(monthKey) {
+  const [year, month] = monthKey.split("-").map(Number);
+  return new Date(year, month - 1, 1).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+}
 
 const TIERS = [
   { id: "high", label: "High value", color: "var(--accent)" },
@@ -38,6 +44,7 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
   });
   const segmentPage = (segmentQuery.data?.customers ?? []).slice(segmentOffset, segmentOffset + SEGMENT_PAGE_SIZE);
   const segmentShown = segmentQuery.data?.customers?.length ?? 0;
+  const secondOrder = useQuery({ queryKey: ["secondOrderConversion"], queryFn: fetchSecondOrderConversion });
   function selectCell(stageId, tierId) {
     setSelectedStage(stageId);
     setSelectedTier((current) => (current === tierId && selectedStage === stageId ? null : tierId));
@@ -186,6 +193,57 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
           </figure>
         </Card>
       </div>
+
+      <Card title="Are new customers coming back for a second order?">
+        {secondOrder.isLoading && <p className="text-sm text-foreground/60">Loading…</p>}
+        {secondOrder.data?.status === "error" && <p className="text-sm text-warning">Second-order conversion unavailable.</p>}
+        {secondOrder.data?.status === "ok" && <>
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className="text-3xl font-semibold tabular-nums text-foreground-strong">
+              {secondOrder.data.headline.rate_pct != null ? `${secondOrder.data.headline.rate_pct}%` : "—"}
+            </span>
+            <span className="text-sm text-foreground/60">
+              of {formatNumber(secondOrder.data.headline.eligible)} customers placed a second order within {secondOrder.data.headline.window_days} days of their first
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-foreground/50">
+            Retrospective — based on each customer&rsquo;s own order history, not affected by how current today&rsquo;s data is. As of {formatDate(secondOrder.data.as_of_date)}.
+          </p>
+
+          {secondOrder.data.cohorts.length > 0 && (
+            <div className="mt-4 overflow-x-auto">
+              <table className="w-full text-xs" aria-label="Second-order conversion by acquisition month">
+                <thead>
+                  <tr className="text-left text-foreground/60">
+                    <th className="p-1.5 font-medium">Acquisition month</th>
+                    <th className="p-1.5 text-right font-medium">Customers</th>
+                    {SECOND_ORDER_WINDOWS.map((w) => <th key={w} className="p-1.5 text-right font-medium">{w}d repeat</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {secondOrder.data.cohorts.map((row) => (
+                    <tr key={row.month} className="border-t border-border">
+                      <td className="p-1.5 text-foreground-strong">{formatMonthLabel(row.month)}</td>
+                      <td className="p-1.5 text-right tabular-nums">{formatNumber(row.customers)}</td>
+                      {SECOND_ORDER_WINDOWS.map((w) => {
+                        const cell = row.windows[String(w)];
+                        return (
+                          <td key={w} className="p-1.5 text-right tabular-nums">
+                            {cell?.rate_pct != null ? `${cell.rate_pct}%` : "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="mt-2 text-xs leading-relaxed text-foreground/50">
+                A dash means not enough time has passed yet for that window, or too few customers to show a reliable rate — not zero.
+              </p>
+            </div>
+          )}
+        </>}
+      </Card>
 
       <Card title="When are repeat customers approaching a purchase?">
         <figure aria-label="Customer reorder timing" className="space-y-3">

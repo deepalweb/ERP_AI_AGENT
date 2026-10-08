@@ -1,8 +1,9 @@
-"""Tests for the new per-segment customer list (list_customers_by_segment)
-and the revenue_by_tier addition to compute_lifecycle_summary -- both added
-to back the Customer growth heatmap's click-to-filter. Pure unit tests;
-reporting.run_query is monkeypatched, dispatching on a distinguishing
-keyword in each query string (same pattern as test_stock_counts.py)."""
+"""Tests for the per-segment customer list (list_customers_by_segment), the
+revenue_by_tier addition to compute_lifecycle_summary (both back the
+Customer growth heatmap's click-to-filter), and second-order conversion
+(get_second_order_intelligence). Pure unit tests; reporting.run_query is
+monkeypatched, dispatching on a distinguishing keyword in each query string
+(same pattern as test_stock_counts.py)."""
 
 from datetime import datetime
 
@@ -99,3 +100,78 @@ def test_compute_lifecycle_summary_tracks_revenue_by_tier(monkeypatch):
     assert lapsing["revenue_by_tier"]["low"] == 0.0
     active = next(c for c in summary["value_by_category"] if c["id"] == "active")
     assert active["revenue_by_tier"]["low"] == 1_000.0
+
+
+# ---------------------------------------------------------------------------
+# get_second_order_intelligence -- second-order conversion headline + cohort
+# table. A RETROSPECTIVE calculation (see SECOND_ORDER_SQL's own docstring):
+# every customer's first/second order is already fully recorded, so this
+# doesn't need fresh daily data the way lifecycle deterioration does.
+
+def _order_row(partner_id, first_order, second_order=None, as_of=AS_OF):
+    return {"partner_id": partner_id, "first_order": first_order, "second_order": second_order, "as_of_date": as_of}
+
+
+def _fake_second_order_run_query(rows):
+    def run_query(sql, params=None):
+        if "o2.rn = 2" in sql:
+            return rows
+        raise AssertionError(f"unexpected query: {sql[:80]}")
+    return run_query
+
+
+def test_second_order_headline_counts_eligible_and_converted_within_window(monkeypatch):
+    rows = [
+        # Eligible (40 days since first order) and converted within 30 days.
+        _order_row(1, datetime(2026, 8, 26), datetime(2026, 9, 10)),
+        # Eligible but converted LATE (35 days > 30-day window) -- not counted as converted.
+        _order_row(2, datetime(2026, 8, 26), datetime(2026, 9, 30)),
+        # Eligible, never reordered.
+        _order_row(3, datetime(2026, 8, 26), None),
+        # NOT eligible yet -- first order only 10 days ago.
+        _order_row(4, datetime(2026, 9, 25), None),
+    ]
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    # Below SECOND_ORDER_MIN_ELIGIBLE, so rate_pct is correctly None here --
+    # the counts themselves are still checked directly.
+    result = cp.get_second_order_intelligence()
+    assert result["headline"]["eligible"] == 3
+    assert result["headline"]["converted"] == 1
+    assert result["headline"]["rate_pct"] is None  # below SECOND_ORDER_MIN_ELIGIBLE
+
+
+def test_second_order_headline_rate_appears_above_minimum_sample(monkeypatch):
+    rows = [_order_row(i, datetime(2026, 8, 1), datetime(2026, 8, 10)) for i in range(20)]
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    result = cp.get_second_order_intelligence()
+    assert result["headline"]["eligible"] == 20
+    assert result["headline"]["converted"] == 20
+    assert result["headline"]["rate_pct"] == 100.0
+
+
+def test_second_order_cohorts_group_by_acquisition_month_and_hide_immature_windows(monkeypatch):
+    # 20 customers acquired in August, all converted within 10 days --
+    # eligible/converted for 30d and 60d (enough time has passed by AS_OF =
+    # Oct 5), but NOT for 90d (only ~70 days have passed).
+    rows = [_order_row(i, datetime(2026, 8, 1), datetime(2026, 8, 11)) for i in range(20)]
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    result = cp.get_second_order_intelligence()
+    august = next(c for c in result["cohorts"] if c["month"] == "2026-08")
+    assert august["customers"] == 20
+    assert august["windows"]["30"]["rate_pct"] == 100.0
+    assert august["windows"]["60"]["rate_pct"] == 100.0
+    assert august["windows"]["90"]["eligible"] == 0
+    assert august["windows"]["90"]["rate_pct"] is None
+
+
+def test_second_order_cohorts_separate_different_acquisition_months(monkeypatch):
+    rows = (
+        [_order_row(i, datetime(2026, 6, 1), datetime(2026, 6, 15)) for i in range(20)]
+        + [_order_row(100 + i, datetime(2026, 7, 1), None) for i in range(20)]
+    )
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    result = cp.get_second_order_intelligence()
+    june = next(c for c in result["cohorts"] if c["month"] == "2026-06")
+    july = next(c for c in result["cohorts"] if c["month"] == "2026-07")
+    assert june["windows"]["30"]["rate_pct"] == 100.0
+    assert july["windows"]["30"]["rate_pct"] == 0.0

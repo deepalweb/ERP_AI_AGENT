@@ -322,6 +322,12 @@ export async function fetchCustomerLifecycleSegment(category, valueTier) {
   return readResponse(response);
 }
 
+export async function fetchSecondOrderConversion() {
+  const response = await apiFetch(`${API_BASE_URL}/customers/second-order-conversion`);
+
+  return readResponse(response);
+}
+
 export async function fetchCustomerOutletBehavior() {
   const response = await apiFetch(`${API_BASE_URL}/customers/outlet-behavior`);
 
