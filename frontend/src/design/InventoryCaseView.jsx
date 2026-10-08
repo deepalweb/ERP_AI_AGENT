@@ -74,6 +74,32 @@ const RECORD_COLUMNS_PATTERN = [
   { key: "outlets", label: "Outlets", format: (v) => formatNumber(v) },
 ];
 
+const RECORD_COLUMNS_STUCK_SESSIONS = [
+  { key: "name", label: "Count" },
+  { key: "outlet", label: "Outlet", format: (v) => shortOutlet(v) },
+  { key: "responsible", label: "Responsible" },
+  { key: "days_stuck", label: "Days stuck", format: (v) => formatNumber(Math.round(v)) },
+  { key: "scanned_lines", label: "Scanned" },
+  { key: "total_lines", label: "Total lines" },
+  { key: "unscanned_value_rs", label: "Unscanned value", format: (v) => formatCurrency(v) },
+];
+
+const RECORD_COLUMNS_COMPLETED_SESSIONS = [
+  { key: "name", label: "Count" },
+  { key: "outlet", label: "Outlet", format: (v) => shortOutlet(v) },
+  { key: "completed_at", label: "Completed", format: formatWhen },
+  { key: "lines", label: "Lines" },
+  { key: "gross_abs_variance_value_rs", label: "Variance", format: (v) => formatCurrency(v) },
+];
+
+const RECORD_COLUMNS_DAMAGE_PRODUCTS = [
+  { key: "name", label: "Product", format: (v) => shortProduct(v) },
+  { key: "sku", label: "SKU" },
+  { key: "lines", label: "Lines" },
+  { key: "qty", label: "Units", format: (v) => formatNumber(v) },
+  { key: "value_rs", label: "Value", format: (v) => formatCurrency(v) },
+];
+
 const RECORD_COLUMNS_EXTREME = [
   { key: "date", label: "Date" },
   { key: "outlet", label: "Outlet", format: (v) => shortOutlet(v) },
@@ -290,14 +316,33 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
   const isExtreme = (latest?.extreme_rows ?? []).length > 0;
   const isDispatchOverage = kind === "dispatch_over_plan";
   const isDispatchPattern = kind === "dispatch_pattern";
+  // Both of these have a FEW named, wildly uneven records behind an
+  // outlet-level total (one stuck count can be 90%+ of the whole case --
+  // confirmed live) -- an outlet bar chart hides exactly that, so these
+  // two rank the real records instead of the outlet aggregate, and get
+  // their own detail table below like the transfer/extreme/dispatch kinds
+  // already do. This is the fix for findings that genuinely looked
+  // identical case to case: same generic outlet bar chart regardless of
+  // what was actually driving the number.
+  const isStuckSessions = kind === "stuck_stock_count_value_at_risk" && (latest?.sessions ?? []).length > 0;
+  const isCompletedSessions = kind === "completed_stock_count_variance" && (latest?.sessions ?? []).length > 0;
+  const isDamageWriteoff = kind === "damage_writeoff";
   const transferFiltersOn = isTransfer && isFilterActive(transferView?.filters);
   const traceRows = isTransfer ? filterTraceRows(latest?.trace_rows ?? [], transferView?.filters, transferView?.options) : [];
   const transferSummary = transferFiltersOn ? summarizeTraceRows(traceRows) : null;
-  const records = isExtreme ? latest.extreme_rows : isDispatchOverage ? (latest.dispatch_rows ?? []) : isDispatchPattern ? (latest.pattern_rows ?? []) : traceRows;
+  const records = isExtreme ? latest.extreme_rows : isDispatchOverage ? (latest.dispatch_rows ?? []) : isDispatchPattern ? (latest.pattern_rows ?? [])
+    : isStuckSessions || isCompletedSessions ? (latest.sessions ?? [])
+    : isDamageWriteoff ? (latest.top_products ?? [])
+    : traceRows;
   const valueLine = valueLineFor(latest);
   const isMoney = MONEY_KINDS.has(kind);
   const storeBreakdown = latest?.breakdowns?.find((b) => b.dimension === "store" || b.dimension === "outlet");
-  const outletData = (storeBreakdown?.top_contributors ?? []).map((c) => ({ ...c, name: shortOutlet(c.name) }));
+  const sessionValueKey = isStuckSessions ? "unscanned_value_rs" : "gross_abs_variance_value_rs";
+  const outletData = (isStuckSessions || isCompletedSessions)
+    ? [...(latest.sessions ?? [])]
+        .sort((a, b) => b[sessionValueKey] - a[sessionValueKey])
+        .map((s) => ({ name: `${s.name} (${shortOutlet(s.outlet)})`, current: s[sessionValueKey] }))
+    : (storeBreakdown?.top_contributors ?? []).map((c) => ({ ...c, name: shortOutlet(c.name) }));
   const outletRates = transferFiltersOn ? transferSummary.outletRows : latest?.outlet_rows ?? [];
   const topRate = [...(latest?.outlet_rows ?? [])].filter((o) => o.unit_rate != null).sort((a, b) => b.unit_rate - a.unit_rate)[0];
   const whatBreakdowns = (latest?.breakdowns ?? []).filter((b) => b.dimension !== "store" && b.dimension !== "outlet");
@@ -427,10 +472,22 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
 
       {records.length > 0 && (
         <details className="rounded-xl border border-border bg-surface p-4">
-          <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">View {isExtreme ? "receiving records" : isDispatchOverage ? "dispatch records, line by line" : isDispatchPattern ? "dispatcher/product pairs" : "transfer trace, line by line"} ({formatNumber(records.length)})</summary>
+          <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">
+            View {isExtreme ? "receiving records" : isDispatchOverage ? "dispatch records, line by line"
+              : isDispatchPattern ? "dispatcher/product pairs" : isStuckSessions ? "stock count sessions"
+              : isCompletedSessions ? "completed count sessions" : isDamageWriteoff ? "affected products"
+              : "transfer trace, line by line"} ({formatNumber(records.length)})
+          </summary>
           <div className="mt-3">
             <div className="overflow-x-auto">
-              <AffectedRecordTable columns={isExtreme ? RECORD_COLUMNS_EXTREME : isDispatchOverage ? RECORD_COLUMNS_DISPATCH : isDispatchPattern ? RECORD_COLUMNS_PATTERN : RECORD_COLUMNS_TRANSFER} rows={records} rowKey={isDispatchPattern ? "sku" : "id"} />
+              <AffectedRecordTable
+                columns={isExtreme ? RECORD_COLUMNS_EXTREME : isDispatchOverage ? RECORD_COLUMNS_DISPATCH
+                  : isDispatchPattern ? RECORD_COLUMNS_PATTERN : isStuckSessions ? RECORD_COLUMNS_STUCK_SESSIONS
+                  : isCompletedSessions ? RECORD_COLUMNS_COMPLETED_SESSIONS : isDamageWriteoff ? RECORD_COLUMNS_DAMAGE_PRODUCTS
+                  : RECORD_COLUMNS_TRANSFER}
+                rows={records}
+                rowKey={isDispatchPattern || isDamageWriteoff ? "sku" : "id"}
+              />
             </div>
           </div>
         </details>
