@@ -902,6 +902,7 @@ def compute_lifecycle_summary() -> dict | None:
     value_counts = {vid: 0 for vid, _, _ in VALUE_TIERS}
     value_revenue = {vid: 0.0 for vid, _, _ in VALUE_TIERS}
     cross = {cid: {vid: 0 for vid, _, _ in VALUE_TIERS} for cid, _, _ in LIFECYCLE_CATEGORIES}
+    cross_revenue = {cid: {vid: 0.0 for vid, _, _ in VALUE_TIERS} for cid, _, _ in LIFECYCLE_CATEGORIES}
     channel_stats = {
         chid: {"total": 0, "scoreable": 0, "churned": 0, "lapsing": 0, "revenue": 0.0} for chid, _, _ in CHANNELS
     }
@@ -917,6 +918,7 @@ def compute_lifecycle_summary() -> dict | None:
         value_counts[value_tier] += 1
         value_revenue[value_tier] += revenue
         cross[category][value_tier] += 1
+        cross_revenue[category][value_tier] += revenue
 
         cs = channel_stats[channel]
         cs["total"] += 1
@@ -940,7 +942,9 @@ def compute_lifecycle_summary() -> dict | None:
             for vid, label, icon in VALUE_TIERS
         ],
         "value_by_category": [
-            {"id": cid, "label": label, **cross[cid]} for cid, label, _icon in LIFECYCLE_CATEGORIES
+            {"id": cid, "label": label, **cross[cid],
+             "revenue_by_tier": {vid: round(cross_revenue[cid][vid], 2) for vid in cross_revenue[cid]}}
+            for cid, label, _icon in LIFECYCLE_CATEGORIES
         ],
         "channel_breakdown": [
             {
@@ -959,6 +963,94 @@ def compute_lifecycle_summary() -> dict | None:
             }
             for chid, label, icon in CHANNELS
         ],
+    }
+
+
+def _mask_phone(phone: str | None) -> str | None:
+    # Duplicated from customer_lookup.py (not imported) -- that module
+    # imports FROM this one, so importing it back here would be circular.
+    # A 5-line pure function; not worth a shared module for this alone.
+    digits = "".join(c for c in (phone or "") if c.isdigit())
+    if len(digits) < 4:
+        return None
+    return f"•••• {digits[-4:]}"
+
+
+SEGMENT_LIST_CAP = 200
+"""LIFECYCLE_SQL's window functions over the full order history take
+8-10s to run (measured live, ~89k customers) -- real, unavoidable for a
+live per-customer classification pass, not a query to optimize away. The
+cost must be paid once per segment selection, not once per page: the
+frontend fetches this one capped list per cell click and paginates
+through it client-side, rather than re-running the whole query for every
+Previous/Next click. A segment can have tens of thousands of matches
+(e.g. dormant/low-value); capping at the top 200 by revenue keeps the
+response bounded without hiding the real total (returned separately)."""
+
+
+def list_customers_by_segment(category: str, value_tier: str | None = None) -> dict:
+    """The named customers behind one lifecycle x value-tier cell on the
+    Customer growth heatmap -- compute_lifecycle_summary() deliberately
+    only returns aggregate counts (see its own docstring), so a cell click
+    has nothing to filter against without this: the same full pass,
+    classifying every customer exactly the same way, kept here as a
+    second entry point rather than returning a per-customer list from
+    compute_lifecycle_summary() itself (which /customers/lifecycle and the
+    scan path both call and would pay for a per-customer payload neither
+    of them needs). Masked contact info, same discipline as
+    customer_lookup.py's search -- this is a list of real customers, not
+    an internal id dump. Capped at SEGMENT_LIST_CAP, top by revenue --
+    see that constant for why, and why there's no offset param."""
+    if category not in {cid for cid, _, _ in LIFECYCLE_CATEGORIES}:
+        return {"status": "error", "detail": f"Unknown lifecycle category: {category}"}
+    if value_tier is not None and value_tier not in {vid for vid, _, _ in VALUE_TIERS}:
+        return {"status": "error", "detail": f"Unknown value tier: {value_tier}"}
+
+    rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS, "partner_id": None})
+    if not rows:
+        return {"status": "ok", "as_of_date": None, "total": 0, "customers": []}
+
+    as_of_date = rows[0]["as_of_date"]
+    percentile_rows = reporting.run_query(VALUE_PERCENTILE_SQL)
+    p80 = float(percentile_rows[0]["p80"] or 0) if percentile_rows else 0.0
+    p50 = float(percentile_rows[0]["p50"] or 0) if percentile_rows else 0.0
+
+    matched = []
+    for row in rows:
+        if _lifecycle_category(row, as_of_date) != category:
+            continue
+        revenue = float(row["revenue"] or 0)
+        if value_tier is not None and _value_tier(revenue, p80, p50) != value_tier:
+            continue
+        matched.append({"partner_id": row["partner_id"], "order_count": row["order_count"],
+                         "revenue": round(revenue, 2), "last_order": row["last_order"]})
+
+    matched.sort(key=lambda c: c["revenue"], reverse=True)
+    total = len(matched)
+    page = matched[:SEGMENT_LIST_CAP]
+
+    partner_ids = [c["partner_id"] for c in page]
+    names = {}
+    if partner_ids:
+        partner_rows = reporting.run_query(
+            "SELECT id, name, phone FROM res_partner WHERE id = ANY(:ids)", {"ids": partner_ids}
+        )
+        names = {r["id"]: r for r in partner_rows}
+
+    customers = [{
+        "partner_id": c["partner_id"],
+        "name": (names.get(c["partner_id"]) or {}).get("name") or "Unknown",
+        "phone_masked": _mask_phone((names.get(c["partner_id"]) or {}).get("phone")),
+        "order_count": c["order_count"],
+        "revenue": c["revenue"],
+        "last_order": c["last_order"].isoformat() if c["last_order"] else None,
+    } for c in page]
+
+    return {
+        "status": "ok",
+        "as_of_date": as_of_date.date().isoformat() if hasattr(as_of_date, "date") else as_of_date,
+        "total": total,
+        "customers": customers,
     }
 
 

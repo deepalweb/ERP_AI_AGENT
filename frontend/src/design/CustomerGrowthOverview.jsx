@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { fetchCustomerLifecycleSegment } from "../api";
 import Card from "./Card";
 import { formatCurrency, formatDate, formatNumber } from "../format";
 
@@ -12,12 +14,35 @@ const share = (value, total) => Number.isFinite(value) && total > 0 ? value / to
 
 export default function CustomerGrowthOverview({ summary, lifecycle, loading, onRetry, onViewCustomers }) {
   const [selectedStage, setSelectedStage] = useState("lapsing");
+  // null = no cell picked yet (row-level summary only, the original
+  // behavior). Set together with selectedStage when a specific tier CELL
+  // is clicked, so the segment query below has both axes of the cell.
+  const [selectedTier, setSelectedTier] = useState(null);
+  const [segmentOffset, setSegmentOffset] = useState(0);
   const categories = lifecycle?.categories ?? [];
   const cross = lifecycle?.value_by_category ?? [];
   const tiers = lifecycle?.value_tiers ?? [];
   const selected = categories.find((row) => row.id === selectedStage);
   const selectedMix = cross.find((row) => row.id === selectedStage);
   const lapsing = cross.find((row) => row.id === "lapsing");
+  const SEGMENT_PAGE_SIZE = 10;
+  // One fetch per cell click, not per page: the backend's cost is the
+  // classification pass itself (8-10s), not the row count, so offset is
+  // NOT in the query key -- re-querying per page would re-pay that cost
+  // for no reason. segmentOffset instead slices the already-fetched,
+  // server-capped (top 200 by revenue) list client-side below.
+  const segmentQuery = useQuery({
+    queryKey: ["customerLifecycleSegment", selectedStage, selectedTier],
+    queryFn: () => fetchCustomerLifecycleSegment(selectedStage, selectedTier),
+    enabled: Boolean(selectedStage && selectedTier),
+  });
+  const segmentPage = (segmentQuery.data?.customers ?? []).slice(segmentOffset, segmentOffset + SEGMENT_PAGE_SIZE);
+  const segmentShown = segmentQuery.data?.customers?.length ?? 0;
+  function selectCell(stageId, tierId) {
+    setSelectedStage(stageId);
+    setSelectedTier((current) => (current === tierId && selectedStage === stageId ? null : tierId));
+    setSegmentOffset(0);
+  }
   const maxCell = Math.max(1, ...cross.flatMap((row) => TIERS.map((tier) => row[tier.id] ?? 0)));
   const revenueTotal = tiers.reduce((sum, row) => sum + (row.revenue ?? 0), 0);
   const customerTotal = tiers.reduce((sum, row) => sum + (row.count ?? 0), 0);
@@ -43,28 +68,52 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
 
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         {[
-          { label: "High-value customers lapsing", value: lapsing?.high, note: "Review recent spending and service history before choosing a retention action.", color: "var(--status-warning)" },
+          {
+            label: "High-value customers lapsing", value: lapsing?.high,
+            // Revenue represented, not "at risk" -- a historical fact about
+            // this segment's past spending, never a prediction of future loss.
+            revenue: lapsing?.revenue_by_tier?.high,
+            note: "Review recent spending and service history before choosing a retention action.", color: "var(--status-warning)",
+          },
           { label: "Customers with only 1–2 orders", value: summary?.pattern_distribution?.one_to_two, note: "An audience for second-purchase analysis, not a measured conversion failure.", color: "var(--accent)" },
           { label: "Customers in reorder window", value: summary?.due?.count, note: "A timing signal based on past purchases. These are not guaranteed orders.", color: "var(--status-good)" },
         ].map((item) => (
           <article key={item.label} className="rounded-xl border border-border bg-chart-surface p-4" style={{ borderTop: `3px solid ${item.color}` }}>
             <h3 className="text-sm text-foreground/70">{item.label}</h3>
             <div className="my-2 text-3xl font-semibold tabular-nums text-foreground-strong">{count(item.value)}</div>
-            <p className="text-xs leading-relaxed text-foreground/60">{item.note}</p>
+            {Number.isFinite(item.revenue) && (
+              <p className="text-xs font-medium text-foreground-strong">{formatCurrency(item.revenue)} revenue represented</p>
+            )}
+            <p className="mt-1 text-xs leading-relaxed text-foreground/60">{item.note}</p>
           </article>
         ))}
       </div>
 
       <div className="grid gap-x-4 xl:grid-cols-2">
         <Card title="Lifecycle × customer value">
-          <p className="mb-3 text-xs text-foreground/60">Darker cells contain more customers. Select a stage to inspect its value mix.</p>
+          <p className="mb-3 text-xs text-foreground/60">Darker cells contain more customers. Click a cell to list those customers.</p>
           {cross.length ? <>
             <div className="overflow-x-auto">
               <table className="w-full text-sm" aria-label="Customer lifecycle by value">
                 <thead><tr><th className="p-2 text-left font-medium">Stage</th>{TIERS.map((tier) => <th key={tier.id} className="p-2 text-right text-xs font-medium">{tier.label}</th>)}</tr></thead>
                 <tbody>{cross.map((row) => <tr key={row.id}>
-                  <th className="p-1 text-left font-normal"><button type="button" aria-pressed={selectedStage === row.id} onClick={() => setSelectedStage(row.id)} className={`rounded px-2 py-2 text-left text-xs focus-visible:outline-2 focus-visible:outline-accent ${selectedStage === row.id ? "bg-accent-soft text-accent" : "hover:bg-accent-soft"}`}>{row.label}</button></th>
-                  {TIERS.map((tier) => <td key={tier.id} className="border-2 border-chart-surface p-2 text-right tabular-nums text-foreground-strong" style={{ background: Number.isFinite(row[tier.id]) ? `color-mix(in srgb, var(--accent) ${8 + row[tier.id] / maxCell * 42}%, var(--chart-surface))` : undefined }}>{count(row[tier.id])}</td>)}
+                  <th className="p-1 text-left font-normal"><button type="button" aria-pressed={selectedStage === row.id} onClick={() => { setSelectedStage(row.id); setSelectedTier(null); setSegmentOffset(0); }} className={`rounded px-2 py-2 text-left text-xs focus-visible:outline-2 focus-visible:outline-accent ${selectedStage === row.id ? "bg-accent-soft text-accent" : "hover:bg-accent-soft"}`}>{row.label}</button></th>
+                  {TIERS.map((tier) => {
+                    const isPicked = selectedStage === row.id && selectedTier === tier.id;
+                    return (
+                      <td key={tier.id} className="border-2 border-chart-surface p-0.5 text-right tabular-nums text-foreground-strong">
+                        <button
+                          type="button"
+                          aria-pressed={isPicked}
+                          onClick={() => selectCell(row.id, tier.id)}
+                          className={`w-full rounded px-2 py-1.5 focus-visible:outline-2 focus-visible:outline-accent ${isPicked ? "ring-2 ring-accent" : ""}`}
+                          style={{ background: Number.isFinite(row[tier.id]) ? `color-mix(in srgb, var(--accent) ${8 + row[tier.id] / maxCell * 42}%, var(--chart-surface))` : undefined }}
+                        >
+                          {count(row[tier.id])}
+                        </button>
+                      </td>
+                    );
+                  })}
                 </tr>)}</tbody>
               </table>
             </div>
@@ -72,6 +121,50 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
               {selected ? <><strong>{selected.label}: {count(selected.count)} customers.</strong> {count(selectedMix?.high)} high value. Historical revenue: {Number.isFinite(selected.revenue) ? formatCurrency(selected.revenue) : "Unavailable"}.</> : "Select a stage above."}
               <p className="mt-1 text-foreground/60">Value tiers use lifetime revenue. Lapsing and churned are heuristic stages, not confirmed customer loss.</p>
             </div>
+
+            {selectedTier && (
+              <div className="mt-3 rounded-lg border border-border p-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-semibold text-foreground-strong">
+                    {TIERS.find((t) => t.id === selectedTier)?.label} · {categories.find((c) => c.id === selectedStage)?.label}
+                  </h4>
+                  {segmentQuery.data?.status === "ok" && (
+                    <span className="text-xs text-foreground/60">{formatNumber(segmentQuery.data.total)} customer{segmentQuery.data.total === 1 ? "" : "s"}</span>
+                  )}
+                </div>
+                {segmentQuery.isLoading && <p className="mt-2 text-xs text-foreground/60">Loading…</p>}
+                {segmentQuery.data?.status === "error" && <p className="mt-2 text-xs text-warning">Couldn&rsquo;t load this segment.</p>}
+                {segmentQuery.data?.status === "ok" && (
+                  <>
+                    <ul className="mt-2 divide-y divide-border text-xs">
+                      {segmentPage.map((c) => (
+                        <li key={c.partner_id} className="flex items-center justify-between gap-2 py-1.5">
+                          <span className="text-foreground-strong">{c.name}</span>
+                          <span className="text-foreground/60">{c.phone_masked ?? "no phone"} · {formatNumber(c.order_count)} orders</span>
+                          <span className="tabular-nums text-foreground-strong">{formatCurrency(c.revenue)}</span>
+                        </li>
+                      ))}
+                      {segmentPage.length === 0 && <li className="py-1.5 text-foreground/60">No customers in this segment.</li>}
+                    </ul>
+                    {segmentShown > SEGMENT_PAGE_SIZE && (
+                      <div className="mt-2 flex items-center justify-between text-xs text-foreground/60">
+                        <span>{segmentOffset + 1}–{Math.min(segmentOffset + SEGMENT_PAGE_SIZE, segmentShown)} of {formatNumber(segmentShown)}</span>
+                        <div className="flex gap-2">
+                          <button type="button" disabled={segmentOffset === 0} onClick={() => setSegmentOffset(Math.max(0, segmentOffset - SEGMENT_PAGE_SIZE))} className="rounded border border-border px-2 py-1 disabled:opacity-40">Previous</button>
+                          <button type="button" disabled={segmentOffset + SEGMENT_PAGE_SIZE >= segmentShown} onClick={() => setSegmentOffset(segmentOffset + SEGMENT_PAGE_SIZE)} className="rounded border border-border px-2 py-1 disabled:opacity-40">Next</button>
+                        </div>
+                      </div>
+                    )}
+                    {/* Honest about the cap: "2,275 customers" up top is the
+                        real total: this list is the top SEGMENT_LIST_CAP by
+                        revenue, not all of them, whenever the two differ. */}
+                    {segmentQuery.data.total > segmentShown && (
+                      <p className="mt-2 text-foreground/50">Showing the top {formatNumber(segmentShown)} by revenue, of {formatNumber(segmentQuery.data.total)} total.</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </> : <p className="py-6 text-sm text-foreground/60">Lifecycle value breakdown unavailable.</p>}
         </Card>
 

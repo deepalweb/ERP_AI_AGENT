@@ -572,6 +572,23 @@ async def customer_lifecycle():
         return {"status": "error", "detail": "Could not load customer lifecycle data."}
 
 
+@app.get("/customers/lifecycle/segment")
+async def customer_lifecycle_segment(category: str, value_tier: str | None = None):
+    """The named customers behind one lifecycle x value-tier cell on the
+    Customer growth heatmap — a live query (compute_lifecycle_summary's
+    own cached snapshot has no per-customer rows to filter), masked contact
+    info, capped at SEGMENT_LIST_CAP (top by revenue) and paginated
+    client-side — see customer_predictions.list_customers_by_segment()."""
+    try:
+        result = await anyio.to_thread.run_sync(
+            customer_predictions.list_customers_by_segment, category, value_tier
+        )
+        return result
+    except Exception:
+        logger.exception("customer lifecycle segment lookup failed")
+        return {"status": "error", "detail": "Could not load customers for this segment."}
+
+
 @app.get("/customers/outlet-behavior")
 async def customer_outlet_behavior():
     """Per-outlet customer behavior (orders, cancellations, unique

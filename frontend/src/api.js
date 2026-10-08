@@ -309,6 +309,19 @@ export async function fetchCustomerLifecycle() {
   return readResponse(response);
 }
 
+// No limit/offset: the backend's own query is the expensive part (a live
+// per-customer classification pass, 8-10s), not the row count, so it's
+// fetched once per cell click (capped server-side at SEGMENT_LIST_CAP, top
+// by revenue) and paginated client-side -- see list_customers_by_segment's
+// own docstring for why re-querying per page would be wasteful.
+export async function fetchCustomerLifecycleSegment(category, valueTier) {
+  const params = new URLSearchParams({ category });
+  if (valueTier) params.set("value_tier", valueTier);
+  const response = await apiFetch(`${API_BASE_URL}/customers/lifecycle/segment?${params}`);
+
+  return readResponse(response);
+}
+
 export async function fetchCustomerOutletBehavior() {
   const response = await apiFetch(`${API_BASE_URL}/customers/outlet-behavior`);
 
