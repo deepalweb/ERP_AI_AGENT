@@ -418,8 +418,23 @@ def _stuck_stock_count_finding():
             "baseline_month": None,
             "total": round(result["total_value_at_risk_rs"], 2),
             "top_contributors": top_contributors,
-        }
+        },
     ]
+    top_products = result.get("top_products") or []
+    if top_products:
+        # Real product identity (added alongside the session-ranking chart
+        # fix): fills what was previously a dead-end "product list is not
+        # stored on the case" message under "What is driving it" -- product
+        # rides along on the same per-line query stuck_stock_count already
+        # runs, so this is free, not a new query.
+        breakdowns.append({
+            "dimension": "product",
+            "label": "Estimated value of unscanned lines by product",
+            "mode": "contribution",
+            "baseline_month": None,
+            "total": round(sum(p["value_rs"] for p in top_products), 2),
+            "top_contributors": [{"name": p["name"], "current": p["value_rs"], "delta": p["value_rs"]} for p in top_products],
+        })
     evidence = evidence_engine.build_snapshot_evidence(breakdowns, result["as_of"][:10])
     total_value = result["total_value_at_risk_rs"]
     priority = (

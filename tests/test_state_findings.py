@@ -27,7 +27,7 @@ def _session(session_id, outlet, unscanned_value_rs, total_lines=100, scanned_li
     }
 
 
-def _scan_result(sessions, total_value_at_risk_rs, as_of="2026-09-17T00:00:00", coverage=None):
+def _scan_result(sessions, total_value_at_risk_rs, as_of="2026-09-17T00:00:00", coverage=None, top_products=None):
     # valuation_coverage is now a required key on the real get_stuck_stock_
     # counts() return (Final Stock-Count Financial Disclosure item 1) -- a
     # placeholder default here since most tests in this file aren't
@@ -39,6 +39,7 @@ def _scan_result(sessions, total_value_at_risk_rs, as_of="2026-09-17T00:00:00", 
         "valuation_coverage": coverage or {
             "total_unscanned_lines": 0, "source_cost_lines": 0, "catalog_estimate_lines": 0, "no_cost_data_lines": 0,
         },
+        "top_products": top_products or [],
     }
 
 
@@ -99,6 +100,32 @@ def test_multiple_sessions_add_a_recurring_process_gap_recommendation(monkeypatc
     assert "SC/2026/00783" in finding["recommendations"][0]["action"]
     assert "Ashan Kannangara" in finding["recommendations"][0]["action"]
     assert "37 day" in finding["recommendations"][0]["action"]
+
+
+def test_stuck_stock_count_finding_adds_a_product_breakdown_when_available(monkeypatch):
+    # Previously the "What is driving it" section had nothing to show for
+    # this finding (get_stuck_stock_counts only returned per-session stats),
+    # so InventoryCaseView.jsx rendered a dead-end "product list is not
+    # stored on the case" message. Product identity now rides along on the
+    # same query for free -- this is the fix.
+    _stub_snapshot_evidence(monkeypatch)
+    sessions = [_session(1, "Celeste Daily Colombo 6", 10_000)]
+    top_products = [{"name": "Carrot", "sku": "000083", "lines": 3, "qty": 50.0, "value_rs": 7_500.0}]
+    monkeypatch.setattr(sf.stock_counts, "get_stuck_stock_counts", lambda: _scan_result(sessions, 10_000, top_products=top_products))
+
+    finding = sf._stuck_stock_count_finding()
+    product_breakdown = next(b for b in finding["breakdowns"] if b["dimension"] == "product")
+    assert product_breakdown["top_contributors"] == [{"name": "Carrot", "current": 7_500.0, "delta": 7_500.0}]
+    assert product_breakdown["total"] == 7_500.0
+
+
+def test_stuck_stock_count_finding_has_no_product_breakdown_when_none_available(monkeypatch):
+    _stub_snapshot_evidence(monkeypatch)
+    sessions = [_session(1, "Celeste Daily Colombo 6", 10_000)]
+    monkeypatch.setattr(sf.stock_counts, "get_stuck_stock_counts", lambda: _scan_result(sessions, 10_000))
+
+    finding = sf._stuck_stock_count_finding()
+    assert not any(b["dimension"] == "product" for b in finding["breakdowns"])
 
 
 def test_leading_recommendation_does_not_prescribe_a_specific_disposition(monkeypatch):

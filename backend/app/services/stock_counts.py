@@ -71,6 +71,7 @@ STUCK_SESSIONS_SQL = f"""
 SESSION_LINES_SQL = """
     SELECT scl.count_id, scl.onhand_qty, scl.avg_cost,
            pt.celeste_cost_price_ex_vat AS cost, pt.list_price,
+           pt.name->>'en_US' AS product, pt.default_code AS sku,
            (scanned.count_line_id IS NOT NULL) AS was_scanned
     FROM stock_count_line scl
     JOIN product_product pp ON pp.id = scl.product_id
@@ -155,6 +156,7 @@ def get_stuck_stock_counts():
             "valuation_coverage": {
                 "total_unscanned_lines": 0, "source_cost_lines": 0, "catalog_estimate_lines": 0, "no_cost_data_lines": 0,
             },
+            "top_products": [],
         }
 
     count_ids = [r["id"] for r in sessions_rows]
@@ -170,6 +172,13 @@ def get_stuck_stock_counts():
     # have contributed money, because coverage is about pricing, not size.
     coverage = {"total_unscanned_lines": 0, "source_cost_lines": 0, "catalog_estimate_lines": 0, "no_cost_data_lines": 0}
     stats_by_session = {}
+    # Product identity rides along on the same already-running query (just 2
+    # extra SELECT columns on an existing join, not a second heavier query --
+    # unlike SESSION_LINE_DETAIL_SQL below, which is genuinely per-line and
+    # stays single-session-only), aggregated in this same pass so "what is
+    # driving it" has a real product breakdown instead of the dead-end
+    # "not stored on the case" message InventoryCaseView.jsx showed before.
+    value_by_product: dict[tuple, dict] = {}
     for r in line_rows:
         stats = stats_by_session.setdefault(
             r["count_id"], {"total_lines": 0, "scanned_lines": 0, "unscanned_qty": 0.0, "unscanned_value": 0.0}
@@ -187,14 +196,28 @@ def get_stuck_stock_counts():
         onhand = max(0.0, float(r["onhand_qty"] or 0))
         avg_cost = float(r["avg_cost"] or 0)
         usable_cost = avg_cost if avg_cost > 0 else _usable_cost(r["cost"], r["list_price"])
+        value = 0.0
         if usable_cost is not None:
-            stats["unscanned_value"] += onhand * usable_cost
+            value = onhand * usable_cost
+            stats["unscanned_value"] += value
         if avg_cost > 0:
             coverage["source_cost_lines"] += 1
         elif usable_cost is not None:
             coverage["catalog_estimate_lines"] += 1
         else:
             coverage["no_cost_data_lines"] += 1
+
+        key = (r["sku"], r["product"] or "Unnamed product")
+        p = value_by_product.setdefault(key, {"name": key[1], "sku": key[0], "lines": 0, "qty": 0.0, "value_rs": 0.0})
+        p["lines"] += 1
+        p["qty"] += onhand
+        p["value_rs"] += value
+
+    top_products = sorted(
+        [{"name": p["name"], "sku": p["sku"], "lines": p["lines"], "qty": round(p["qty"], 2), "value_rs": round(p["value_rs"], 2)}
+         for p in value_by_product.values()],
+        key=lambda p: p["value_rs"], reverse=True,
+    )[:10]
 
     sessions = []
     for r in sessions_rows:
@@ -226,6 +249,7 @@ def get_stuck_stock_counts():
         "sessions": sessions,
         "total_value_at_risk_rs": total_value_at_risk,
         "valuation_coverage": coverage,
+        "top_products": top_products,
     }
 
 

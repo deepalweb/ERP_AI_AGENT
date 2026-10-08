@@ -30,10 +30,10 @@ def _session_row(id, name, state, started, outlet, responsible, review_datetime=
     }
 
 
-def _line_row(count_id, onhand_qty, cost, list_price, was_scanned, avg_cost=0):
+def _line_row(count_id, onhand_qty, cost, list_price, was_scanned, avg_cost=0, product="Test Product", sku="000001"):
     return {
         "count_id": count_id, "onhand_qty": onhand_qty, "avg_cost": avg_cost,
-        "cost": cost, "list_price": list_price, "was_scanned": was_scanned,
+        "cost": cost, "list_price": list_price, "product": product, "sku": sku, "was_scanned": was_scanned,
     }
 
 
@@ -83,6 +83,34 @@ def test_computes_unscanned_value_only_for_unscanned_lines(monkeypatch):
     assert result["valuation_coverage"] == {
         "total_unscanned_lines": 2, "source_cost_lines": 0, "catalog_estimate_lines": 1, "no_cost_data_lines": 1,
     }
+
+
+def test_top_products_aggregates_unscanned_value_across_sessions_and_excludes_scanned_lines(monkeypatch):
+    started = datetime.utcnow() - timedelta(days=3)
+    sessions_rows = [
+        _session_row(1, "SC/A", "review", started, "Celeste Daily Colombo 6", "Someone"),
+        _session_row(2, "SC/B", "review", started, "Celeste Daily - Attidiya", "Someone Else"),
+    ]
+    line_rows = [
+        # Same product, unscanned, across two different sessions -- must combine.
+        _line_row(1, 10, 10.0, 20.0, False, product="Carrot", sku="000083"),
+        _line_row(2, 5, 10.0, 20.0, False, product="Carrot", sku="000083"),
+        # Different product, unscanned.
+        _line_row(1, 2, 50.0, 60.0, False, product="Coconut", sku="001363"),
+        # Scanned -- must not contribute to the product total at all.
+        _line_row(1, 100, 10.0, 20.0, True, product="Carrot", sku="000083"),
+    ]
+    monkeypatch.setattr(stock_counts.reporting, "run_query", _fake_run_query(sessions_rows, line_rows, []))
+
+    result = stock_counts.get_stuck_stock_counts()
+    top = {p["sku"]: p for p in result["top_products"]}
+    assert top["000083"]["name"] == "Carrot"
+    assert top["000083"]["qty"] == 15.0
+    assert top["000083"]["value_rs"] == 150.0  # (10 + 5) * 10, scanned line excluded
+    assert top["000083"]["lines"] == 2
+    assert top["001363"]["value_rs"] == 100.0  # 2 * 50
+    # Sorted by value descending.
+    assert result["top_products"][0]["sku"] == "000083"
 
 
 def test_prefers_source_system_avg_cost_over_catalog_price(monkeypatch):
