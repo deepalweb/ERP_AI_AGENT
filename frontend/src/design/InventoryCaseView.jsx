@@ -471,7 +471,20 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
         <div className="mt-4">{followUp}</div>
       </section>
 
-      {accountabilityNode && <Block title="Who and what is driving the loss, company-wide">{accountabilityNode}</Block>}
+      {accountabilityNode && (
+        // Collapsed by default (real user complaint: correctly-scoped is
+        // still a lot of secondary charts/tables under one narrow finding
+        // -- the dispatch/receiving scatter, "Sent above plan," "When the
+        // loss happened," and the raw numbers table are optional
+        // deeper-digging context, not primary findings data; "What is
+        // driving it" above already answers the finding's own question).
+        <details className="rounded-xl border border-border bg-surface p-5">
+          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider text-foreground-subtle">
+            Who and what is driving the loss, company-wide (optional — for deeper digging)
+          </summary>
+          <div className="mt-3">{accountabilityNode}</div>
+        </details>
+      )}
 
       <Block title="What is not known yet">
         {notKnown.length > 0 ? (
