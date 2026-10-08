@@ -1,9 +1,10 @@
 # Odoo data fixes needed for transfer attribution
 
-Written for: whoever administers Odoo for Celeste Daily. These three issues limit how
+Written for: whoever administers Odoo for Celeste Daily. These four issues limit how
 precisely the inventory investigation module (erp-ai-agent) can attribute transfer
-shortages to a person or a process step. None of them can be fixed from this codebase —
-each needs a change inside Odoo itself. Numbers below are live, checked 2026-10-08.
+shortages to a person or a process step, plus one likely data-entry error worth a quick
+check. None of them can be fixed from this codebase — each needs a change inside Odoo
+itself. Numbers below are live, checked 2026-10-08.
 
 ## 1. Shortage records are logged under a shared login
 
@@ -43,9 +44,23 @@ loss from the headline numbers.
 workflow: confirm whether a cancelled receipt's shortage lines represent real loss, and if
 so, how they should be reconciled or re-attributed.
 
+## 4. Likely unit-of-measure error on a sticker-label dispatch
+
+One outbound line flagged as "sent far above plan" (`stock_picking` `WPM/WPM/EK/00029`,
+received as `CLSEK/IN/02444`, 2026-10-03): SKU 008076 ("Sticker Lable 76Mm*50Mm") was
+planned at 2 units and dispatched at 2,000 — exactly 1000x the plan. That round a ratio,
+on a product that typically ships in rolls, looks like the dispatcher entered the
+quantity in pieces against a plan written in rolls (or vice versa), not a genuine
+1,998-unit over-dispatch.
+
+**Fix:** no code change needed. Check SKU 008076's unit of measure and the UoM used on
+this specific transfer line (`WPM/WPM/EK/00029`) against what was actually sent. If it's
+a UoM mismatch, correct the line; if it's a genuine over-dispatch, no action needed —
+the module will keep flagging it correctly either way.
+
 ---
 
-None of the three above can be resolved from the application; each needs someone with
+None of the four above can be resolved from the application; each needs someone with
 Odoo access to make the change or confirm the intended process. Once any of them is
 addressed, the module will reflect the improvement automatically on its next scan — no
 corresponding code change is needed here.

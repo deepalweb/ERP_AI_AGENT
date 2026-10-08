@@ -161,13 +161,38 @@ def segment_concentration_checks(
     for b in breakdowns:
         if b["mode"] != "contribution":
             what_it_measures = "each segment's own rate" if b["mode"] == "rate" else "each segment's share of the mix"
+            detail = (
+                f"This breakdown ({b['label'].lower()}, {b['mode']} mode) measures "
+                f"{what_it_measures} rather than a raw contribution to the total — not yet supported by "
+                f"this concentration check, since its values aren't directly comparable to the metric's "
+                f"overall movement."
+            )
+            # Still a real, checkable fact even though concentration itself
+            # doesn't apply to a rate: does every segment move the SAME
+            # direction as the headline, or is the company-wide number
+            # being carried by one segment while others go the other way?
+            # Caught live on stockout_cancellation_rate: a 41% company-wide
+            # improvement was entirely Colombo 6 (1.11 -> 0.67); the other
+            # three outlets all got WORSE that month -- the "unknown" verdict
+            # above is still correct (this genuinely isn't a concentration
+            # question), but leaving the detail generic hid a real, opposite-
+            # direction split a manager reading "41% better" should know about.
+            if b["mode"] == "rate" and total_delta:
+                contributors = b.get("top_contributors") or []
+                overall_sign = 1 if total_delta > 0 else -1
+                aligned = [c["name"] for c in contributors if (c.get("delta") or 0) * overall_sign > 0]
+                opposite = [c["name"] for c in contributors if (c.get("delta") or 0) * overall_sign < 0]
+                if aligned and opposite:
+                    detail += (
+                        f" Segment-level check: the company-wide {move_word} is carried by "
+                        f"{'1 segment' if len(aligned) == 1 else f'{len(aligned)} segments'} ({', '.join(aligned)}); "
+                        f"{'1 segment' if len(opposite) == 1 else f'{len(opposite)} segments'} moved the opposite "
+                        f"way over the same period ({', '.join(opposite)})."
+                    )
             checks.append({
                 "source": f"{b['dimension']}_concentration",
                 "verdict": "unknown",
-                "detail": f"This breakdown ({b['label'].lower()}, {b['mode']} mode) measures "
-                f"{what_it_measures} rather than a raw contribution to the total — not yet supported by "
-                f"this concentration check, since its values aren't directly comparable to the metric's "
-                f"overall movement.",
+                "detail": detail,
             })
             continue
 

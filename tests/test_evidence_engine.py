@@ -109,6 +109,44 @@ def test_rate_mode_breakdown_is_unknown_not_forced_through_count_math():
     assert "rate" in checks[0]["detail"]
 
 
+def test_rate_mode_breakdown_still_names_segments_moving_the_opposite_way():
+    # Real case (stockout_cancellation_rate, 2026-09): a 41% company-wide
+    # improvement was carried entirely by Colombo 6; the other three
+    # outlets all got WORSE that month. Verdict stays "unknown" (this
+    # still isn't a concentration question), but the detail must say so.
+    trend = [
+        {"month": "2026-08", "value": 0.55, "numerator": 400, "denominator": 72000},
+        {"month": "2026-09", "value": 0.32, "numerator": 300, "denominator": 93000},
+    ]
+    anomaly = {"latest_month": "2026-09"}
+    breakdown = _breakdown("store", "Store", "2026-08", [
+        {"name": "Colombo 6", "current": 0.67, "baseline": 1.11, "delta": -0.44, "current_volume": 28504},
+        {"name": "Attidiya", "current": 0.28, "baseline": 0.21, "delta": 0.07, "current_volume": 27367},
+        {"name": "Pannipitiya", "current": 0.27, "baseline": 0.17, "delta": 0.11, "current_volume": 13912},
+    ])
+    breakdown["mode"] = "rate"
+    checks = ee.segment_concentration_checks(anomaly, [breakdown], trend)
+    assert checks[0]["verdict"] == "unknown"
+    assert "Colombo 6" in checks[0]["detail"]
+    assert "Attidiya" in checks[0]["detail"] and "Pannipitiya" in checks[0]["detail"]
+
+
+def test_rate_mode_breakdown_says_nothing_extra_when_all_segments_agree():
+    trend = [
+        {"month": "2026-06", "value": 3.5, "numerator": 3000, "denominator": 85000},
+        {"month": "2026-07", "value": 2.8, "numerator": 2512, "denominator": 88398},
+    ]
+    anomaly = {"latest_month": "2026-07"}
+    breakdown = _breakdown("store", "Store", "2026-06", [
+        {"name": "Ethul Kotte", "current": 2.98, "baseline": 4.3, "delta": -1.32, "current_volume": 22011},
+        {"name": "Colombo 6", "current": 2.1, "baseline": 3.0, "delta": -0.9, "current_volume": 18000},
+    ])
+    breakdown["mode"] = "rate"
+    checks = ee.segment_concentration_checks(anomaly, [breakdown], trend)
+    assert checks[0]["verdict"] == "unknown"
+    assert "Segment-level check" not in checks[0]["detail"]
+
+
 def test_composition_mode_breakdown_is_unknown_not_forced_through_share_math():
     # cancellation_rate's "reason" dimension: each reason's SHARE of the mix
     # (a compositional question), not a driver of the metric's own movement.
