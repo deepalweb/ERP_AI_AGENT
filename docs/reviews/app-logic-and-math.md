@@ -1,6 +1,6 @@
 # App logic and mathematics inventory
 
-Reviewed against the working tree on 2026-09-29. This covers the main business analytics and decision paths, not every SQL expression or utility. It describes implemented calculations, not a validation that thresholds predict business outcomes accurately. Source files are linked for the exact eligibility, joins, and exclusions.
+Reviewed against the working tree on 2026-09-29, with section 10 added 2026-10-08 for the warehouse-to-outlet transfer and dispatch detectors built after that date. This covers the main business analytics and decision paths, not every SQL expression or utility. It describes implemented calculations, not a validation that thresholds predict business outcomes accurately. Source files are linked for the exact eligibility, joins, and exclusions.
 
 ## 1. Data selection and time
 
@@ -163,7 +163,20 @@ Sources: [customer_predictions.py](../../backend/app/services/customer_predictio
 
 Sources: [inventory.py](../../backend/app/services/inventory.py), [stock_alerts.py](../../backend/app/services/stock_alerts.py), [state_findings.py](../../mcp_server/tools/state_findings.py), [basket.py](../../backend/app/services/basket.py), [loyalty.py](../../backend/app/services/loyalty.py).
 
-## 10. Business health and forward projections
+## 10. Warehouse-to-outlet transfer and dispatch detection
+
+Scope for all five: Celeste outlets (store ids `1, 2, 45, 46`), incoming receipts from `Transits/%` locations, matched to their outbound note via `receipt.origin == outbound.name`.
+
+- **Missing item / extra quantity / product damage** (one case per shortage reason): 14-day window, recurrence gate of >=3 incidents across >=2 distinct days. Each case carries a line-level trace (plan, sent, expected, received, who closed each record). Shortage lines on cancelled or not-yet-received receipts are excluded from every headline figure and reported separately.
+- **Large single shortages** (one case, 30-day window): a line qualifies at >=20 units and either >=10x its own product's median line (with >=5 lines of history) or >=60 units on thin history. Priority scales with the worst single line or the batch's catalog-cost value (>=200 units or Rs 50,000 = critical; >=100 units or Rs 15,000 = high; else medium) rather than a fixed tier.
+- **Dispatch sent above plan** (one case, 14-day window): a line qualifies at >=5x its planned quantity and >=50 units over -- the top ~0.3% of 6 months of outbound lines, not routine rounding. "Sent with no plan line at all" was checked over the same 6 months and never occurs, so it is not a detector, only a count.
+- **Dispatcher/product pattern** (one case, 14-day window): a dispatcher's miss rate on one recurring product, compared to their own overall rate everywhere else they handle. Qualifies at >=50 units handled on the pair, >=5% rate, and >=5x the dispatcher's own rate. Raw concentration (one dispatcher accounts for most of a product's missing units) was evaluated and rejected: dispatchers are tied to fixed warehouse-to-outlet routes, so median concentration across 192 recurring products over 6 months is already 66.7%, with 41 products at 90%+ -- that reflects route assignment, not behavior.
+- **Accountability panel** (not a case; company-wide context shown on the finding pages above): every done receipt move in the window, not only lines with a recorded shortage, so each person's and product's rate has their full handled volume as the denominator. Filterable by outlet, product, person, date and recurring-only; raw rows cached 5 minutes.
+- These five findings are grouped into management families (`warehouse_transfer_shortages`, `warehouse_transfer_overages`, `warehouse_dispatch_overage`, `transfer_damage`) alongside the pre-existing stock/opportunity families; a family's priority is its highest-priority child, and exposure is never summed across children, since they can reference the same underlying lines.
+
+Sources: [transfer_discrepancy.py](../../mcp_server/tools/transfer_discrepancy.py), [extreme_event.py](../../mcp_server/tools/extreme_event.py), [dispatch_overage.py](../../mcp_server/tools/dispatch_overage.py), [dispatch_pattern.py](../../mcp_server/tools/dispatch_pattern.py), [transfer_accountability.py](../../mcp_server/tools/transfer_accountability.py), [management.py](../../backend/app/services/management.py).
+
+## 11. Business health and forward projections
 
 Health is a rule-based score, not a learned risk probability:
 
@@ -176,7 +189,7 @@ Forward Look uses the most recent three complete-month growth rates (requires fo
 
 Sources: [health.py](../../backend/app/services/health.py), [forecast.py](../../backend/app/services/forecast.py). Separate forecasting experiments are not equivalent to this production Forward Look calculation.
 
-## 11. Cases, verification and outcomes
+## 12. Cases, verification and outcomes
 
 - Case identity is metric + domain + horizon, with an active-case uniqueness rule.
 - States include open, verification pending, reopened, resolved and dismissed.
@@ -188,7 +201,7 @@ Sources: [health.py](../../backend/app/services/health.py), [forecast.py](../../
 
 Sources: [case_engine.py](../../backend/app/services/case_engine.py), [action_outcomes.py](../../backend/app/services/action_outcomes.py), [outcome_intelligence.py](../../backend/app/services/outcome_intelligence.py).
 
-## 12. AI and evaluation rules
+## 13. AI and evaluation rules
 
 The model receives measured evidence and proposes structured explanations/recommendations; database mathematics and deterministic detection rules are not learned by the model during a scan.
 

@@ -33,7 +33,7 @@ function IssueRow({ item, evidenceFor, typeFor, dedupeDomain }) {
       <td className="px-4 py-3">
         <Link to={`/investigate/${encodeURIComponent(item.case_id)}`} className="font-medium text-accent hover:underline">{title}</Link>
       </td>
-      <td className="px-4 py-3 text-foreground">
+      <td className="hidden px-4 py-3 text-foreground sm:table-cell">
         {dedupeDomain ? <span className="text-foreground-subtle" aria-hidden="true">—</span> : (DOMAIN_LABEL[item.domain] ?? prettifyMetricId(item.domain || "unclassified"))}
       </td>
       <td className="px-4 py-3">
@@ -42,8 +42,8 @@ function IssueRow({ item, evidenceFor, typeFor, dedupeDomain }) {
           : <Badge tone={toneForPriority(item.priority)}>{prettifyMetricId(item.priority || "Unranked")}</Badge>}
       </td>
       <td className="px-4 py-3 text-foreground">{caseStatusMeta(item.status).label}</td>
-      <td className="px-4 py-3 text-foreground-subtle">{typeFor(item)}</td>
-      <td className="whitespace-nowrap px-4 py-3 text-right tabular-nums text-foreground" title="Days since this finding was first observed, not since its data last changed.">{age == null ? "n/a" : `${age} d`}</td>
+      <td className="hidden px-4 py-3 text-foreground-subtle sm:table-cell">{typeFor(item)}</td>
+      <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-foreground sm:table-cell" title="Days since this finding was first observed, not since its data last changed.">{age == null ? "n/a" : `${age} d`}</td>
       <td className="px-4 py-3 text-right tabular-nums">
         {Number.isFinite(value) ? (
           <span className={weakValue ? "text-foreground-subtle" : "text-foreground"}>
@@ -80,15 +80,15 @@ export default function IssuesTable({ items, evidenceFor, typeFor, groups }) {
 
   return (
     <div className="overflow-x-auto rounded-xl border border-border bg-surface">
-      <table className="w-full min-w-[720px] text-left text-sm">
+      <table className="w-full min-w-[480px] text-left text-sm sm:min-w-[720px]">
         <thead className="border-b border-border text-xs uppercase tracking-wider text-foreground-subtle">
           <tr>
             <th scope="col" className="px-4 py-2.5 font-medium">Issue</th>
-            <th scope="col" className="px-4 py-2.5 font-medium">Domain</th>
+            <th scope="col" className="hidden px-4 py-2.5 font-medium sm:table-cell">Domain</th>
             <th scope="col" className="px-4 py-2.5 font-medium">Priority</th>
             <th scope="col" className="px-4 py-2.5 font-medium">Status</th>
-            <th scope="col" className="px-4 py-2.5 font-medium">Type</th>
-            <th scope="col" className="px-4 py-2.5 text-right font-medium" title="Days since this finding was first observed, not since its data last changed.">Age</th>
+            <th scope="col" className="hidden px-4 py-2.5 font-medium sm:table-cell">Type</th>
+            <th scope="col" className="hidden px-4 py-2.5 text-right font-medium sm:table-cell" title="Days since this finding was first observed, not since its data last changed.">Age</th>
             <th scope="col" className="px-4 py-2.5 text-right font-medium">Recorded exposure</th>
           </tr>
         </thead>
