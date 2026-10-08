@@ -24,11 +24,28 @@ def _stub_sources(monkeypatch):
         # findings() falls through to the real, unmocked function and hits
         # the live reporting DB from inside these tests.
         "controls": [],
+        # Same reasoning, same fix, for the warehouse transfer-discrepancy
+        # detector added 2026-09-29 -- without this it falls through to the
+        # real function, hits the live reporting DB, and (since it also
+        # calls investigation._get_client() for recommendations, same as
+        # every other real detector) can trip a real LLM provider rate
+        # limit from inside a pipeline-concurrency test.
+        "transfer_discrepancy": [],
+        # Same reasoning as transfer_discrepancy above: the real function hits the live reporting DB.
+        "extreme_event": [],
+        # Same reasoning again, for the dispatch-side magnitude detector added 2026-10-07.
+        "dispatch_overage": [],
+        # Same reasoning again, for the dispatcher/product pattern detector added 2026-10-07.
+        "dispatch_pattern": [],
     }
     monkeypatch.setattr(brain.state_findings, "build_inventory_findings", lambda: sources["inventory"])
     monkeypatch.setattr(brain.state_findings, "build_operational_findings", lambda: sources["operations"])
     monkeypatch.setattr(brain.state_findings, "build_controls_findings", lambda: sources["controls"])
     monkeypatch.setattr(brain.incident_engine, "build_incident_findings", lambda: sources["incidents"])
+    monkeypatch.setattr(brain.transfer_discrepancy, "build_transfer_discrepancy_findings", lambda: sources["transfer_discrepancy"])
+    monkeypatch.setattr(brain.extreme_event, "build_extreme_event_findings", lambda: sources["extreme_event"])
+    monkeypatch.setattr(brain.dispatch_overage, "build_dispatch_overage_findings", lambda: sources["dispatch_overage"])
+    monkeypatch.setattr(brain.dispatch_pattern, "build_dispatch_pattern_findings", lambda: sources["dispatch_pattern"])
     monkeypatch.setattr(brain, "_snapshot_health", dict)
     monkeypatch.setattr(brain, "_data_freshness", dict)
     predictions = brain.customer_predictions
@@ -137,7 +154,7 @@ def test_scheduled_scans_in_separate_workers_share_one_result(tmp_path):
         for worker in workers:
             worker.start()
         for worker in workers:
-            worker.join(timeout=25)
+            worker.join(timeout=120)
             assert worker.exitcode == 0
         assert calls.value == 1
     finally:

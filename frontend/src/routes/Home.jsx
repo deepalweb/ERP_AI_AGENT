@@ -36,12 +36,14 @@ import {
   fetchManagementActions,
   fetchManagementSummary,
   fetchMetricInvestigation,
+  fetchCurrentPeriodStoreBreakdown,
   fetchOperationsSummary,
   fetchOutcomesSummary,
   fetchStockAlerts,
   fetchStoreScope,
 } from "../api";
 import { DOMAIN_LABEL } from "../design/domains";
+import CurrentPeriodInvestigations from "../design/CurrentPeriodInvestigations";
 import TrendChart from "../charts/TrendChart";
 import RadialGauge from "../charts/RadialGauge";
 import {
@@ -412,6 +414,12 @@ function MetricSwitch({ options, value, onChange, label }) {
     </div>
   );
 }
+// Same 6 metrics the KPI cards above show -- current-period data for anything
+// outside this set (suppliers, dispatch wait, etc.) isn't part of Home's
+// daily-glance KPI story and stays reachable from Investigate instead.
+const HOME_KPI_METRIC_IDS = [
+  "revenue", "order_volume", "average_order_value", "gross_margin", "cancellation_rate", "customer_retention_rate",
+];
 // 03 / Key metrics -- 6 KPI cards. Revenue/Orders/AOV/Cancellation come
 // from dashboard/summary (unchanged); Margin/Retention are new (real,
 // already-registered metrics, just never queried on Home before). Each
@@ -426,13 +434,22 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
   const aovDelta = aov != null && prevAov ? ((aov - prevAov) / prevAov) * 100 : null;
   const cancellationDelta =
     headline && previous ? headline.cancellation_rate_pct - previous.cancellation_rate_pct : null;
-  const aovSeries = sales
-    ? sales.months.map((m) => ({ month: m.month, aov: m.sale_orders ? m.revenue / m.sale_orders : 0 }))
+  // Same reasoning RecentTrendPanel already documents below: September's
+  // total looks like a steep decline purely because the month isn't over
+  // yet, not because anything got worse -- these sparklines were plotting
+  // that raw partial point while the headline number next to them correctly
+  // used August, a real inconsistency on the same card. Current-period (the
+  // section right below) is where the in-progress month belongs -- it
+  // compares elapsed-matched windows instead of a raw, misleading total.
+  const completeMonths = sales ? sales.months.filter((m) => !m.is_partial) : null;
+  const aovSeries = completeMonths
+    ? completeMonths.map((m) => ({ month: m.month, aov: m.sale_orders ? m.revenue / m.sale_orders : 0 }))
     : null;
   const marginTrend = grossMargin.data?.trend;
   const marginAnomaly = grossMargin.data?.anomaly;
   const retentionTrend = customerRetention.data?.trend;
   const retentionAnomaly = customerRetention.data?.anomaly;
+  const completeTrend = (trend, latestMonth) => (trend && latestMonth ? trend.filter((t) => t.month <= latestMonth) : trend);
 
   return (
     <section className="hp-key-metrics" aria-label="Key metrics">
@@ -444,7 +461,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             label="Revenue"
             value={formatCurrency(sales.headline_revenue)}
             delta={sales.revenue_growth_pct}
-            trendData={sales.months}
+            trendData={completeMonths}
             trendValueKey="revenue"
             sparkColor="#06b6d4"
           />
@@ -452,7 +469,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             label="Orders"
             value={formatNumber(sales.headline_orders)}
             delta={sales.orders_growth_pct}
-            trendData={sales.months}
+            trendData={completeMonths}
             trendValueKey="sale_orders"
             sparkColor="#10b981"
           />
@@ -468,7 +485,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             label="Estimated margin"
             value={marginAnomaly?.latest_value != null ? formatPercent(marginAnomaly.latest_value) : "—"}
             delta={marginAnomaly?.pct_change_vs_baseline}
-            trendData={marginTrend}
+            trendData={completeTrend(marginTrend, marginAnomaly?.latest_month)}
             trendValueKey="value"
             sparkColor="#10b981"
           />
@@ -478,7 +495,7 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             delta={cancellationDelta}
             deltaUnit="pp"
             direction="higher_is_bad"
-            trendData={sales.months}
+            trendData={completeMonths}
             trendValueKey="cancellation_rate_pct"
             sparkColor="#06b6d4"
           />
@@ -486,13 +503,14 @@ function KpiSection({ dashboardSummary, grossMargin, customerRetention }) {
             label="Customer retention"
             value={retentionAnomaly?.latest_value != null ? formatPercent(retentionAnomaly.latest_value) : "—"}
             delta={retentionAnomaly?.pct_change_vs_baseline}
-            trendData={retentionTrend}
+            trendData={completeTrend(retentionTrend, retentionAnomaly?.latest_month)}
             trendValueKey="value"
             sparkColor="#ef4444"
             caption="Raw period change, not anomaly-weighted"
           />
         </div>
       )}
+      <CurrentPeriodInvestigations metricIds={HOME_KPI_METRIC_IDS} />
     </section>
   );
 }
@@ -534,9 +552,9 @@ const TREND_OPTIONS = {
   orders: { valueKey: "sale_orders", formatValue: formatNumber, label: "Orders" },
 };
 const OUTLET_OPTIONS = {
-  revenue: { valueKey: "revenue", formatValue: formatCurrency, label: "Revenue", color: "#06b6d4" },
-  orders: { valueKey: "orders", formatValue: formatNumber, label: "Orders", color: "#10b981" },
-  cancellation: { valueKey: "cancellation_rate_pct", formatValue: formatPercent, label: "Cancellation", color: "#ef4444" },
+  revenue: { valueKey: "revenue", formatValue: formatCurrency, label: "Revenue", color: "#06b6d4", metricId: "revenue" },
+  orders: { valueKey: "orders", formatValue: formatNumber, label: "Orders", color: "#10b981", metricId: "order_volume" },
+  cancellation: { valueKey: "cancellation_rate_pct", formatValue: formatPercent, label: "Cancellation", color: "#ef4444", metricId: "cancellation_rate" },
 };
 // Outlet performance -- a hand-styled ranked list instead of RankedBarChart
 // (that component is shared across 8 other pages/panels; changing its look
@@ -613,7 +631,8 @@ function RecentTrendPanel({ dashboardSummary, trendMetric, setTrendMetric }) {
           />
           {partialMonth && (
             <p className="hp-outlet-caption">
-              {monthLabel(partialMonth.month)} is still in progress and excluded until complete.
+              {monthLabel(partialMonth.month)} is still in progress and excluded here to avoid a false decline --{" "}
+              <a href="#current-period-heading">see it compared fairly in Current period investigations</a>.
             </p>
           )}
         </>
@@ -622,35 +641,81 @@ function RecentTrendPanel({ dashboardSummary, trendMetric, setTrendMetric }) {
   );
 }
 function OutletPerformancePanel({ operationsSummary, outletMetric, setOutletMetric }) {
+  // "So far this month" reuses get_month_to_date_breakdown (intelligence.py,
+  // 2026-10-01) -- the same elapsed-time-matched comparison already used
+  // company-wide, now per outlet, instead of the raw current-month total a
+  // naive ranking would show (which reads as every outlet declining, purely
+  // because the month isn't over -- the exact distortion KpiSection's
+  // sparklines were just fixed for).
+  const [period, setPeriod] = useState("complete");
+  const outletChoice = OUTLET_OPTIONS[outletMetric];
   const branches = operationsSummary.data?.status === "ok" ? operationsSummary.data.branches : null;
   const shortBranches = branches ? branches.map((b) => ({ ...b, name: shortenOutletName(b.name) })) : null;
-  const outletChoice = OUTLET_OPTIONS[outletMetric];
   const periodLabel = operationsSummary.data?.headline_month ? monthLabel(operationsSummary.data.headline_month) : null;
   const takeaway = outletTakeaway(shortBranches, outletChoice, outletMetric, periodLabel);
+
+  const monthToDate = useQuery({
+    queryKey: ["outletMonthToDate", outletChoice.metricId],
+    queryFn: () => fetchCurrentPeriodStoreBreakdown(outletChoice.metricId),
+    enabled: period === "current",
+    staleTime: 300000,
+    retry: false,
+  });
+  const mtdRows = monthToDate.data?.top_contributors
+    ? monthToDate.data.top_contributors.map((c) => ({ ...c, name: shortenOutletName(c.name) }))
+    : null;
 
   return (
     <>
       <div className="hp-panel-head">
         <div>
           <h2 className="hp-panel-title">Outlet performance</h2>
-          {periodLabel && <p className="hp-panel-period">{periodLabel}</p>}
+          {period === "complete" && periodLabel && <p className="hp-panel-period">{periodLabel}</p>}
+          {period === "current" && monthToDate.data?.period_start && (
+            <p className="hp-panel-period">
+              {monthLabel(monthToDate.data.period_start.slice(0, 7))} so far, vs {monthToDate.data.baseline_period_label}
+            </p>
+          )}
         </div>
-        <MetricSwitch
-          label="Outlet metric"
-          value={outletMetric}
-          onChange={setOutletMetric}
-          options={[["revenue", "Revenue"], ["orders", "Orders"], ["cancellation", "Cancellation"]]}
-        />
+        <div className="flex flex-col items-end gap-2">
+          <MetricSwitch
+            label="Outlet metric"
+            value={outletMetric}
+            onChange={setOutletMetric}
+            options={[["revenue", "Revenue"], ["orders", "Orders"], ["cancellation", "Cancellation"]]}
+          />
+          <MetricSwitch
+            label="Outlet period"
+            value={period}
+            onChange={setPeriod}
+            options={[["complete", periodLabel || "Last complete month"], ["current", "So far this month"]]}
+          />
+        </div>
       </div>
-      <Message query={operationsSummary} label="outlet performance" skeletonHeight="170px" />
-      {shortBranches?.length > 0 && (
+      {period === "complete" && (
         <>
-          {takeaway && <p className="hp-panel-takeaway">{takeaway}</p>}
-          <OutletRankBars data={shortBranches} valueKey={outletChoice.valueKey} formatValue={outletChoice.formatValue} color={outletChoice.color} />
+          <Message query={operationsSummary} label="outlet performance" skeletonHeight="170px" />
+          {shortBranches?.length > 0 && (
+            <>
+              {takeaway && <p className="hp-panel-takeaway">{takeaway}</p>}
+              <OutletRankBars data={shortBranches} valueKey={outletChoice.valueKey} formatValue={outletChoice.formatValue} color={outletChoice.color} />
+            </>
+          )}
+          {operationsSummary.isSuccess && (!branches || branches.length === 0) && (
+            <p className="hp-muted">No outlet data available.</p>
+          )}
         </>
       )}
-      {operationsSummary.isSuccess && (!branches || branches.length === 0) && (
-        <p className="hp-muted">No outlet data available.</p>
+      {period === "current" && (
+        <>
+          <Message query={monthToDate} label="month-to-date outlet performance" skeletonHeight="170px" />
+          {mtdRows?.length > 0 && (
+            <OutletRankBars data={mtdRows} valueKey="current" formatValue={outletChoice.formatValue} color={outletChoice.color} />
+          )}
+          {monthToDate.isSuccess && (!mtdRows || mtdRows.length === 0) && (
+            <p className="hp-muted">No outlet data available yet this month.</p>
+          )}
+        </>
       )}
     </>
   );
@@ -1090,7 +1155,12 @@ export default function Home() {
                 <div className="hp-health-head">
                   <div>
                     <span className="hp-kicker">02 / Business snapshot</span>
-                    <h2 className="hp-health-title">Business Health</h2>
+                    <h2
+                      className="hp-health-title"
+                      title="A rule-based score from configured penalties and averages, not a learned risk model."
+                    >
+                      Business Health
+                    </h2>
                   </div>
                   <span
                     className={`hp-pulse-badge hp-freshness-${freshness.tone}`}

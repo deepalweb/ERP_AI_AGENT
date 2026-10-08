@@ -3,7 +3,7 @@ import os
 
 import anyio
 from apscheduler.schedulers.background import BackgroundScheduler
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-from mcp_server.tools import current_period, intelligence, state_findings
+from mcp_server.tools import current_period, intelligence, state_findings, transfer_accountability
 from .core.access import AccessControlMiddleware, auth_mode
 from .db import reporting
 from .db.store_scope import CELESTE_STORE_NAMES
@@ -718,7 +718,32 @@ def _investigate_cached(metric_id: str):
 @app.get("/intelligence/current-period")
 async def current_period_investigations(refresh: bool = False):
     """Provisional source-anchored assessments; never mutates cases or outcomes."""
-    return await anyio.to_thread.run_sync(lambda: current_period.assess_all(refresh=refresh))
+    from mcp_server.tools.investigation import METRIC_DOMAIN
+    result = await anyio.to_thread.run_sync(lambda: current_period.assess_all(refresh=refresh))
+    return {**result, "items": [{**item, "domain": METRIC_DOMAIN.get(item["metric_id"], "unclassified")} for item in result.get("items", [])]}
+
+
+@reporting.ttl_cache(seconds=300)
+def _month_to_date_store_breakdown_cached(metric_id: str):
+    metric = intelligence.METRICS.get(metric_id)
+    dim = next((d for d in metric.dimensions if d.id == "store"), None) if metric else None
+    if dim is None:
+        return None
+    return intelligence.get_month_to_date_breakdown(dim)
+
+
+@app.get("/intelligence/current-period/{metric_id}/store-breakdown")
+async def current_period_store_breakdown(metric_id: str):
+    """Outlet ranking for the in-progress month so far, elapsed-time-matched
+    against the same portion of the prior month -- the per-store counterpart
+    to /intelligence/current-period's single company-wide number. Built for
+    Home's Outlet Performance panel, which previously could only show the
+    last COMPLETE month (see get_month_to_date_breakdown's own docstring for
+    why a raw, un-matched month-to-date ranking would be misleading)."""
+    result = await anyio.to_thread.run_sync(_month_to_date_store_breakdown_cached, metric_id)
+    if result is None:
+        return {"status": "error", "detail": f"No store breakdown is available for '{metric_id}'."}
+    return {"status": "ok", **result}
 
 
 @app.get("/intelligence/investigate/{metric_id}")
@@ -930,6 +955,32 @@ async def designate_case_objective_endpoint(case_id: str, request: CaseObjective
     except Exception:
         logger.exception("case objective designation failed for %s", case_id)
         return {"status": "error", "detail": "Could not designate this case's objective."}
+
+
+@app.get("/management/families")
+async def management_families():
+    try:
+        return {"status": "ok", "families": await anyio.to_thread.run_sync(management.families)}
+    except Exception:
+        logger.exception("management families failed")
+        return {"status": "error", "detail": "Could not load management families."}
+
+
+@app.get("/management/transfer-accountability")
+async def management_transfer_accountability(
+    outlet: list[str] = Query(default=[]),
+    product: list[str] = Query(default=[]),
+    person: list[str] = Query(default=[]),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    recurring_only: bool = False,
+):
+    filters = transfer_accountability.make_filters(outlet, product, person, date_from, date_to, recurring_only)
+    try:
+        return {"status": "ok", **await anyio.to_thread.run_sync(transfer_accountability.build, filters)}
+    except Exception:
+        logger.exception("transfer accountability failed")
+        return {"status": "error", "detail": "Could not load transfer accountability."}
 
 
 @app.get("/management/summary")

@@ -1392,7 +1392,19 @@ def _summarize_snapshot(snapshot: dict) -> dict:
     evidence_summary = {"established": established, "unknown": unknown} if (established or unknown) else None
     impact = snapshot.get("impact") or {}
     impact_summary = (
-        {"financial_impact_rs": impact.get("financial_impact_rs"), "detail": impact.get("detail")}
+        {"financial_impact_rs": impact.get("financial_impact_rs"), "detail": impact.get("detail"),
+         "units_affected": impact.get("units_affected"), "valued_units_pct": impact.get("valued_units_pct"),
+         "plan_units": impact.get("plan_units"), "sent_units": impact.get("sent_units"), "line_received_units": impact.get("line_received_units"),
+         "planning_gap_units": impact.get("planning_gap_units"), "transit_gap_units": impact.get("transit_gap_units"), "total_gap_units": impact.get("total_gap_units"),
+         "kind": impact.get("kind"),
+         # Small, curated numbers the case-list title builder needs (Investigate.jsx's
+         # standardTitleFor) -- the list's "latest" only ever gets this summary, never
+         # the full snapshot, so anything a list-view title needs has to live here.
+         "count": impact.get("count"), "distinct_products": impact.get("distinct_products"),
+         "total_top_sellers": impact.get("total_top_sellers"),
+         "outlet_count": len(snapshot.get("outlet_rows") or []) or (
+             len(breakdowns[0]["top_contributors"]) if breakdowns and breakdowns[0].get("dimension") in ("store", "outlet") and breakdowns[0].get("top_contributors") else None
+         )}
         if impact.get("financial_impact_rs") is not None or impact.get("detail")
         else None
     )
@@ -1455,7 +1467,9 @@ def list_cases(status: str | None = None, metric_id: str | None = None, domain: 
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
     where, params = [], {}
-    if status:
+    if status == "active":
+        where.append("status IN ('open', 'reopened', 'verification_pending')")
+    elif status:
         where.append("status = :status")
         params["status"] = status
     if metric_id:
@@ -1574,6 +1588,43 @@ def get_case_detail(case_id: str) -> dict | None:
             "store": latest_snapshot.get("store"),
             "product": latest_snapshot.get("product"),
             "hour": latest_snapshot.get("hour"),
+            # transfer_discrepancy.py's own finding shape -- reuses `store`
+            # above, adds `reason` (the stock_move_shortage reason code:
+            # "Extra Quantity"/"Missing Item"/etc.) for its investigation panel.
+            "reason": latest_snapshot.get("reason"),
+            # incident_engine.py's own composite ranking number (hourly
+            # z-score x product lift x sqrt(order count) x persistence
+            # factor) -- computed and stored on every incident finding since
+            # that module was built, but never whitelisted through, so
+            # IncidentInvestigationPanel.jsx had no way to show it or which
+            # score band (confirmed/escalate/auto-alert) it fell in.
+            "incident_score": latest_snapshot.get("incident_score"),
+            # transfer_discrepancy.py's richer investigation template
+            # (2026-10-01, manager review): pattern_status is the plain-
+            # language "Sustained pattern" / "Early recurring signal" label;
+            # daily_breakdown is every day in the 14-day window (including
+            # zero-discrepancy days) for the recurrence timeline and the
+            # transfer-day breakdown table.
+            "pattern_status": latest_snapshot.get("pattern_status"),
+            "daily_breakdown": latest_snapshot.get("daily_breakdown"),
+            # 2026-10-02: which OTHER outlets have this same reason code
+            # recurring right now -- checked live, a real case that looked
+            # outlet-specific in isolation was actually happening at all 4
+            # outlets simultaneously, which the per-outlet case view had no
+            # way to show before this.
+            "company_wide_context": latest_snapshot.get("company_wide_context"),
+            # 2026-10-02: per-line severity distribution (median/p75/p90/p95/
+            # p99/max units and Rs) -- frequency and rate say nothing about
+            # SHAPE (many small lines vs. a few severe ones read identically
+            # otherwise). Input the extreme-event sibling detector will be
+            # designed from, once these real numbers are inspected.
+            "severity": latest_snapshot.get("severity"),
+            "extreme_rows": latest_snapshot.get("extreme_rows"),
+            "outlet_rows": latest_snapshot.get("outlet_rows"),
+            "transfer_rows": latest_snapshot.get("transfer_rows"),
+            "trace_rows": latest_snapshot.get("trace_rows"),
+            "dispatch_rows": latest_snapshot.get("dispatch_rows"),
+            "pattern_rows": latest_snapshot.get("pattern_rows"),
         }
 
     # Cross-domain investigation v1 (2026-09-27): computed fresh on every

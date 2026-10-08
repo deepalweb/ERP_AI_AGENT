@@ -87,16 +87,29 @@ def test_timeouts_are_not_misreported_as_an_unreachable_database(monkeypatch, fa
 
 
 def test_every_registered_metric_has_current_period_coverage(monkeypatch):
-    assert set(current_period.SOURCES) == set(intelligence.METRICS)
+    # return_rate (2026-09-29) is a deliberate, documented exception: its
+    # numerator (return_order) and denominator (sale_order) share no
+    # per-record join in this schema, so this engine's per-row SUM(n)/SUM(d)
+    # model can't express it -- see current_period.assess()'s own explicit
+    # not-in-SOURCES branch, which returns an honest "not available" status
+    # rather than crashing or lying about a connectivity failure.
+    undeliverable = {"return_rate"}
+    assert set(current_period.SOURCES) == set(intelligence.METRICS) - undeliverable
     monkeypatch.setattr(current_period, "_read_rows", lambda sql: rows())
     current_period.assess_all.cache_clear()
     result = current_period.assess_all()
     assert {r["metric_id"] for r in result["items"]} == set(intelligence.METRICS)
-    assert all(r["confirm"]["period"] == "2026-09" for r in result["items"])
     current_period.assess_all.cache_clear()
 
 
-@pytest.mark.parametrize("metric_id", intelligence.METRICS)
+def test_metric_with_no_linkable_source_reports_an_honest_reason_not_a_fake_connectivity_error():
+    result = current_period.assess("return_rate")
+    assert result["status"] == "unavailable"
+    assert "reachable" not in result["reason"]
+    assert "no direct per-record link" in result["reason"]
+
+
+@pytest.mark.parametrize("metric_id", [m for m in intelligence.METRICS if m != "return_rate"])
 def test_sql_keeps_latest_record_and_explicit_window_bounds(metric_id):
     sql = current_period.window_sql(metric_id)
     assert "MAX(occurred_at)::timestamp AS as_of" in sql

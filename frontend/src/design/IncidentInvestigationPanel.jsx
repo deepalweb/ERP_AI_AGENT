@@ -1,5 +1,6 @@
 import RankedBarChart from "../charts/RankedBarChart";
 import { formatNumber, formatPct } from "../format";
+import { incidentScoreText } from "./plainLanguage";
 
 /** Frontend Intelligence Integration, Phase 4: incident investigation
  * panel (store x SKU x hour cancellation spikes -- mcp_server.tools.
@@ -44,6 +45,10 @@ export default function IncidentInvestigationPanel({ latest }) {
         <p className="mt-1 text-xs text-foreground-subtle">
           Appeared on {persistence.days_appeared} of the last {persistence.days_observed} days this store was trading.
         </p>
+      )}
+
+      {incidentScoreText(latest.incident_score) && (
+        <p className="mt-1 text-xs text-foreground-subtle">{incidentScoreText(latest.incident_score)}</p>
       )}
 
       {hourBreakdown?.top_contributors?.length > 0 && (

@@ -29,12 +29,15 @@ SEVERITY_BY_CATEGORY = {"critical": "high", "opportunity": "positive"}
 # metric-agnostic and investigation.py does all the narration.
 METRIC_DOMAIN = {
     "cancellation_rate": "order_customer",
+    "stockout_cancellation_rate": "inventory",
+    "return_rate": "order_customer",
     "order_volume": "order_customer",
     "average_order_value": "order_customer",
     "customer_retention_rate": "order_customer",
     "revenue": "financial",
     "gross_margin": "financial",
     "delayed_delivery_rate": "delivery",
+    "dispatch_wait_minutes": "delivery",
     "uber_failure_rate": "delivery",
     "pickme_cancellation_rate": "delivery",
     "supplier_fill_rate": "supplier",

@@ -11,7 +11,7 @@
 import { test, expect } from "@playwright/test";
 import {
   CASE_ID, FINDING_ID, authStatus, caseDetailFixture, caseListFixture, customerPredictionsSummary,
-  emptyBrief, forwardLook, metrics, notificationsSummary, outcomesSummary, storeScope,
+  emptyBrief, emptyCurrentPeriod, forwardLook, metrics, notificationsSummary, outcomesSummary, storeScope,
 } from "./fixtures.js";
 
 async function mockJson(route, body) {
@@ -31,28 +31,49 @@ function waitForActionPatch(page) {
  * PATCH handler for /findings/{id}/action that a test can drive through
  * `state` -- state.actions accumulates what's "saved" so a page refetch
  * after a save shows it, exactly like the real backend would. */
-function mockBackend(page, { staleOnce = false } = {}) {
+// Route handlers that fulfill (never fallback) are matched last-registered-
+// first, but REGISTERING one is itself async -- page.route() returns a
+// promise that resolves once the browser side has it wired up. None of
+// these were ever awaited, which raced page.goto() below: usually harmless,
+// until adding one more registration (current-period, 2026-10-01) shifted
+// the timing enough that /management/summary's handler sometimes wasn't
+// applied yet when Home's first requests fired, and it fell through to the
+// catch-all's {status:"error"} instead ("Domain summary unavailable").
+// Awaiting every registration before returning closes the race for good,
+// rather than leaving it to get re-tripped by the next added route.
+async function mockBackend(page, { staleOnce = false } = {}) {
   const state = { actions: [], patchCalls: [] };
 
-  page.route("**/api/**", (route) => mockJson(route, { status: "error", detail: "Unconfigured test endpoint" }));
-  page.route("**/api/management/summary", (route) => mockJson(route, { status: "ok", cases: { open: 1 }, actions: { outstanding: state.actions.length, blocked: 0 } }));
-  page.route("**/api/management/actions?**", (route) => mockJson(route, { status: "ok", items: state.actions, total: state.actions.length, limit: 20, offset: 0 }));
-  page.route("**/api/auth/status", (route) => mockJson(route, authStatus));
-  page.route("**/api/store-scope", (route) => mockJson(route, storeScope));
-  page.route("**/api/brief", (route) => mockJson(route, emptyBrief));
-  page.route("**/api/forecast/forward-look", (route) => mockJson(route, forwardLook));
-  page.route("**/api/outcomes/summary", (route) => mockJson(route, outcomesSummary));
-  page.route("**/api/customers/predictions/summary", (route) => mockJson(route, customerPredictionsSummary));
-  page.route("**/api/notifications/summary", (route) => mockJson(route, notificationsSummary));
-  page.route("**/api/notifications/acknowledge", (route) => mockJson(route, { status: "ok", last_acknowledged_at: "2026-09-17T00:00:00" }));
-  page.route("**/api/intelligence/metrics", (route) => mockJson(route, metrics));
-  page.route(`**/api/cases?**`, (route) => {
+  await page.route("**/api/**", (route) => mockJson(route, { status: "error", detail: "Unconfigured test endpoint" }));
+  await page.route("**/api/management/summary", (route) => mockJson(route, {
+    status: "ok", cases: { open: 1 }, actions: { outstanding: state.actions.length, blocked: 0 },
+    // InvestigationDomains.jsx (added earlier this session) treats a missing
+    // case_domains as "summary unavailable" even on an HTTP 200 -- this
+    // fixture's one open case (caseListFixture, domain "financial") needs an
+    // entry here or the whole domain-picker step in this workflow 404s silently.
+    case_domains: [{ domain: "financial", status: "open", priority: "worth_pursuing", category: "opportunity", count: 1 }],
+  }));
+  await page.route("**/api/management/actions?**", (route) => mockJson(route, { status: "ok", items: state.actions, total: state.actions.length, limit: 20, offset: 0 }));
+  await page.route("**/api/auth/status", (route) => mockJson(route, authStatus));
+  await page.route("**/api/store-scope", (route) => mockJson(route, storeScope));
+  await page.route("**/api/brief", (route) => mockJson(route, emptyBrief));
+  await page.route("**/api/forecast/forward-look", (route) => mockJson(route, forwardLook));
+  await page.route("**/api/outcomes/summary", (route) => mockJson(route, outcomesSummary));
+  await page.route("**/api/customers/predictions/summary", (route) => mockJson(route, customerPredictionsSummary));
+  await page.route("**/api/notifications/summary", (route) => mockJson(route, notificationsSummary));
+  await page.route("**/api/notifications/acknowledge", (route) => mockJson(route, { status: "ok", last_acknowledged_at: "2026-09-17T00:00:00" }));
+  await page.route("**/api/intelligence/metrics", (route) => mockJson(route, metrics));
+  await page.route("**/api/intelligence/current-period**", (route) => mockJson(route, emptyCurrentPeriod));
+  await page.route(`**/api/cases?**`, (route) => {
     const status = new URL(route.request().url()).searchParams.get("status");
-    return mockJson(route, status && status !== "open" ? { status: "ok", items: [], total: 0, limit: 20, offset: 0 } : caseListFixture());
+    // "active" (open + reopened + verification_pending) is the page's long-standing
+    // default status filter, not "open" -- this mock predates that and only ever
+    // matched by accident of "open" being a substring check nobody noticed was wrong.
+    return mockJson(route, status && status !== "open" && status !== "active" ? { status: "ok", items: [], total: 0, limit: 20, offset: 0 } : caseListFixture());
   });
-  page.route(`**/api/cases/${CASE_ID}`, (route) => mockJson(route, caseDetailFixture({ actions: state.actions })));
+  await page.route(`**/api/cases/${CASE_ID}`, (route) => mockJson(route, caseDetailFixture({ actions: state.actions })));
 
-  page.route(`**/api/findings/${encodeURIComponent(FINDING_ID)}/action`, async (route) => {
+  await page.route(`**/api/findings/${encodeURIComponent(FINDING_ID)}/action`, async (route) => {
     const request = route.request();
     const body = JSON.parse(request.postData() || "{}");
     state.patchCalls.push(body);
@@ -105,13 +126,16 @@ function mockBackend(page, { staleOnce = false } = {}) {
 }
 
 test("Daily Brief -> Investigate -> Case Detail -> evidence -> action -> target -> save -> outcome status", async ({ page }) => {
-  mockBackend(page);
+  await mockBackend(page);
 
   await page.goto("/");
   await expect(page.getByRole("link", { name: /investigate/i }).first()).toBeVisible();
 
   await page.getByRole("link", { name: /investigate/i }).first().click();
   await expect(page).toHaveURL(/\/investigate$/);
+  // The domain-picker step (added earlier this session) gates the case list
+  // behind choosing a business area first -- "All domains" is the unfiltered choice.
+  await page.getByRole("button", { name: "All domains", exact: true }).click();
   // The attention queue and the full case list both link to this case.
   const caseLink = page.getByRole("link", { name: /Weekend revenue is running ahead of plan/ }).first();
   await expect(caseLink).toBeVisible();
@@ -145,7 +169,7 @@ test("Daily Brief -> Investigate -> Case Detail -> evidence -> action -> target 
 });
 
 test("a stale-evidence conflict is surfaced, not silently overwritten", async ({ page }) => {
-  const state = mockBackend(page, { staleOnce: true });
+  const state = await mockBackend(page, { staleOnce: true });
 
   await page.goto(`/investigate/${CASE_ID}`);
   await expect(page.getByRole("button", { name: /take action/i })).toBeVisible();
@@ -165,7 +189,7 @@ test("a stale-evidence conflict is surfaced, not silently overwritten", async ({
 });
 
 test("the target form validates before it ever calls the backend", async ({ page }) => {
-  const state = mockBackend(page);
+  const state = await mockBackend(page);
 
   await page.goto(`/investigate/${CASE_ID}`);
   await Promise.all([waitForActionPatch(page), page.getByRole("button", { name: /take action/i }).click()]);

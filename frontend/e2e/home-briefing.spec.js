@@ -4,6 +4,7 @@ import {
   emptyBrief,
   caseDetailFixture,
   notificationsSummary,
+  emptyCurrentPeriod,
 } from "./fixtures.js";
 
 async function setup(page, { empty = false, error = false } = {}) {
@@ -38,6 +39,7 @@ async function setup(page, { empty = false, error = false } = {}) {
     else if (path === "/store-scope")
       body = { status: "ok", stores: ["Colombo", "Outlet B"] };
     else if (path === "/notifications/summary") body = notificationsSummary;
+    else if (path === "/intelligence/current-period") body = emptyCurrentPeriod;
     else if (path === "/brief")
       body = error
         ? { status: "error", detail: "Brief offline" }
@@ -273,6 +275,7 @@ test("full snapshot renders health gauge, domain cards, severity tiles, and the 
     else if (path === "/store-scope")
       body = { status: "ok", stores: ["Colombo", "Kandy", "Galle", "Jaffna"] };
     else if (path === "/notifications/summary") body = notificationsSummary;
+    else if (path === "/intelligence/current-period") body = emptyCurrentPeriod;
     else if (path === "/brief")
       body = {
         ...emptyBrief,

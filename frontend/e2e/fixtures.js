@@ -38,6 +38,11 @@ export const forwardLook = ok({ points: [] });
 export const outcomesSummary = ok({ summary: [] });
 export const customerPredictionsSummary = ok({});
 export const notificationsSummary = ok({ count: 0, findings: [] });
+// fetchCurrentPeriod (api.js) throws if body.items isn't an array -- Home now
+// renders CurrentPeriodInvestigations unconditionally (2026-10-01), so every
+// spec mocking "/" needs this route covered or the component's own error
+// state ("The current-period check could not finish...") appears unexpectedly.
+export const emptyCurrentPeriod = ok({ checked_at: "2026-09-27T11:04:58Z", items: [] });
 
 export const metrics = ok({
   metrics: [

@@ -17,11 +17,16 @@ const CATEGORY = {
   normal: ["Within thresholds", "neutral"],
 };
 
-export default function CurrentPeriodInvestigations({ metricId }) {
+export default function CurrentPeriodInvestigations({ metricId, metricIds, domain }) {
   const client = useQueryClient();
   const [refreshError, setRefreshError] = useState(null);
   const query = useQuery({ queryKey: ["currentPeriod"], queryFn: ({ signal }) => fetchCurrentPeriod({ signal }), staleTime: 300000, retry: false });
-  const items = (query.data?.items ?? []).filter((item) => !metricId || item.metric_id === metricId);
+  const items = (query.data?.items ?? []).filter(
+    (item) =>
+      (!metricId || item.metric_id === metricId) &&
+      (!metricIds || metricIds.includes(item.metric_id)) &&
+      (!domain || item.domain === domain)
+  );
   async function refresh() {
     setRefreshError(null);
     try {

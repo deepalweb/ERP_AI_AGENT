@@ -32,6 +32,10 @@ SOURCES = {
     "cancellation_rate": f"""SELECT date_order AS occurred_at,
         CASE WHEN state='cancel' THEN 1 ELSE 0 END AS n, 1 AS d, partner_id AS entity
         FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES + ('cancel',)} AND store_id IN {CELESTE_STORE_IDS}""",
+    "stockout_cancellation_rate": f"""SELECT date_order AS occurred_at,
+        CASE WHEN state='cancel' AND cancel_info='Customer Request due to Out of Stock' THEN 1 ELSE 0 END AS n,
+        1 AS d, partner_id AS entity
+        FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES + ('cancel',)} AND store_id IN {CELESTE_STORE_IDS}""",
     "delayed_delivery_rate": f"""SELECT sp.date_done AS occurred_at,
         CASE WHEN sp.date_done-sp.scheduled_date > INTERVAL '24 hours' THEN 1 ELSE 0 END AS n,
         1 AS d, so.partner_id AS entity
@@ -53,6 +57,21 @@ SOURCES = {
         so.partner_id AS entity FROM sale_order_line sol JOIN sale_order so ON so.id=sol.order_id
         JOIN product_product pp ON pp.id=sol.product_id JOIN product_template pt ON pt.id=pp.product_tmpl_id
         WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}""",
+    # Mean, not the median intelligence.py's own trend_sql deliberately uses
+    # for this metric (a real outlier -- one bad timestamp -- once distorted
+    # a whole month's average to 4,670 minutes; see intelligence.METRICS'
+    # own dispatch_wait_minutes notes). window_sql()'s generic engine only
+    # supports SUM-based aggregation, so a median isn't available here the
+    # same way -- the < 1440-minute (24h) bound is the guard instead, same
+    # reasoning delayed_delivery_rate already uses for its own 24h cutoff: a
+    # real dispatch wait past a full day is implausible for this business,
+    # far more likely a bad timestamp than a genuine observation.
+    "dispatch_wait_minutes": f"""SELECT so.dispatch_datetime AS occurred_at,
+        EXTRACT(EPOCH FROM (so.dispatch_datetime - so.packing_datetime))/60 AS n, 1 AS d, so.partner_id AS entity
+        FROM sale_order so WHERE {SCOPED_SALES}
+          AND so.dispatch_datetime IS NOT NULL AND so.packing_datetime IS NOT NULL
+          AND so.dispatch_datetime >= so.packing_datetime
+          AND so.dispatch_datetime < so.packing_datetime + INTERVAL '1440 minutes'""",
     "supplier_fill_rate": "SELECT date AS occurred_at, qty_on_time AS n, qty_total AS d, partner_id AS entity FROM vendor_delay_report",
     "purchase_price_variance": """SELECT date_order AS occurred_at,
         CASE WHEN price_difference_percent != 0 THEN 1 ELSE 0 END AS n,
@@ -136,6 +155,19 @@ def assess(metric_id):
     result = {"metric_id": metric_id, "metric": _metric_meta(metric), "horizon": "month_to_date",
               "provisional": True, "category": None, "status": "unavailable", "trend": [],
               "scope": "Business-wide purchasing" if metric_id.startswith(("supplier_", "purchase_")) else "Celeste outlets"}
+    if metric_id not in SOURCES:
+        # A deliberate, honest gap, not a connectivity failure -- return_rate
+        # (added 2026-09-29) is the first metric where numerator and
+        # denominator genuinely can't share one per-row source: return_order
+        # has no direct sale_order link in this schema (only a warehouse-
+        # routing path), so this engine's per-row SUM(n)/SUM(d) model can't
+        # express it without fabricating a join that isn't really there.
+        # Reusing "unavailable" (an already-handled status) rather than a
+        # new enum value the frontend hasn't been taught yet -- but with an
+        # honest reason, not the misleading "database unreachable" text a
+        # bare KeyError from window_sql() would otherwise produce.
+        return {**result, "reason": "Month-to-date estimation isn't available for this metric -- "
+                "its numerator and denominator come from sources with no direct per-record link."}
     try:
         rows = _read_rows(window_sql(metric_id))
     except PoolTimeoutError:
@@ -157,7 +189,7 @@ def assess(metric_id):
     points = []
     for row in rows:
         numerator, denominator = row["numerator"], row["denominator"]
-        ratio = metric.is_rate or metric_id == "average_order_value"
+        ratio = metric.is_rate or metric_id in ("average_order_value", "dispatch_wait_minutes")
         value = (float(numerator or 0) / float(denominator) * (100 if metric.is_rate else 1)
                  if ratio and denominator and denominator > 0
                  else None if ratio or numerator is None else float(numerator))

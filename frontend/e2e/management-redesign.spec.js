@@ -4,6 +4,7 @@ import {
   caseDetailFixture,
   caseListFixture,
   emptyBrief,
+  emptyCurrentPeriod,
   metrics,
   notificationsSummary,
 } from "./fixtures.js";
@@ -70,6 +71,7 @@ async function setup(page) {
     else if (path === "/notifications/summary") body = notificationsSummary;
     else if (path === "/notifications/acknowledge") body = { status: "ok" };
     else if (path === "/intelligence/metrics") body = metrics;
+    else if (path === "/intelligence/current-period") body = emptyCurrentPeriod;
     else if (path === "/brief")
       body = {
         ...emptyBrief,

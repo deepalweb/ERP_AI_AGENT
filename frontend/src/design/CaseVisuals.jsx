@@ -126,12 +126,13 @@ export function AffectedRecordTable({ columns, rows, rowKey = "id", onRowClick, 
  * tiers (NOT four: "established observations" is the measured finding
  * itself, a separate concept this component doesn't cover -- see
  * CaseDetail.jsx's EvidenceSections, which renders that part and this
- * component together). A confirmed verdict is EXCLUSIVELY produced by the
- * concentration checks in this app's evidence engine (evidence_engine.py's
- * own module docstring states this twice -- see plainLanguage.
- * evidenceRollupText's docstring for the full reasoning), so "confirmed"
- * is labeled "Supported contribution or concentration" here, never
- * "established cause". */
+ * component together). A confirmed verdict is produced by several check
+ * types now, not just concentration (see plainLanguage.confirmedClaimFor's
+ * docstring) -- the section heading stays source-agnostic ("Confirmed
+ * findings") rather than naming "concentration" specifically; each item's
+ * own `detail` text already says exactly what was confirmed. Never labeled
+ * "established cause" -- that overclaim is exactly what this tiering
+ * exists to prevent. */
 export function EvidenceSummary({ checks }) {
   const hasChecks = Boolean(checks && checks.length > 0);
   const confirmed = hasChecks ? checks.filter((c) => c.verdict === "confirmed") : [];
@@ -168,7 +169,7 @@ export function EvidenceSummary({ checks }) {
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
       <div>
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Supported contribution or concentration</span>
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-foreground-subtle">Confirmed findings</span>
         {list(confirmed, "None confirmed.")}
       </div>
       <div>

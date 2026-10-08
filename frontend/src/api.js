@@ -63,6 +63,12 @@ export async function fetchMetricInvestigation(metricId) {
   return readResponse(response);
 }
 
+export async function fetchCurrentPeriodStoreBreakdown(metricId) {
+  const response = await apiFetch(`${API_BASE_URL}/intelligence/current-period/${metricId}/store-breakdown`);
+
+  return readResponse(response);
+}
+
 export async function fetchCurrentPeriod({ refresh = false, signal } = {}) {
   const timeout = AbortSignal.timeout(60000);
   const response = await apiFetch(`${API_BASE_URL}/intelligence/current-period${refresh ? "?refresh=true" : ""}`, {
@@ -325,6 +331,22 @@ export async function refreshBrief() {
   return readResponse(await apiFetch(`${API_BASE_URL}/brief/refresh`, {
     method: "POST", signal: AbortSignal.timeout(15000),
   }));
+}
+
+export async function fetchManagementFamilies() {
+  return readResponse(await apiFetch(`${API_BASE_URL}/management/families`));
+}
+
+export async function fetchTransferAccountability(filters = {}) {
+  const params = new URLSearchParams();
+  for (const id of filters.outlet ?? []) params.append("outlet", id);
+  for (const key of filters.product ?? []) params.append("product", key);
+  for (const who of filters.person ?? []) params.append("person", who);
+  if (filters.from) params.append("date_from", filters.from);
+  if (filters.to) params.append("date_to", filters.to);
+  if (filters.recurring) params.append("recurring_only", "true");
+  const query = params.toString();
+  return readResponse(await apiFetch(`${API_BASE_URL}/management/transfer-accountability${query ? `?${query}` : ""}`));
 }
 
 export async function fetchManagementSummary() {
