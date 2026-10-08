@@ -75,7 +75,13 @@ function searchHaystack(item) {
     .toLowerCase();
 }
 
-export default function Investigate() {
+// lockedDomain: renders this same workspace pinned to one business area --
+// no domain picker, no "All domains" escape hatch -- for a dedicated
+// per-domain page (e.g. routes/Inventory.jsx) that reuses every piece of
+// this module (family drill-down, filters, case list, early signals)
+// rather than forking a second copy of this logic. The generic /investigate
+// route renders this with no props, unchanged from before.
+export default function Investigate({ lockedDomain, title = "Investigate", description = "Find the issues that need attention, understand where they are concentrated, and open a case to investigate further." }) {
   // ?metric=<id> -- last-resort fallback link from Management.jsx's
   // WorkItem, for an action whose case couldn't be resolved server-side.
   // Read once on mount only: a manager clearing the chip below shouldn't
@@ -86,7 +92,7 @@ export default function Investigate() {
   // not hidden behind a toggle) -- the user can still collapse it manually.
   const [showSignals, setShowSignals] = useState(true);
   const [status, setStatus] = useState("active");
-  const [domain, setDomain] = useState("");
+  const [domain, setDomain] = useState(lockedDomain ?? "");
   const [priority, setPriority] = useState("");
   const [type, setType] = useState("");
   const [sort, setSort] = useState("recent_change");
@@ -96,8 +102,10 @@ export default function Investigate() {
 
   // One place for every way the page's filters change. Changing the business
   // area resets the narrower filters, so a scope change always starts clean.
+  // A locked page has no UI that ever calls applyFilters({domain: ...}), but
+  // this guard keeps that true even if one's added later by mistake.
   function applyFilters(next) {
-    if ("domain" in next) {
+    if ("domain" in next && !lockedDomain) {
       setDomain(next.domain);
       setStatus("active");
       setPriority("");
@@ -218,10 +226,8 @@ export default function Investigate() {
     <div className="workspace-page">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight text-foreground-strong">Investigate</h1>
-          <p className="mt-1 max-w-xl text-sm text-foreground-subtle">
-            Find the issues that need attention, understand where they are concentrated, and open a case to investigate further.
-          </p>
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-foreground-strong">{title}</h1>
+          <p className="mt-1 max-w-xl text-sm text-foreground-subtle">{description}</p>
         </div>
         <div className="text-right text-xs text-foreground-subtle">
           {cases && <div>{formatNumber(cases.open ?? 0)} open case{(cases.open ?? 0) === 1 ? "" : "s"}</div>}
@@ -235,18 +241,20 @@ export default function Investigate() {
         <DataSyncBar sync={summaryQuery.data.sync} running={scanRunning} failed={refreshStatus === "failed"} onRun={runInvestigation} />
       )}
 
-      <div className="mt-6 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
-        <section aria-label="Business areas" className="space-y-3 rounded-xl border border-border bg-surface p-4">
-          <h2 className="text-sm font-semibold text-foreground-strong">Business areas</h2>
-          <InvestigationDomains
-            rows={summaryQuery.data?.case_domains}
-            loading={summaryQuery.isPending}
-            error={summaryQuery.isError || summaryQuery.data?.status === "error"}
-            selected={domain}
-            onSelect={(value) => applyFilters({ domain: value })}
-            onRetry={() => summaryQuery.refetch()}
-          />
-        </section>
+      <div className={`mt-6 grid gap-4 ${lockedDomain ? "" : "xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]"}`}>
+        {!lockedDomain && (
+          <section aria-label="Business areas" className="space-y-3 rounded-xl border border-border bg-surface p-4">
+            <h2 className="text-sm font-semibold text-foreground-strong">Business areas</h2>
+            <InvestigationDomains
+              rows={summaryQuery.data?.case_domains}
+              loading={summaryQuery.isPending}
+              error={summaryQuery.isError || summaryQuery.data?.status === "error"}
+              selected={domain}
+              onSelect={(value) => applyFilters({ domain: value })}
+              onRetry={() => summaryQuery.refetch()}
+            />
+          </section>
+        )}
 
         {summaryQuery.data?.status === "ok" && (
           <section aria-label={`${scopeLabel} summary`} className="space-y-3 rounded-xl border border-border bg-surface p-4">

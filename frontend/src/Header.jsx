@@ -7,6 +7,7 @@ import { formatCurrency, formatNumber, monthLabel } from "./format";
 const NAV_ITEMS = [
   { to: "/", label: "Home", end: true },
   { to: "/investigate", label: "Investigate" },
+  { to: "/inventory", label: "Inventory" },
   { to: "/actions", label: "Actions" },
   { to: "/outcomes", label: "Outcomes" },
   { to: "/dashboard", label: "Business Performance" },
