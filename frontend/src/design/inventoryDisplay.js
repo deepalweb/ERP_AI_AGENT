@@ -55,6 +55,10 @@ export function titleFor(item) {
     if (impact.financial_impact_rs == null) return fallback;
     return `Stock-count variance · ${formatCurrency(impact.financial_impact_rs)}`;
   }
+  if (kind === "damage_writeoff") {
+    if (impact.financial_impact_rs == null) return fallback;
+    return `Damage write-offs · ${formatCurrency(impact.financial_impact_rs)} · last 14 days`;
+  }
   if (id === "stockout_cancellation_rate" && latest?.confirm?.pct_change != null) {
     const pct = Math.abs(latest.confirm.pct_change);
     const direction = latest.confirm.pct_change < 0 ? "down" : "up";
@@ -70,7 +74,7 @@ export function typeKeyFor(item) {
   if (id.startsWith("extreme_event_") || id === "dispatch_sent_above_plan") return "extreme";
   if (id === "dispatch_pattern") return "recurring";
   if (id.startsWith("incident_") || id.startsWith("transfer_discrepancy_")) return "recurring";
-  if (id === "stuck_stock_count" || id === "completed_stock_count_variance") return "control";
+  if (id === "stuck_stock_count" || id === "completed_stock_count_variance" || id === "damage_writeoff") return "control";
   if (item.domain === "controls") return "control";
   if (id === "stock_availability" || id === "top_seller_stock") return "state";
   return item.horizon === "monthly" ? "trend" : "state";

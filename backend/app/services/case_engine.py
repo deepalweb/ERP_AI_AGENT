@@ -1625,6 +1625,11 @@ def get_case_detail(case_id: str) -> dict | None:
             "trace_rows": latest_snapshot.get("trace_rows"),
             "dispatch_rows": latest_snapshot.get("dispatch_rows"),
             "pattern_rows": latest_snapshot.get("pattern_rows"),
+            # _damage_writeoff_finding's own per-product breakdown (reuses
+            # "by_outlet" above, which is already whitelisted) -- a
+            # different shape than "products" (negative_stock_control's
+            # company-wide list), so its own key.
+            "top_products": latest_snapshot.get("top_products"),
         }
 
     # Cross-domain investigation v1 (2026-09-27): computed fresh on every

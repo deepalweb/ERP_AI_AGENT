@@ -38,7 +38,7 @@ from datetime import date
 
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
-from backend.app.services import data_controls, stock_counts
+from backend.app.services import data_controls, loss_and_damage, stock_counts
 from backend.app.services import inventory as inventory_service
 from backend.app.services.stock_alerts import get_stock_alerts, get_top_product_stock_coverage
 from mcp_server.tools import evidence_engine, impact_engine, measurement
@@ -76,6 +76,19 @@ COMPLETED_VARIANCE_WINDOW_DAYS = 7
 # the get_data_controls Ask Celeste tool, never a second copy of the SQL.
 NEGATIVE_STOCK_CRITICAL_COUNT = 100
 NEGATIVE_STOCK_HIGH_COUNT = 20
+
+# Damage write-off: tiers set from the real observed distribution, not a
+# guess -- 172 overlapping 14-day trailing windows across 6 months of
+# confirmed-state damaged_order history (2026-04-04 to 2026-10-05), valued
+# at catalog cost. This condition is chronic, not anomalous: even the
+# LOWEST 14-day window in that history was Rs 73k, median Rs 388k -- so
+# unlike completed_stock_count_variance's rare-spike framing, this always
+# fires (same posture as _stock_availability_finding/_stuck_stock_count_
+# finding) with priority reflecting whether the CURRENT window is worse
+# than typical, not whether damage exists at all (it always does).
+DAMAGE_WRITEOFF_CRITICAL_VALUE_RS = 570_000  # p90 of the 172 windows
+DAMAGE_WRITEOFF_HIGH_VALUE_RS = 390_000  # p50 (median) of the 172 windows
+DAMAGE_WRITEOFF_WINDOW_DAYS = 14
 
 
 def _priority_for_share(share_pct: float, threshold_pct: float) -> str:
@@ -341,6 +354,11 @@ def _stuck_stock_count_finding():
     value at risk, so a 3-line forgotten count doesn't read as loudly as a
     full-store one."""
     result = stock_counts.get_stuck_stock_counts()
+    # Live query against Odoo; result["as_of"] is utcnow() by construction
+    # (stock_counts.get_stuck_stock_counts) -- see _cost_coverage_control_
+    # finding's comment on why this is the fix for a case that can never
+    # clear otherwise.
+    measurement.source_as_of(result["as_of"])
     sessions = result["sessions"]
     if not sessions:
         return None
@@ -581,9 +599,117 @@ def _completed_stock_count_variance_finding():
     large just happened" one. See build_completed_stock_count_variance_
     finding for the finding itself, shared with the ad-hoc save path."""
     result = stock_counts.get_completed_stock_count_variance(period=f"{COMPLETED_VARIANCE_WINDOW_DAYS}d")
+    # A live query against Odoo, run right now -- "today" is the correct
+    # watermark for THIS freshness question ("did we just read current data,"
+    # the same thing _stuck_stock_count_finding/_negative_stock_control_
+    # finding/_cost_coverage_control_finding mark fresh). result["end_date"]
+    # is deliberately NOT used here: it's the trailing window's end, anchored
+    # to the latest SALES order (borrowed from sales.py's shared period-bounds
+    # helper for window sizing) -- a stock count can complete on any day
+    # regardless of whether orders are flowing, so sales recency doesn't
+    # establish whether this specific query itself is current.
+    measurement.source_as_of(date.today().isoformat())
     if not result["sessions"] or result["sessions"][0]["gross_abs_variance_value_rs"] < COMPLETED_VARIANCE_HIGH_SESSION_RS:
         return None
     return build_completed_stock_count_variance_finding(result, "completed_stock_count_variance")
+
+
+def _damage_writeoff_finding():
+    """Confirmed damage write-offs (Odoo's damaged_order document -- scrap/
+    wastage records, distinct from the "product damage" shortage REASON on
+    warehouse transfers that transfer_accountability.py already tracks as
+    its own case) over the trailing window. Always fires when there's any
+    confirmed write-off at all -- checked live: there always is, every
+    single 14-day window across 6 months of history cleared Rs 73k, so
+    gating this behind a "did something unusual happen" threshold the way
+    completed_stock_count_variance does would mean it never fires despite
+    being one of the largest standing inventory-loss signals in the whole
+    app (see DAMAGE_WRITEOFF_* constants above for the real distribution
+    behind the priority tiers)."""
+    result = loss_and_damage.get_damage_writeoff(window_days=DAMAGE_WRITEOFF_WINDOW_DAYS)
+    # Live query against Odoo, run right now -- same basis as the other
+    # three snapshot detectors above.
+    measurement.source_as_of(result["as_of"])
+    if not result["line_count"]:
+        return None
+
+    priority = (
+        "critical" if result["total_value_rs"] >= DAMAGE_WRITEOFF_CRITICAL_VALUE_RS
+        else "high" if result["total_value_rs"] >= DAMAGE_WRITEOFF_HIGH_VALUE_RS
+        else "medium"
+    )
+    breakdowns = [{
+        "dimension": "store", "label": "Damage write-off value by outlet",
+        "mode": "contribution", "baseline_month": None,
+        "total": result["total_value_rs"],
+        "top_contributors": [{"name": o["outlet"], "current": o["value_rs"], "delta": o["value_rs"]} for o in result["by_outlet"]],
+    }, {
+        "dimension": "product", "label": "Damage write-off value by product",
+        "mode": "contribution", "baseline_month": None,
+        "total": result["total_value_rs"],
+        "top_contributors": [{"name": p["name"], "current": p["value_rs"], "delta": p["value_rs"]} for p in result["top_products"]],
+    }]
+    evidence = evidence_engine.build_snapshot_evidence(breakdowns, result["as_of"])
+
+    coverage = result["valuation_coverage"]
+    no_cost = coverage["no_cost_data_lines"]
+    coverage_clause = (
+        f" {coverage['catalog_estimate_lines']} of {coverage['total_lines']} lines have a usable catalog cost, "
+        f"so this total is a lower bound."
+        if no_cost else ""
+    )
+    impact = {
+        "kind": "damage_writeoff",
+        "financial_impact_rs": result["total_value_rs"],
+        "count": result["order_count"],
+        "valuation_coverage": coverage,
+        "avg_order_value_used": None,
+        "confidence": "measured",
+        "month": result["as_of"],
+        "detail": f"Rs. {result['total_value_rs']:,.0f} of confirmed damage write-offs across "
+        f"{result['order_count']} order(s), {result['total_qty']:,.0f} units, in the last "
+        f"{result['window_days']} days.{coverage_clause}",
+    }
+    plural = result["order_count"] != 1
+    worst_outlet = result["by_outlet"][0] if result["by_outlet"] else None
+    recommendations = [{
+        "action": f"Review damage write-offs at {worst_outlet['outlet']} — Rs. {worst_outlet['value_rs']:,.0f} "
+        f"across {worst_outlet['orders']} order{'s' if worst_outlet['orders'] != 1 else ''} in the last "
+        f"{result['window_days']} days, the largest of any outlet — then establish whether this reflects "
+        f"real spoilage/breakage or a process gap (e.g. over-liberal write-off habits)"
+        if worst_outlet else "Review confirmed damage write-offs for the trailing window",
+        "owner": "Inventory team",
+        "priority": priority,
+        "expected_benefit": "Determines whether the recorded write-off value reflects real, unavoidable loss "
+        "(spoilage, breakage in transit) or a controllable process gap, using the actual outlet and product "
+        "breakdown rather than treating all write-offs as one undifferentiated cost.",
+    }]
+
+    return {
+        "id": f"damage_writeoff-{result['as_of']}",
+        "metric_id": "damage_writeoff",
+        "domain": "inventory",
+        "title": f"Rs. {result['total_value_rs']:,.0f} in confirmed damage write-offs — "
+        f"{result['order_count']} order{'s' if plural else ''}, last {result['window_days']} days",
+        "category": "critical",
+        "severity": "high",
+        "priority": priority,
+        "business_impact_score": impact_engine.business_impact_score(priority, None, impact, evidence["data_quality"]),
+        "detected": result["as_of"],
+        "confirm": {"period": result["as_of"], "current": result["order_count"], "baseline": None, "pct_change": None, "unit": "count"},
+        "breakdowns": breakdowns,
+        "impact": impact,
+        "how": None,
+        "root_cause": {"checks": evidence["checks"], "summary": evidence["summary"]},
+        "data_quality": evidence["data_quality"],
+        "recommendations": recommendations,
+        # Detail-only, same pattern as sessions/products on the sibling
+        # stock-count findings -- the case-detail page can render a real
+        # per-outlet/per-product table instead of only the breakdown.
+        "by_outlet": result["by_outlet"],
+        "top_products": result["top_products"],
+        "status": "completed",
+    }
 
 
 def build_inventory_findings():
@@ -596,6 +722,7 @@ def build_inventory_findings():
         measurement.run_snapshot("dead_overstock_value", _dead_overstock_finding),
         measurement.run_snapshot("stuck_stock_count", _stuck_stock_count_finding),
         measurement.run_snapshot("completed_stock_count_variance", _completed_stock_count_variance_finding),
+        measurement.run_snapshot("damage_writeoff", _damage_writeoff_finding),
     ])
 
 
@@ -614,6 +741,10 @@ def _negative_stock_control_finding():
     has non-negative recorded stock or it doesn't, not a fuzzy magnitude
     call), with priority scaling by how widespread it is."""
     result = data_controls.get_negative_stock()
+    # Live query against Odoo; result["as_of_date"] is "today" by construction
+    # (data_controls.get_negative_stock) -- see _cost_coverage_control_finding's
+    # comment on why this is the fix for a case that can never clear otherwise.
+    measurement.source_as_of(result["as_of_date"])
     products = result["products"]
     if not products:
         return None
@@ -709,6 +840,19 @@ def _cost_coverage_control_finding():
     no_cost = result["no_cost_at_all"]
     if not total:
         measurement.source_unavailable("No inventory catalog coverage.")
+    else:
+        # A live query against Odoo, not a cached snapshot -- result["as_of_date"]
+        # is "today" by construction (see data_controls.get_cost_coverage), so a
+        # successful query genuinely IS fresh, the same basis _outlet_activity_
+        # finding already uses above. Without this, a cycle where the gap clears
+        # can never be verified: run_snapshot() leaves freshness "unknown" by
+        # default, which measurement.healthy() never accepts, so the case that
+        # opened for this metric would stay in verification_pending forever,
+        # showing its last-fired snapshot no matter how many clean days follow
+        # (caught live on completed_stock_count_variance's own case -- 6+ days
+        # stuck on "Source freshness is not established" purely because this
+        # sibling function class never told the framework its data was current).
+        measurement.source_as_of(result["as_of_date"])
     if not total or not no_cost:
         return None
     coverage_pct = result["coverage_pct"]

@@ -268,6 +268,61 @@ def test_completed_variance_finding_fires_above_threshold_with_real_priority_tie
     assert finding["sessions"] == [session]
 
 
+# ---------------------------------------------------------------------------
+# _damage_writeoff_finding -- confirmed damage write-offs (Odoo's
+# damaged_order document), always-fires posture (see DAMAGE_WRITEOFF_*
+# constants' docstring for why -- the condition is chronic, not anomalous).
+
+def _damage_result(order_count, total_value, line_count=None, by_outlet=None, top_products=None, as_of="2026-10-08"):
+    return {
+        "as_of": as_of, "window_days": 14, "start_date": "2026-09-25", "end_date": as_of,
+        "order_count": order_count, "line_count": line_count if line_count is not None else order_count,
+        "total_qty": total_value / 10 if total_value else 0, "total_value_rs": total_value,
+        "valuation_coverage": {"total_lines": order_count, "catalog_estimate_lines": order_count, "no_cost_data_lines": 0},
+        "by_outlet": by_outlet or [],
+        "top_products": top_products or [],
+    }
+
+
+def test_damage_writeoff_finding_returns_none_with_no_lines(monkeypatch):
+    monkeypatch.setattr(sf.loss_and_damage, "get_damage_writeoff", lambda window_days: _damage_result(0, 0, line_count=0))
+    assert sf._damage_writeoff_finding() is None
+
+
+def test_damage_writeoff_finding_fires_even_at_a_typical_level(monkeypatch):
+    # The whole point of this detector: it's always real, so it must fire
+    # even well below the "critical" tier -- not gated behind a spike.
+    _stub_snapshot_evidence(monkeypatch)
+    by_outlet = [{"outlet": "Celeste Daily Ethul Kotte", "orders": 20, "qty": 500.0, "value_rs": 50_000.0}]
+    monkeypatch.setattr(sf.loss_and_damage, "get_damage_writeoff", lambda window_days: _damage_result(20, 50_000.0, by_outlet=by_outlet))
+
+    finding = sf._damage_writeoff_finding()
+    assert finding is not None
+    assert finding["metric_id"] == "damage_writeoff"
+    assert finding["domain"] == "inventory"
+    assert finding["priority"] == "medium"  # below DAMAGE_WRITEOFF_HIGH_VALUE_RS
+    assert finding["impact"]["financial_impact_rs"] == 50_000.0
+    assert "Ethul Kotte" in finding["recommendations"][0]["action"]
+
+
+def test_damage_writeoff_finding_priority_scales_with_real_tiers(monkeypatch):
+    _stub_snapshot_evidence(monkeypatch)
+    for value, expected in ((50_000, "medium"), (400_000, "high"), (600_000, "critical")):
+        monkeypatch.setattr(sf.loss_and_damage, "get_damage_writeoff", lambda window_days, v=value: _damage_result(5, v))
+        assert sf._damage_writeoff_finding()["priority"] == expected
+
+
+def test_damage_writeoff_finding_discloses_valuation_coverage_gap(monkeypatch):
+    _stub_snapshot_evidence(monkeypatch)
+    result = _damage_result(10, 100_000.0)
+    result["valuation_coverage"] = {"total_lines": 10, "catalog_estimate_lines": 7, "no_cost_data_lines": 3}
+    monkeypatch.setattr(sf.loss_and_damage, "get_damage_writeoff", lambda window_days: result)
+
+    finding = sf._damage_writeoff_finding()
+    assert "7 of 10 lines" in finding["impact"]["detail"]
+    assert "lower bound" in finding["impact"]["detail"]
+
+
 def test_build_completed_stock_count_variance_finding_returns_none_for_empty_result():
     assert sf.build_completed_stock_count_variance_finding(_completed_variance_result(0, 0, 0), "x") is None
 

@@ -14,7 +14,7 @@ const plainUnknown = (text) => {
 };
 
 const TRANSFER_KINDS = new Set(["transfer_discrepancy"]);
-const MONEY_KINDS = new Set(["stuck_stock_count_value_at_risk", "completed_stock_count_variance", "inventory_value_at_risk"]);
+const MONEY_KINDS = new Set(["stuck_stock_count_value_at_risk", "completed_stock_count_variance", "inventory_value_at_risk", "damage_writeoff"]);
 
 function formatWhen(value) {
   if (!value) return "Not recorded";
@@ -128,6 +128,12 @@ function answerFor(latest) {
       + (topStore ? `, most at ${topStore.replace(/ \(.*\)$/, "")}` : "") + (type ? `, in ${type.name.toLowerCase()}` : "")
       + ". Review the count sheets and receiving records first.";
   }
+  if (kind === "damage_writeoff") {
+    const top = topOf(latest.breakdowns?.find((b) => b.dimension === "product"));
+    return `${formatCurrency(latest.impact.financial_impact_rs)} in confirmed damage write-offs across ${formatNumber(latest.impact.count)} order(s)`
+      + (topStore ? `, most at ${topStore.replace(/ \(.*\)$/, "")}` : "") + (top ? `, led by ${shortProduct(top.name)}` : "")
+      + ". Check whether this reflects real spoilage/breakage or a process gap.";
+  }
   if (kind === "dispatch_over_plan") {
     const top = topOf(latest.breakdowns?.find((b) => b.dimension === "product"));
     return `${formatNumber(latest.impact.count)} outbound line(s) were sent well above their planned quantity`
@@ -159,6 +165,13 @@ function valueLineFor(latest) {
   }
   if (kind === "completed_stock_count_variance") {
     return `Estimated variance in completed counts: ${formatCurrency(latest.impact.financial_impact_rs)} at the recorded estimate · not confirmed loss.`;
+  }
+  if (kind === "damage_writeoff") {
+    const v = latest.impact.valuation_coverage ?? {};
+    const total = v.total_lines ?? 0;
+    return `Confirmed damage write-off value: ${formatCurrency(latest.impact.financial_impact_rs)} at catalog cost. `
+      + `Valuation basis: ${v.catalog_estimate_lines ?? 0} lines at catalog estimate, ${v.no_cost_data_lines ?? 0} with no cost, `
+      + `of ${total} lines · the write-off itself is confirmed in Odoo, this Rs figure is a lower-bound estimate.`;
   }
   if (latest?.impact?.financial_impact_rs != null) {
     return `Estimated value: ${formatCurrency(latest.impact.financial_impact_rs)} · not confirmed loss.`;

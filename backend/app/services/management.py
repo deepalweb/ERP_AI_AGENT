@@ -183,6 +183,7 @@ FAMILY_LABELS = {
     "transfer_damage": "Transfer damage",
     "stock_availability": "Stock availability",
     "stock_count_controls": "Stock-count controls",
+    "damage_writeoff": "Damage write-offs",
     "inventory_health": "Inventory health",
     "inventory_opportunities": "Inventory opportunities",
 }
@@ -209,6 +210,8 @@ def family_for(item):
         return "stock_availability"
     if metric_id in ("stuck_stock_count", "completed_stock_count_variance"):
         return "stock_count_controls"
+    if metric_id == "damage_writeoff":
+        return "damage_writeoff"
     if metric_id == "dead_overstock_value":
         return "inventory_health"
     if item.get("domain") == "inventory" and item.get("category") == "opportunity":
