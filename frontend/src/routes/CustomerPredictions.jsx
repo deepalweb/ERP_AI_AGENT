@@ -17,6 +17,7 @@ import CustomerGrowthOverview from "../design/CustomerGrowthOverview";
 import Pill from "../design/Pill";
 import DonutChart from "../charts/DonutChart";
 import OrderForecastChart from "../charts/OrderForecastChart";
+import AskCelesteButton from "../design/AskCelesteButton";
 import { LIFECYCLE_LABEL, TICKET_PRIORITY_LABEL, VALUE_TIER_LABEL } from "../design/customerVocabulary";
 import { formatCurrency, formatDate, formatNumber } from "../format";
 
@@ -68,13 +69,14 @@ function useSlowFlag(isLoading, delayMs = 6000) {
   return slow;
 }
 
-function ExecutiveTile({ label, value, sub, tone }) {
+function ExecutiveTile({ label, value, sub, tone, onAskCeleste, question }) {
   const toneClass = tone === "critical" ? "text-critical" : tone === "warning" ? "text-warning" : tone === "good" ? "text-good" : "text-foreground-strong";
   return (
     <div className="rounded-lg border border-border p-3">
       <div className={`text-lg font-bold ${toneClass}`}>{value}</div>
       <div className="text-xs font-medium text-foreground/60">{label}</div>
       {sub && <div className="text-xs text-foreground/50">{sub}</div>}
+      <AskCelesteButton onAskCeleste={onAskCeleste} question={question} />
     </div>
   );
 }
@@ -476,7 +478,7 @@ function timingLine(row) {
   return null;
 }
 
-function CustomerRow({ row, expanded, onToggle }) {
+function CustomerRow({ row, expanded, onToggle, onAskCeleste }) {
   const meta = STATUS_META[row.status];
   const severity = row.overdue_severity ? SEVERITY_META[row.overdue_severity] : null;
   const [gapLow, gapHigh] = gapRange(row);
@@ -543,6 +545,10 @@ function CustomerRow({ row, expanded, onToggle }) {
                   <li key={b}>{b}</li>
                 ))}
               </ul>
+              <AskCelesteButton
+                onAskCeleste={onAskCeleste}
+                question={`Tell me more about ${row.name} (customer #${row.partner_id}) -- their order pattern, value, and what's changed recently.`}
+              />
             </div>
             <NextBasketSection partnerId={row.partner_id} enabled={expanded} />
           </td>
@@ -771,7 +777,7 @@ function ChannelChurnSection({ lifecycle }) {
  * real elapsed time to accumulate evaluated predictions before it can show
  * anything honest — see the placeholder note at the bottom of this page).
  */
-export default function CustomerPredictions() {
+export default function CustomerPredictions({ onAskCelesteQuestion }) {
   const [status, setStatus] = useState(null);
   const [sort, setSort] = useState("revenue");
   const [offset, setOffset] = useState(0);
@@ -925,18 +931,39 @@ export default function CustomerPredictions() {
         {s && (
           <>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-              <ExecutiveTile label="Customers analyzed" value={formatNumber(s.total_customers)} />
+              <ExecutiveTile
+                label="Customers analyzed"
+                value={formatNumber(s.total_customers)}
+                onAskCeleste={onAskCelesteQuestion}
+                question={`We have ${formatNumber(s.total_customers)} customers analyzed -- what does the overall customer base look like right now?`}
+              />
               <ExecutiveTile
                 label="With a usable pattern"
                 value={formatNumber(s.predictable_customers)}
                 sub={`${((s.predictable_customers / s.total_customers) * 100).toFixed(0)}% of all customers`}
+                onAskCeleste={onAskCelesteQuestion}
+                question="Most customers don't have a usable purchase pattern yet -- why, and what would it take to grow that group?"
               />
-              <ExecutiveTile label="Approaching / due" value={formatNumber(s.due.count)} tone="warning" />
-              <ExecutiveTile label="Overdue" value={formatNumber(s.overdue.count)} tone="critical" />
+              <ExecutiveTile
+                label="Approaching / due"
+                value={formatNumber(s.due.count)}
+                tone="warning"
+                onAskCeleste={onAskCelesteQuestion}
+                question={`${formatNumber(s.due.count)} customers are approaching or due for their next order -- who are the highest-value ones?`}
+              />
+              <ExecutiveTile
+                label="Overdue"
+                value={formatNumber(s.overdue.count)}
+                tone="critical"
+                onAskCeleste={onAskCelesteQuestion}
+                question={`${formatNumber(s.overdue.count)} customers are overdue for their next order -- who are the highest-value ones, and what changed for them?`}
+              />
               <ExecutiveTile
                 label="Typical baskets across due customers"
                 value={formatCurrency(s.expected_revenue)}
                 sub={`${formatCurrency(s.high_confidence_expected_revenue)} from customers with 10+ orders`}
+                onAskCeleste={onAskCelesteQuestion}
+                question="What's the typical basket value across customers who are due to order, and how reliable is that estimate?"
               />
             </div>
             <p className="mt-3 text-xs text-foreground/50">
@@ -1056,6 +1083,7 @@ export default function CustomerPredictions() {
                   row={row}
                   expanded={expandedId === row.partner_id}
                   onToggle={() => setExpandedId(expandedId === row.partner_id ? null : row.partner_id)}
+                  onAskCeleste={onAskCelesteQuestion}
                 />
               ))}
             </tbody>

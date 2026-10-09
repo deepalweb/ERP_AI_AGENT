@@ -49,13 +49,13 @@ export default function App({ onSignOut }) {
           <Route path="/actions" element={<Actions />} />
           <Route path="/investigate" element={<Investigate />} />
           <Route path="/investigate/:caseId" element={<CaseDetail />} />
-          <Route path="/inventory" element={<Inventory />} />
+          <Route path="/inventory" element={<Inventory onAskCelesteQuestion={askCeleste} />} />
           <Route path="/inventory/cases" element={<InventoryCases />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route
             path="/customers/predictions"
-            element={<CustomerPredictions />}
+            element={<CustomerPredictions onAskCelesteQuestion={askCeleste} />}
           />
         </Routes>
       </main>

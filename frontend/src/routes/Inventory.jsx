@@ -20,6 +20,7 @@ import GroupedStackedBarChart from "../charts/GroupedStackedBarChart";
 import BulletBar from "../charts/BulletBar";
 import Heatmap from "../charts/Heatmap";
 import TrendChart from "../charts/TrendChart";
+import AskCelesteButton from "../design/AskCelesteButton";
 import { formatCurrency, formatDate, formatNumber, stripSkuSuffix } from "../format";
 
 const DEPTH_COLOR = { healthy: "var(--status-good)", overstock: "var(--status-warning)", dead_stock: "var(--status-critical)" };
@@ -50,7 +51,7 @@ const STATUS_TEXT_CLASS = { good: "text-good", warning: "text-warning", critical
  * one takes its own formatDelta so "out of stock" reads "+86" and "dead
  * stock" reads "+Rs 12K", not a fabricated percentage. delta undefined (no
  * prior snapshot yet) shows no line at all, never a fake 0. */
-function KpiTile({ label, value, note, status, delta, formatDelta = formatNumber }) {
+function KpiTile({ label, value, note, status, delta, formatDelta = formatNumber, onAskCeleste, question }) {
   const toneClass = STATUS_TEXT_CLASS[status] ?? "text-foreground-strong";
   const hasDelta = delta !== undefined && delta !== null;
   const worse = hasDelta && delta > 0; // every KPI here is lower-is-better
@@ -65,6 +66,7 @@ function KpiTile({ label, value, note, status, delta, formatDelta = formatNumber
       )}
       {hasDelta && delta === 0 && <div className="mt-1 text-xs text-foreground/50">No change vs previous scan</div>}
       {note && <div className="mt-1 text-xs text-foreground-subtle">{note}</div>}
+      <AskCelesteButton onAskCeleste={onAskCeleste} question={question} />
     </div>
   );
 }
@@ -263,22 +265,28 @@ function StockCoverageTable({ data, maxDays }) {
   );
 }
 
-function CaseRow({ item }) {
+function CaseRow({ item, onAskCeleste }) {
+  const title = item.latest?.title || item.metric_id;
   return (
-    <Link
-      to={`/investigate/${encodeURIComponent(item.case_id)}`}
-      className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm hover:bg-background"
-    >
-      <span className="min-w-0 truncate text-foreground-strong">{item.latest?.title || item.metric_id}</span>
-      <span className="flex flex-shrink-0 items-center gap-2">
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2 text-sm hover:bg-background">
+      <Link to={`/investigate/${encodeURIComponent(item.case_id)}`} className="min-w-0 flex-1 truncate text-foreground-strong">
+        {title}
+      </Link>
+      <span className="flex flex-shrink-0 items-center gap-3">
         <Badge tone={toneForPriority(item.priority)}>{item.priority || "unranked"}</Badge>
         <span className="text-xs text-foreground/50">{formatDate(item.last_seen_at?.slice(0, 10))}</span>
+        <AskCelesteButton
+          onAskCeleste={onAskCeleste}
+          question={`Tell me more about this inventory issue: "${title}"`}
+          label="Ask"
+          className=""
+        />
       </span>
-    </Link>
+    </div>
   );
 }
 
-export default function Inventory() {
+export default function Inventory({ onAskCelesteQuestion }) {
   const depth = useQuery({ queryKey: ["inventoryDepth"], queryFn: fetchInventoryDepth });
   const kpiHistory = useQuery({ queryKey: ["inventoryKpiHistory"], queryFn: fetchInventoryKpiHistory });
   const stockAlerts = useQuery({ queryKey: ["stockAlerts"], queryFn: fetchStockAlerts });
@@ -404,6 +412,8 @@ export default function Inventory() {
           note="distinct products"
           status="critical"
           delta={kpi?.out_of_stock_products.delta}
+          onAskCeleste={onAskCelesteQuestion}
+          question={`${sa ? formatNumber(sa.distinct_out_of_stock_products) : "How many"} products are out of stock right now -- which ones, at which outlets, and why?`}
         />
         <KpiTile
           label="Low stock"
@@ -411,6 +421,8 @@ export default function Inventory() {
           note="distinct products"
           status="warning"
           delta={kpi?.low_stock_products.delta}
+          onAskCeleste={onAskCelesteQuestion}
+          question={`${sa ? formatNumber(sa.distinct_low_stock_products) : "How many"} products are low on stock -- which ones are most urgent?`}
         />
         <KpiTile
           label="Dead stock"
@@ -419,6 +431,8 @@ export default function Inventory() {
           status="critical"
           delta={kpi?.dead_stock_value.delta}
           formatDelta={formatCurrency}
+          onAskCeleste={onAskCelesteQuestion}
+          question={`We have ${segByid.dead_stock ? formatCurrency(segByid.dead_stock.value) : "a lot of"} tied up in dead stock -- what's driving it and what should we do about it?`}
         />
         <KpiTile
           label="Overstock"
@@ -427,6 +441,8 @@ export default function Inventory() {
           status="warning"
           delta={kpi?.overstock_value.delta}
           formatDelta={formatCurrency}
+          onAskCeleste={onAskCelesteQuestion}
+          question={`We have ${segByid.overstock ? formatCurrency(segByid.overstock.value) : "a lot of"} tied up in overstock -- which products, and why are we holding so much?`}
         />
         <KpiTile
           label="Stuck stock counts"
@@ -434,6 +450,8 @@ export default function Inventory() {
           note={stuck ? `${formatCurrency(stuck.total_value_at_risk_rs)} at risk` : undefined}
           status="warning"
           delta={kpi?.stuck_count_sessions.delta}
+          onAskCeleste={onAskCelesteQuestion}
+          question={`${stuck ? formatNumber(stuck.sessions.length) : "Several"} stock counts are stuck, started but never finished -- which sessions, and who's responsible?`}
         />
         <KpiTile
           label="Shortage qty"
@@ -441,6 +459,8 @@ export default function Inventory() {
           note={lad?.period}
           status="critical"
           delta={kpi?.shortage_qty.delta}
+          onAskCeleste={onAskCelesteQuestion}
+          question={`What's driving this month's inventory shortage qty -- which reason, which outlet, which products?`}
         />
       </div>
       {!kpi && (kpiHistory.data?.status === "ok") && (
@@ -689,7 +709,7 @@ export default function Inventory() {
         {openCases.length > 0 && (
           <div className="space-y-2">
             {openCases.map((item) => (
-              <CaseRow key={item.case_id} item={item} />
+              <CaseRow key={item.case_id} item={item} onAskCeleste={onAskCelesteQuestion} />
             ))}
           </div>
         )}
