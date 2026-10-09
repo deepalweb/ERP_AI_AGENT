@@ -577,6 +577,8 @@ function OutletBehaviorTable({ outlets }) {
             <th className="pb-2 text-right font-medium">Cancel rate</th>
             <th className="pb-2 text-right font-medium">Unique customers</th>
             <th className="pb-2 text-right font-medium">Orders / customer</th>
+            <th className="pb-2 text-right font-medium">Repeat rate</th>
+            <th className="pb-2 text-right font-medium">2nd-order rate</th>
             <th className="pb-2 text-right font-medium">Avg order value</th>
           </tr>
         </thead>
@@ -593,11 +595,23 @@ function OutletBehaviorTable({ outlets }) {
               </td>
               <td className="py-1.5 text-right">{formatNumber(o.unique_customers)}</td>
               <td className="py-1.5 text-right">{o.orders_per_customer}</td>
+              <td className="py-1.5 text-right">
+                {o.repeat_rate_pct == null ? "—" : `${o.repeat_rate_pct}%`}
+              </td>
+              <td className="py-1.5 text-right">
+                {o.second_order_rate_pct == null ? "—" : `${o.second_order_rate_pct}%`}
+              </td>
               <td className="py-1.5 text-right">{formatCurrency(o.avg_order_value)}</td>
             </tr>
           ))}
         </tbody>
       </table>
+      <p className="mt-2 text-xs text-foreground/50">
+        Repeat rate: share of each outlet&rsquo;s own customers who ordered there more than once. 2nd-order rate:
+        of customers acquired at that outlet (their first order ever), the share who placed a second order — anywhere
+        — within 30 days. &ldquo;—&rdquo; means too few customers yet to show a rate rather than one that looks
+        falsely precise.
+      </p>
     </div>
   );
 }

@@ -108,8 +108,14 @@ def test_compute_lifecycle_summary_tracks_revenue_by_tier(monkeypatch):
 # every customer's first/second order is already fully recorded, so this
 # doesn't need fresh daily data the way lifecycle deterioration does.
 
-def _order_row(partner_id, first_order, second_order=None, as_of=AS_OF):
-    return {"partner_id": partner_id, "first_order": first_order, "second_order": second_order, "as_of_date": as_of}
+def _order_row(partner_id, first_order, second_order=None, as_of=AS_OF, store_id=None):
+    return {
+        "partner_id": partner_id,
+        "first_order": first_order,
+        "first_order_store_id": store_id,
+        "second_order": second_order,
+        "as_of_date": as_of,
+    }
 
 
 def _fake_second_order_run_query(rows):
@@ -175,3 +181,62 @@ def test_second_order_cohorts_separate_different_acquisition_months(monkeypatch)
     july = next(c for c in result["cohorts"] if c["month"] == "2026-07")
     assert june["windows"]["30"]["rate_pct"] == 100.0
     assert july["windows"]["30"]["rate_pct"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# get_outlet_second_order_rates -- same 30-day conversion math as the
+# company-wide headline, sliced by the outlet of each customer's FIRST
+# order instead of acquisition month.
+
+def test_outlet_second_order_rates_groups_by_acquisition_outlet(monkeypatch):
+    rows = (
+        [_order_row(i, datetime(2026, 8, 1), datetime(2026, 8, 10), store_id=1) for i in range(20)]
+        + [_order_row(100 + i, datetime(2026, 8, 1), None, store_id=2) for i in range(20)]
+    )
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    result = cp.get_outlet_second_order_rates()
+    assert result[1]["eligible"] == 20
+    assert result[1]["converted"] == 20
+    assert result[1]["rate_pct"] == 100.0
+    assert result[2]["eligible"] == 20
+    assert result[2]["converted"] == 0
+    assert result[2]["rate_pct"] == 0.0
+
+
+def test_outlet_second_order_rates_hides_small_samples(monkeypatch):
+    rows = [_order_row(i, datetime(2026, 8, 1), datetime(2026, 8, 10), store_id=1) for i in range(5)]
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    result = cp.get_outlet_second_order_rates()
+    assert result[1]["eligible"] == 5
+    assert result[1]["rate_pct"] is None  # below SECOND_ORDER_MIN_ELIGIBLE
+
+
+def test_outlet_second_order_rates_ignores_immature_first_orders(monkeypatch):
+    rows = [_order_row(i, datetime(2026, 9, 25), None, store_id=1) for i in range(20)]
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    result = cp.get_outlet_second_order_rates()
+    assert result == {}
+
+
+def test_outlet_behavior_merges_repeat_rate_and_second_order_rate(monkeypatch):
+    outlet_rows = [
+        {
+            "outlet": "Colombo 6", "store_id": 1, "orders": 100, "cancelled": 5,
+            "unique_customers": 40, "revenue": 50_000.0, "avg_order_value": 500.0,
+            "repeat_customers": 20,
+        },
+    ]
+    second_order_rows = [_order_row(i, datetime(2026, 8, 1), datetime(2026, 8, 10), store_id=1) for i in range(20)]
+
+    def run_query(sql, params=None):
+        if "repeat_counts" in sql:
+            return outlet_rows
+        if "o2.rn = 2" in sql:
+            return second_order_rows
+        raise AssertionError(f"unexpected query: {sql[:80]}")
+
+    monkeypatch.setattr(cp.reporting, "run_query", run_query)
+    result = cp.get_outlet_behavior()
+    assert len(result) == 1
+    assert result[0]["repeat_rate_pct"] == 50.0  # 20 of 40 unique customers ordered there twice+
+    assert result[0]["second_order_rate_pct"] == 100.0

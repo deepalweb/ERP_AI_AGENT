@@ -609,9 +609,9 @@ async def customer_second_order_conversion():
 @app.get("/customers/outlet-behavior")
 async def customer_outlet_behavior():
     """Per-outlet customer behavior (orders, cancellations, unique
-    customers, orders per customer) for Celeste's 5 real retail outlets —
-    computed live, not part of the daily prediction cache. See
-    backend/app/services/customer_predictions.py."""
+    customers, orders per customer, repeat rate, and acquisition 2nd-order
+    rate) for Celeste's 5 real retail outlets — computed live, not part of
+    the daily prediction cache. See backend/app/services/customer_predictions.py."""
     try:
         result = await anyio.to_thread.run_sync(customer_predictions.get_outlet_behavior)
         return {"status": "ok", "outlets": result}

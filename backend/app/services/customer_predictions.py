@@ -504,17 +504,36 @@ def list_predictions(status: str | None, sort: str, limit: int, offset: int) -> 
 
 
 # All customer and outlet analytics share the configured Celeste outlet scope.
+# repeat_counts is a second pass over the same scoped orders, grouped by
+# (store, customer) first -- "did this customer order here more than once"
+# is a different question than "how many orders did this outlet have," and
+# collapsing them into one GROUP BY would double-count multi-order customers.
 OUTLET_BEHAVIOR_SQL = customer_order_query(f"""
+    WITH per_customer AS (
+        SELECT store_id, partner_id, COUNT(*) AS orders_at_outlet
+        FROM customer_orders
+        WHERE state IN {SALE_ORDER_LIVE_STATES}
+        GROUP BY store_id, partner_id
+    ),
+    repeat_counts AS (
+        SELECT store_id, COUNT(*) AS repeat_customers
+        FROM per_customer
+        WHERE orders_at_outlet >= 2
+        GROUP BY store_id
+    )
     SELECT COALESCE(rs.name, 'Unknown store') AS outlet,
+           so.store_id,
            COUNT(*) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS orders,
            COUNT(*) FILTER (WHERE so.state = 'cancel') AS cancelled,
            COUNT(DISTINCT so.partner_id) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS unique_customers,
            SUM(so.amount_total) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS revenue,
-           AVG(so.amount_total) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS avg_order_value
+           AVG(so.amount_total) FILTER (WHERE so.state IN {SALE_ORDER_LIVE_STATES}) AS avg_order_value,
+           MAX(rc.repeat_customers) AS repeat_customers
     FROM customer_orders so
     LEFT JOIN res_store rs ON rs.id = so.store_id
+    LEFT JOIN repeat_counts rc ON rc.store_id = so.store_id
     WHERE so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)} AND so.store_id IN {CELESTE_STORE_IDS}
-    GROUP BY rs.name
+    GROUP BY rs.name, so.store_id
     ORDER BY orders DESC
 """)
 
@@ -599,19 +618,61 @@ def get_daily_forecast(days: int = 14) -> list[dict]:
     return [_forecast_for_day((as_of_date + timedelta(days=i)).isoformat()) for i in range(1, days + 1)]
 
 
+def get_outlet_second_order_rates() -> dict[int, dict]:
+    """Second-order conversion grouped by the outlet of each customer's
+    FIRST order -- same 30-day window, same as_of_date, and same
+    SECOND_ORDER_MIN_ELIGIBLE noisy-sample guard as get_second_order_intelligence(),
+    just sliced by acquisition outlet instead of acquisition month. Answers
+    "which outlet brings in customers who actually come back," the
+    per-outlet counterpart to the company-wide headline -- reuses the same
+    SECOND_ORDER_SQL rows rather than a second query."""
+    rows = reporting.run_query(SECOND_ORDER_SQL)
+    if not rows:
+        return {}
+    as_of_date = rows[0]["as_of_date"]
+    by_store: dict[int, dict] = {}
+    for r in rows:
+        store_id = r["first_order_store_id"]
+        if store_id is None:
+            continue
+        first_order = r["first_order"]
+        days_since_first = (as_of_date - first_order).total_seconds() / 86400.0
+        if days_since_first < SECOND_ORDER_HEADLINE_WINDOW_DAYS:
+            continue
+        bucket = by_store.setdefault(store_id, {"eligible": 0, "converted": 0})
+        bucket["eligible"] += 1
+        second_order = r["second_order"]
+        gap = (second_order - first_order).total_seconds() / 86400.0 if second_order is not None else None
+        if gap is not None and gap <= SECOND_ORDER_HEADLINE_WINDOW_DAYS:
+            bucket["converted"] += 1
+    return {
+        store_id: {
+            "eligible": b["eligible"],
+            "converted": b["converted"],
+            "rate_pct": round(b["converted"] / b["eligible"] * 100, 1) if b["eligible"] >= SECOND_ORDER_MIN_ELIGIBLE else None,
+        }
+        for store_id, b in by_store.items()
+    }
+
+
 def get_outlet_behavior() -> list[dict]:
     """Per-outlet customer behavior for the 5 real Celeste stores — order
-    count, cancellations, unique customers, and how often each customer
-    orders there on average. Computed live (a ~2s aggregate over 5 stores,
-    not the 33,600-customer computation the rest of this module caches
-    daily) rather than added to the daily scan."""
+    count, cancellations, unique customers, how often each customer orders
+    there on average, the share of customers who came back a 2nd time at
+    that same outlet, and the share of customers ACQUIRED there who placed
+    a second order anywhere within 30 days. Computed live (a ~2s aggregate
+    over 5 stores, not the 33,600-customer computation the rest of this
+    module caches daily) rather than added to the daily scan."""
     rows = reporting.run_query(OUTLET_BEHAVIOR_SQL)
+    second_order_by_store = get_outlet_second_order_rates()
     result = []
     for r in rows:
         orders = int(r["orders"] or 0)
         cancelled = int(r["cancelled"] or 0)
         total = orders + cancelled
         unique_customers = int(r["unique_customers"] or 0)
+        repeat_customers = int(r["repeat_customers"] or 0)
+        second_order = second_order_by_store.get(r["store_id"])
         result.append({
             "outlet": r["outlet"],
             "orders": orders,
@@ -619,6 +680,8 @@ def get_outlet_behavior() -> list[dict]:
             "cancellation_rate_pct": round(cancelled / total * 100, 2) if total else 0.0,
             "unique_customers": unique_customers,
             "orders_per_customer": round(orders / unique_customers, 2) if unique_customers else 0.0,
+            "repeat_rate_pct": round(repeat_customers / unique_customers * 100, 1) if unique_customers else None,
+            "second_order_rate_pct": second_order["rate_pct"] if second_order else None,
             "revenue": round(float(r["revenue"] or 0), 2),
             "avg_order_value": round(float(r["avg_order_value"] or 0), 2),
         })
@@ -785,13 +848,14 @@ VALUE_PERCENTILE_SQL = customer_order_query(f"""
 # whether new orders are currently landing.
 SECOND_ORDER_SQL = customer_order_query(f"""
     WITH ordered AS (
-        SELECT partner_id, date_order,
+        SELECT partner_id, date_order, store_id,
                ROW_NUMBER() OVER (PARTITION BY partner_id ORDER BY date_order) AS rn
         FROM customer_orders
         WHERE state IN {SALE_ORDER_LIVE_STATES}
     ),
     bounds AS (SELECT MAX(date_order) AS as_of_date FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES})
-    SELECT o1.partner_id, o1.date_order AS first_order, o2.date_order AS second_order, b.as_of_date
+    SELECT o1.partner_id, o1.date_order AS first_order, o1.store_id AS first_order_store_id,
+           o2.date_order AS second_order, b.as_of_date
     FROM ordered o1
     LEFT JOIN ordered o2 ON o2.partner_id = o1.partner_id AND o2.rn = 2
     CROSS JOIN bounds b
