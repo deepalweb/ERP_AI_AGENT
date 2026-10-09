@@ -105,6 +105,41 @@ function StuckStockCountsTable({ sessions }) {
   );
 }
 
+/** Plain table instead of a ranked bar -- real product names here run long
+ * enough to wrap onto 2-3 lines inside a bar row, which reads as clutter and
+ * makes the bars themselves hard to compare. A table has no label-width
+ * problem and gives the exact unit/days-of-cover numbers next to the value,
+ * which a bar's label-suffix hack was standing in for anyway. */
+function ExposureTable({ items }) {
+  if (!items || items.length === 0) {
+    return <p className="text-sm text-foreground/50">No items.</p>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-foreground/60">
+            <th className="pb-2 font-medium">Product</th>
+            <th className="pb-2 text-right font-medium">Units</th>
+            <th className="pb-2 text-right font-medium">Days of cover</th>
+            <th className="pb-2 pl-4 text-right font-medium">Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((i) => (
+            <tr key={i.name} className="border-t border-border">
+              <td className="py-1.5 font-medium text-foreground-strong">{stripSkuSuffix(i.name)}</td>
+              <td className="py-1.5 text-right">{formatNumber(i.units)}</td>
+              <td className="py-1.5 text-right">{i.days_of_stock != null ? `${formatNumber(i.days_of_stock)}d` : "n/a"}</td>
+              <td className="py-1.5 pl-4 text-right text-foreground-strong">{formatCurrency(i.estimated_value)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** Each row pairs a BulletBar (how close to the 3-day line) with the exact
  * numbers a manager needs to act -- the chart answers "how bad," the table
  * answers "which SKU, which outlet, right now." Negative stock is its own
@@ -375,29 +410,13 @@ export default function Inventory() {
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Top dead-stock exposure</h3>
                 <div className="mt-2">
-                  <RankedBarChart
-                    data={(d.dead_stock_items ?? []).slice(0, 8).map((i) => ({
-                      name: stripSkuSuffix(i.name) + (i.days_of_stock != null ? ` · ${formatNumber(i.days_of_stock)}d cover` : ""),
-                      value: i.estimated_value,
-                    }))}
-                    formatValue={formatCurrency}
-                    labelWidth={220}
-                    rowHeight={40}
-                  />
+                  <ExposureTable items={(d.dead_stock_items ?? []).slice(0, 8)} />
                 </div>
               </div>
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Top overstock exposure</h3>
                 <div className="mt-2">
-                  <RankedBarChart
-                    data={(d.overstock_items ?? []).slice(0, 8).map((i) => ({
-                      name: stripSkuSuffix(i.name) + (i.days_of_stock != null ? ` · ${formatNumber(i.days_of_stock)}d cover` : ""),
-                      value: i.estimated_value,
-                    }))}
-                    formatValue={formatCurrency}
-                    labelWidth={220}
-                    rowHeight={40}
-                  />
+                  <ExposureTable items={(d.overstock_items ?? []).slice(0, 8)} />
                 </div>
               </div>
             </div>
