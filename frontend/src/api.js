@@ -259,6 +259,24 @@ export async function fetchStockCountSessionDetail(sessionId) {
   return readResponse(response);
 }
 
+export async function fetchStuckStockCounts() {
+  const response = await apiFetch(`${API_BASE_URL}/inventory/stuck-stock-counts`);
+
+  return readResponse(response);
+}
+
+export async function fetchCompletedStockCountVariance({ period, startDate, endDate, storeId } = {}) {
+  const params = new URLSearchParams();
+  if (period) params.set("period", period);
+  if (startDate) params.set("start_date", startDate);
+  if (endDate) params.set("end_date", endDate);
+  if (storeId) params.set("store_id", storeId);
+  const qs = params.toString();
+  const response = await apiFetch(`${API_BASE_URL}/inventory/completed-stock-count-variance${qs ? `?${qs}` : ""}`);
+
+  return readResponse(response);
+}
+
 // Takes the resolved start_date/end_date the investigation already ran
 // with (from get_completed_stock_count_variance's own result), not the
 // human-readable `period` label -- the API only understands YYYY-MM-DD

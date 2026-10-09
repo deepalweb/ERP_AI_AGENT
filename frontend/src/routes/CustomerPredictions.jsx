@@ -11,8 +11,6 @@ import {
   fetchCustomerPredictions,
   fetchCustomerPredictionsSummary,
   fetchOutletOrderForecast,
-  fetchStockAlerts,
-  fetchTopProductStockCoverage,
 } from "../api";
 import Section from "../design/Card";
 import CustomerGrowthOverview from "../design/CustomerGrowthOverview";
@@ -681,113 +679,6 @@ function OutletOrderForecastTable({ data }) {
  * (one of the 5 configured outlets) won't appear here if it has zero
  * orders in the trailing 30 days — that's a real "no trading activity"
  * state, not a missing-data bug. */
-function StockAlertsByOutletTable({ data }) {
-  if (!data || !data.segments_by_outlet || data.segments_by_outlet.length === 0) {
-    return <p className="text-sm text-foreground/50">No stock alert data available.</p>;
-  }
-  return (
-    <div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-foreground/60">
-              <th className="pb-2 font-medium">Outlet</th>
-              <th className="pb-2 text-right font-medium">Out of stock</th>
-              <th className="pb-2 text-right font-medium">Low stock</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.segments_by_outlet.map((o) => (
-              <tr key={o.outlet} className="border-t border-border">
-                <td className="py-1.5 font-medium text-foreground-strong">{o.outlet}</td>
-                <td className="py-1.5 text-right">
-                  {o.out_of_stock > 0 ? <Pill tone="critical">{o.out_of_stock}</Pill> : formatNumber(0)}
-                </td>
-                <td className="py-1.5 text-right">
-                  {o.low_stock > 0 ? <Pill tone="warning">{o.low_stock}</Pill> : formatNumber(0)}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {data.top_out_of_stock && data.top_out_of_stock.length > 0 && (
-        <div className="mt-4">
-          <div className="text-xs font-semibold uppercase tracking-wide text-foreground/50">
-            Top out-of-stock, by recent sales
-          </div>
-          <ul className="mt-1 space-y-1">
-            {data.top_out_of_stock.slice(0, 5).map((item, i) => (
-              <li key={`${item.sku}-${item.outlet}-${i}`} className="flex justify-between text-foreground/80">
-                <span>
-                  {item.name} <span className="text-foreground/50">&middot; {item.outlet}</span>
-                </span>
-                <span className="text-foreground/50">{formatNumber(item.sold_30d)} sold/30d</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Stock coverage for the top-selling products, checked against each
- * product's own sales rate — not a company-wide stock total, which pools
- * every SKU together and can't say whether any specific product is
- * actually about to run out (a healthy overall number can hide a fast
- * mover that's nearly empty). "Short" reuses the same 3-day low-stock
- * threshold used elsewhere in the app, not the 10-day forecast window —
- * checked against the live data first: the top sellers here are almost
- * all fresh produce/dairy, restocked nearly daily, so requiring 10 days
- * of on-hand stock would flag every single one as short when thin stock
- * is normal for a quick-commerce grocer. Negative stock is called out
- * separately — it's a data-integrity issue (sold past what was recorded
- * on hand), not an ordinary low-stock signal. */
-function TopProductStockCoverageTable({ data }) {
-  if (!data || !data.products || data.products.length === 0) {
-    return <p className="text-sm text-foreground/50">No stock coverage data available.</p>;
-  }
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-foreground/60">
-            <th className="pb-2 font-medium">Product</th>
-            <th className="pb-2 text-right font-medium">Sold (30d)</th>
-            <th className="pb-2 text-right font-medium">Current stock</th>
-            <th className="pb-2 text-right font-medium">Days of cover</th>
-            <th className="pb-2 font-medium">Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.products.map((p) => (
-            <tr key={p.sku ?? p.name} className="border-t border-border">
-              <td className="py-1.5">
-                <div className="font-medium text-foreground-strong">{p.name}</div>
-                {p.sku && <div className="text-xs text-foreground/50">SKU {p.sku}</div>}
-              </td>
-              <td className="py-1.5 text-right">{formatNumber(p.qty_sold_30d)}</td>
-              <td className="py-1.5 text-right">{formatNumber(p.current_stock)}</td>
-              <td className="py-1.5 text-right">{p.days_of_cover ?? "n/a"}</td>
-              <td className="py-1.5">
-                {p.negative_stock ? (
-                  <Pill tone="critical">Data issue</Pill>
-                ) : p.short ? (
-                  <Pill tone="warning">{`Under ${data.low_stock_threshold_days}d cover`}</Pill>
-                ) : (
-                  <Pill tone="good">OK</Pill>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 /** Day-over-day change, colored by whether "up" is good or bad news for
  * this specific number — reusing the same up/down-arrow convention as
  * Home's Business Health strip. null means no prior day to compare against
@@ -896,11 +787,6 @@ export default function CustomerPredictions() {
     queryKey: ["customerOrderForecastChart"],
     queryFn: () => fetchCustomerOrderForecastChart(5, 5),
   });
-  const stockCoverage = useQuery({
-    queryKey: ["topProductStockCoverage"],
-    queryFn: () => fetchTopProductStockCoverage(15, 10),
-  });
-  const stockAlerts = useQuery({ queryKey: ["stockAlerts"], queryFn: fetchStockAlerts });
   const outletForecast = useQuery({
     queryKey: ["outletOrderForecast"],
     queryFn: () => fetchOutletOrderForecast(5),
@@ -962,9 +848,10 @@ export default function CustomerPredictions() {
       {/* Find a customer */}
       <CustomerLookupSection />
 
-      <details className="mt-4 rounded-xl border border-border p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">Demand forecasts and stock availability</summary>
-      {/* Order forecast */}
+      {/* Order forecast -- stock coverage/alerts moved to the dedicated
+          Inventory page (/inventory), which has the real charts for them;
+          this stays here since it's a customer order-volume forecast, not
+          an inventory signal. */}
       <Section title="Order forecast" note="5 days actual, 5 days predicted">
         {forecastChart.isLoading && <p className="text-sm text-foreground/50">Loading&hellip;</p>}
         {forecastChart.data?.status === "ok" && (
@@ -1010,33 +897,6 @@ export default function CustomerPredictions() {
           outlet keeps its current share, so it won&rsquo;t catch one outlet growing faster than another.
         </p>
       </Section>
-
-      {/* Top products — stock coverage */}
-      <Section title="Top products — stock coverage" note="Top 15 by units sold, trailing 30 days">
-        {stockCoverage.isLoading && <p className="text-sm text-foreground/50">Loading&hellip;</p>}
-        {stockCoverage.data?.status === "ok" && <TopProductStockCoverageTable data={stockCoverage.data} />}
-        {stockCoverage.data?.status === "error" && (
-          <p className="text-sm text-foreground/50">Couldn&rsquo;t load stock coverage.</p>
-        )}
-        <p className="mt-3 text-xs text-foreground/50">
-          Days of cover = current stock &divide; average daily sales (trailing 30 days). Flagged when under{" "}
-          {stockCoverage.data?.low_stock_threshold_days ?? 3} days &mdash; the same threshold used for low-stock
-          alerts elsewhere, not a longer requirement, since most of these are fresh produce and dairy restocked
-          close to daily. &ldquo;Data issue&rdquo; means recorded stock is negative &mdash; sold past what&rsquo;s
-          on hand, worth checking separately from an ordinary low-stock case.
-        </p>
-      </Section>
-
-      {/* Stock alerts by outlet */}
-      <Section title="Stock alerts by outlet" note="Actively-selling products only">
-        {stockAlerts.isLoading && <p className="text-sm text-foreground/50">Loading&hellip;</p>}
-        {stockAlerts.data?.status === "ok" && <StockAlertsByOutletTable data={stockAlerts.data} />}
-        {stockAlerts.data?.status === "error" && (
-          <p className="text-sm text-foreground/50">Couldn&rsquo;t load stock alerts.</p>
-        )}
-      </Section>
-
-      </details>
 
       {/* Executive summary */}
       <Section title="Executive summary">

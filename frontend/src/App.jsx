@@ -9,6 +9,7 @@ import Dashboard from "./routes/Dashboard";
 import CustomerPredictions from "./routes/CustomerPredictions";
 import Investigate from "./routes/Investigate";
 import Inventory from "./routes/Inventory";
+import InventoryCases from "./routes/InventoryCases";
 import CaseDetail from "./routes/CaseDetail";
 import Outcomes from "./routes/Outcomes";
 import AskCelesteOverlay from "./chat/AskCelesteOverlay";
@@ -49,6 +50,7 @@ export default function App({ onSignOut }) {
           <Route path="/investigate" element={<Investigate />} />
           <Route path="/investigate/:caseId" element={<CaseDetail />} />
           <Route path="/inventory" element={<Inventory />} />
+          <Route path="/inventory/cases" element={<InventoryCases />} />
           <Route path="/outcomes" element={<Outcomes />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route

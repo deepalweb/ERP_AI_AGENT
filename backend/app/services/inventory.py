@@ -88,6 +88,7 @@ def _classify(sold_30d: float, days_of_stock):
     return "healthy"
 
 
+@reporting.ttl_cache(seconds=300)
 async def get_inventory_depth():
     rows = await reporting.fetch_report(INVENTORY_DEPTH_SQL)
 
