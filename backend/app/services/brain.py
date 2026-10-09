@@ -21,8 +21,13 @@ from backend.app.services import (
     case_engine,
     customer_predictions,
     health,
+    inventory,
+    inventory_kpi_history,
+    loss_and_damage,
     notifications,
     state_tracking,
+    stock_alerts,
+    stock_counts,
     tracking,
     weekly_streaks,
 )
@@ -139,6 +144,25 @@ def _snapshot_health():
     )
 
     return {**result, "overall_delta": overall_delta, "domains": domains_with_delta}
+
+
+def _record_inventory_kpi_snapshot():
+    """Records today's Inventory page KPI strip (inventory_kpi_history.py) --
+    reuses the exact same functions the /inventory/* routes call, not a
+    second set of queries. get_inventory_depth() is async; same anyio.run()
+    bridge _snapshot_health() above uses, and the same reason this is its
+    own top-level function rather than an inline call inside run_daily_scan:
+    a test that calls run_daily_scan() directly from an async test function
+    (no anyio.to_thread.run_sync boundary) has a running event loop already,
+    which anyio.run() can't nest inside -- tests stub this whole function
+    out, the same way they already stub _snapshot_health, instead of hitting
+    that nesting error."""
+    inventory_kpi_history.record_inventory_kpi_snapshot(
+        stock_alerts=stock_alerts.get_stock_alerts(),
+        depth=anyio.run(inventory.get_inventory_depth),
+        stuck_counts=stock_counts.get_stuck_stock_counts(),
+        loss_and_damage=loss_and_damage.get_loss_and_damage(),
+    )
 
 
 def _data_freshness():
@@ -291,6 +315,10 @@ def _compute_daily_brief():
     # transition-rate feature -- see record_lifecycle_snapshot()'s own
     # docstring for why a frozen as_of_date doesn't fabricate a new day.
     customer_predictions.record_lifecycle_snapshot(customer_predictions.compute_lifecycle_snapshot_rows())
+
+    # Inventory KPI strip history -- same reasoning as the customer lifecycle
+    # snapshot above, just for the Inventory page's 6 headline numbers.
+    _record_inventory_kpi_snapshot()
 
     generated_at = datetime.utcnow().isoformat()
     appdb.run_query(

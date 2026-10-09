@@ -31,6 +31,7 @@ from .services import (
     forecast,
     home_briefing,
     inventory,
+    inventory_kpi_history,
     loss_and_damage,
     loyalty,
     management,
@@ -629,6 +630,19 @@ async def inventory_depth():
     except Exception:
         logger.exception("inventory depth failed")
         return {"status": "error", "detail": "Could not load inventory depth."}
+
+
+@app.get("/inventory/kpi-history")
+async def inventory_kpi_history_route():
+    """The Inventory page's KPI strip, plus a delta against the prior day's
+    snapshot where one exists — see backend/app/services/inventory_kpi_history.py.
+    None, not 0, for any field with no prior snapshot to compare against yet."""
+    try:
+        result = await anyio.to_thread.run_sync(inventory_kpi_history.get_inventory_kpi_deltas)
+        return {"status": "ok", "deltas": result}
+    except Exception:
+        logger.exception("inventory kpi history failed")
+        return {"status": "error", "detail": "Could not load inventory KPI history."}
 
 
 @app.get("/forecast/forward-look")

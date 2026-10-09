@@ -14,6 +14,29 @@ from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 LOW_STOCK_DAYS = 3  # quick-commerce grocery — a few days' cover is already tight
 TOP_N = 10
 
+# The shape of inventory risk across the WHOLE actively-selling portfolio,
+# not just the top sellers -- (bucket_id, label, low_days, high_days).
+# high_days=None means "and above". Counted per (outlet, product) position,
+# same convention as segments_by_outlet's out_of_stock/low_stock counts
+# (the same product short at 3 outlets counts 3 times, deliberately -- see
+# that field's own comment).
+COVERAGE_BUCKETS = [
+    ("oos", "Out of stock", None, None),
+    ("under_3d", "< 3 days", 0, LOW_STOCK_DAYS),
+    ("3_to_7d", "3-7 days", LOW_STOCK_DAYS, 7),
+    ("7_to_30d", "7-30 days", 7, 30),
+    ("over_30d", "> 30 days", 30, None),
+]
+
+
+def _coverage_bucket(qty: float, days_of_stock: float | None) -> str:
+    if qty <= 0:
+        return "oos"
+    for bucket_id, _label, low, high in COVERAGE_BUCKETS[1:]:
+        if days_of_stock >= low and (high is None or days_of_stock < high):
+            return bucket_id
+    return COVERAGE_BUCKETS[-1][0]
+
 STOCK_ALERTS_SQL = f"""
     WITH bounds AS (
         SELECT MAX(date_order) AS as_of FROM sale_order
@@ -63,18 +86,27 @@ def get_stock_alerts():
             "top_out_of_stock": [],
             "top_low_stock": [],
             "low_stock_threshold_days": LOW_STOCK_DAYS,
+            "coverage_distribution": [
+                {"id": bucket_id, "label": label, "count": 0} for bucket_id, label, _low, _high in COVERAGE_BUCKETS
+            ],
         }
 
     as_of_date = rows[0]["as_of"]
     counts: dict[str, dict[str, int]] = {}
     out_of_stock_items = []
     low_stock_items = []
+    coverage_distribution = {bucket_id: 0 for bucket_id, _label, _low, _high in COVERAGE_BUCKETS}
 
     for r in rows:
         outlet = r["outlet"]
         qty = float(r["qty"] or 0)
         sold_30d = float(r["qty_sold_30d"] or 0)
-        counts.setdefault(outlet, {"out_of_stock": 0, "low_stock": 0})
+        counts.setdefault(outlet, {"out_of_stock": 0, "low_stock": 0, "eligible": 0})
+        # Every actively-selling (outlet, product) position counts toward the
+        # eligible denominator, OOS or not -- without this, out_of_stock/low_stock
+        # are raw counts that make the outlet with the biggest assortment look
+        # worst by default, regardless of how it's actually doing proportionally.
+        counts[outlet]["eligible"] += 1
 
         item = {
             "outlet": outlet,
@@ -84,15 +116,16 @@ def get_stock_alerts():
             "sold_30d": round(sold_30d, 2),
         }
 
+        days_of_stock = qty / (sold_30d / 30.0) if qty > 0 else None
+        coverage_distribution[_coverage_bucket(qty, days_of_stock)] += 1
+
         if qty <= 0:
             counts[outlet]["out_of_stock"] += 1
             out_of_stock_items.append(item)
-        else:
-            days_of_stock = qty / (sold_30d / 30.0)
-            if days_of_stock < LOW_STOCK_DAYS:
-                item["days_of_stock"] = round(days_of_stock, 1)
-                counts[outlet]["low_stock"] += 1
-                low_stock_items.append(item)
+        elif days_of_stock < LOW_STOCK_DAYS:
+            item["days_of_stock"] = round(days_of_stock, 1)
+            counts[outlet]["low_stock"] += 1
+            low_stock_items.append(item)
 
     out_of_stock_items.sort(key=lambda x: -x["sold_30d"])
     low_stock_items.sort(key=lambda x: -x["sold_30d"])
@@ -110,12 +143,30 @@ def get_stock_alerts():
     # are low on stock" on its own.
     distinct_low_stock_products = len({i["sku"] for i in low_stock_items})
 
+    segments_by_outlet = []
+    for outlet, c in sorted(counts.items()):
+        eligible = c["eligible"]
+        healthy = eligible - c["out_of_stock"] - c["low_stock"]
+        segments_by_outlet.append({
+            "outlet": outlet,
+            "out_of_stock": c["out_of_stock"],
+            "low_stock": c["low_stock"],
+            "healthy": healthy,
+            "eligible": eligible,
+            "out_of_stock_rate_pct": round(c["out_of_stock"] / eligible * 100, 1) if eligible else 0.0,
+            "low_stock_rate_pct": round(c["low_stock"] / eligible * 100, 1) if eligible else 0.0,
+        })
+
     return {
         "as_of_date": as_of_date.date().isoformat(),
-        "segments_by_outlet": [{"outlet": outlet, **c} for outlet, c in sorted(counts.items())],
+        "segments_by_outlet": segments_by_outlet,
         "top_out_of_stock": out_of_stock_items[:TOP_N],
         "top_low_stock": low_stock_items[:TOP_N],
         "low_stock_threshold_days": LOW_STOCK_DAYS,
+        "coverage_distribution": [
+            {"id": bucket_id, "label": label, "count": coverage_distribution[bucket_id]}
+            for bucket_id, label, _low, _high in COVERAGE_BUCKETS
+        ],
         "distinct_out_of_stock_products": distinct_out_of_stock_products,
         "distinct_low_stock_products": distinct_low_stock_products,
     }

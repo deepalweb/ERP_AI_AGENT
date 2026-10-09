@@ -259,6 +259,12 @@ export async function fetchStockCountSessionDetail(sessionId) {
   return readResponse(response);
 }
 
+export async function fetchInventoryKpiHistory() {
+  const response = await apiFetch(`${API_BASE_URL}/inventory/kpi-history`);
+
+  return readResponse(response);
+}
+
 export async function fetchStuckStockCounts() {
   const response = await apiFetch(`${API_BASE_URL}/inventory/stuck-stock-counts`);
 

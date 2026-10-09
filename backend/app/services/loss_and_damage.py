@@ -85,6 +85,34 @@ GROUP BY rs.name
 ORDER BY qty DESC
 """
 
+# Reason x outlet, one row per combination -- answers "is one outlet
+# dominated by missing items while another runs more overages/damage," which
+# neither SHORTAGE_BY_REASON_SQL nor SHORTAGE_BY_STORE_SQL can answer alone.
+SHORTAGE_BY_REASON_AND_STORE_SQL = f"""
+SELECT rs.name AS outlet, sr.name AS reason, SUM(sms.quantity) AS qty
+FROM stock_move_shortage sms
+JOIN stock_picking sp ON sp.id = sms.picking_id
+JOIN stock_picking_type spt ON spt.id = sp.picking_type_id
+JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+JOIN shortage_reason sr ON sr.id = sms.reason_id
+WHERE rs.id IN {CELESTE_STORE_IDS} AND sms.create_date >= :start AND sms.create_date <= :end
+GROUP BY rs.name, sr.name
+"""
+
+# Day-by-day shortage qty across the period -- tells management whether the
+# problem is an isolated spike, persistent, growing, or shrinking, which a
+# single monthly total can't.
+SHORTAGE_DAILY_TREND_SQL = f"""
+SELECT DATE(sms.create_date) AS day, SUM(sms.quantity) AS qty
+FROM stock_move_shortage sms
+JOIN stock_picking sp ON sp.id = sms.picking_id
+JOIN stock_picking_type spt ON spt.id = sp.picking_type_id
+JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+WHERE rs.id IN {CELESTE_STORE_IDS} AND sms.create_date >= :start AND sms.create_date <= :end
+GROUP BY DATE(sms.create_date)
+ORDER BY day
+"""
+
 DAMAGED_TOP_PRODUCTS_SQL = f"""
 SELECT pt.name->>'en_US' AS name, MIN(pp.id) AS product_id, pt.default_code AS sku, COUNT(*) AS lines, SUM(dol.initial_demand) AS qty
 FROM damaged_order_line dol
@@ -128,6 +156,8 @@ def get_loss_and_damage(period: str | None = None, start_date: str | None = None
     shortage_by_reason = reporting.run_query(SHORTAGE_BY_REASON_SQL, params)
     shortage_top_products = reporting.run_query(SHORTAGE_TOP_PRODUCTS_SQL, params)
     shortage_by_store = reporting.run_query(SHORTAGE_BY_STORE_SQL, params)
+    shortage_by_reason_and_store = reporting.run_query(SHORTAGE_BY_REASON_AND_STORE_SQL, params)
+    shortage_daily_trend = reporting.run_query(SHORTAGE_DAILY_TREND_SQL, params)
     damaged_top_products = reporting.run_query(DAMAGED_TOP_PRODUCTS_SQL, params)
     damaged_by_store = reporting.run_query(DAMAGED_BY_STORE_SQL, params)
     returns_rows = reporting.run_query(RETURNS_SUMMARY_SQL, params)
@@ -147,6 +177,14 @@ def get_loss_and_damage(period: str | None = None, start_date: str | None = None
         "shortage_by_store": [
             {"outlet": r["outlet"] or "Unknown", "lines": int(r["lines"]), "qty": float(r["qty"] or 0)}
             for r in shortage_by_store
+        ],
+        "shortage_by_reason_and_store": [
+            {"outlet": r["outlet"] or "Unknown", "reason": r["reason"], "qty": float(r["qty"] or 0)}
+            for r in shortage_by_reason_and_store
+        ],
+        "shortage_daily_trend": [
+            {"day": r["day"].isoformat() if hasattr(r["day"], "isoformat") else r["day"], "qty": float(r["qty"] or 0)}
+            for r in shortage_daily_trend
         ],
         "damaged_top_products": [
             {"name": r["name"] or "Unknown", "product_id": r["product_id"], "sku": r["sku"],
