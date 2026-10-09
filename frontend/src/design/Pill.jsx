@@ -2,6 +2,7 @@ const TONE_CLASS = {
   good: "bg-good/15 text-good",
   warning: "bg-warning/15 text-warning",
   critical: "bg-critical/15 text-critical",
+  neutral: "bg-foreground/10 text-foreground/70",
 };
 
 /** A small colored badge for a table cell value that needs to jump out as

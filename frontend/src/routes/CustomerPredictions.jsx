@@ -466,10 +466,23 @@ function CustomerLookupSection() {
   );
 }
 
+const VALUE_TIER_TONE = { high: "good", mid: "neutral", low: "neutral" };
+
+/** Plain-language "how late/early" -- the same days_overdue/days_until_due
+ * fields already backing the status pill and severity, just said in words
+ * instead of left for a reader to infer from two date ranges. */
+function timingLine(row) {
+  if (row.status === "overdue") return `${formatNumber(row.days_overdue)}d overdue`;
+  if (row.status === "due") return "Due now";
+  if (row.days_until_due != null) return `Due in ${formatNumber(row.days_until_due)}d`;
+  return null;
+}
+
 function CustomerRow({ row, expanded, onToggle }) {
   const meta = STATUS_META[row.status];
   const severity = row.overdue_severity ? SEVERITY_META[row.overdue_severity] : null;
   const [gapLow, gapHigh] = gapRange(row);
+  const timing = timingLine(row);
   return (
     <>
       <tr className="cursor-pointer border-t border-border hover:bg-background" onClick={onToggle}>
@@ -488,9 +501,11 @@ function CustomerRow({ row, expanded, onToggle }) {
         </td>
         <td className="py-2 pr-2 text-foreground/80">
           {formatDate(row.expected_window_start)} &ndash; {formatDate(row.expected_window_end)}
+          {timing && <div className="text-xs text-foreground/50">{timing}</div>}
         </td>
         <td className="py-2 pr-2">
           <div className="flex flex-wrap items-center gap-1">
+            {row.value_tier && <Pill tone={VALUE_TIER_TONE[row.value_tier]}>{VALUE_TIER_LABEL[row.value_tier]}</Pill>}
             <Pill tone={meta.tone}>{meta.label}</Pill>
             {severity && <Pill tone={severity.tone}>{severity.label}</Pill>}
           </div>

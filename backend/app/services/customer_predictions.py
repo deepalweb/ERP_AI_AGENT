@@ -155,7 +155,7 @@ def _ensure_schema():
     # deletes and reinserts every row on every scan) — no historical value in
     # existing rows, so a best-effort ALTER is enough. SQLite has no ADD
     # COLUMN IF NOT EXISTS, so guard it the same way brain.py does.
-    for column in ("days_until_due INTEGER", "timing_bucket TEXT", "overdue_severity TEXT"):
+    for column in ("days_until_due INTEGER", "timing_bucket TEXT", "overdue_severity TEXT", "value_tier TEXT"):
         try:
             appdb.run_query(f"ALTER TABLE customer_predictions_v2 ADD COLUMN {column}")
         except Exception:
@@ -223,6 +223,14 @@ def compute_predictions() -> list[dict]:
         return []
 
     as_of_date = rows[0]["as_of_date"]
+    # Value tier needs the whole population's revenue percentile, computed
+    # once here and reused per row -- same shared _value_tier() helper
+    # compute_lifecycle_summary() uses, so "High value" means the same
+    # threshold on this table as it does on the heatmap, never two
+    # independently-tuned definitions.
+    percentile_rows = reporting.run_query(VALUE_PERCENTILE_SQL)
+    value_p80 = float(percentile_rows[0]["p80"] or 0) if percentile_rows else 0.0
+    value_p50 = float(percentile_rows[0]["p50"] or 0) if percentile_rows else 0.0
     predictions = []
     for r in rows:
         # Tier 2: window is centered on RECENT cadence, not all-time average
@@ -272,6 +280,7 @@ def compute_predictions() -> list[dict]:
             "revenue": round(float(r["revenue"] or 0), 2),
             "avg_order_value": round(float(r["avg_order_value"] or 0), 2),
             "stddev_order_value": round(float(r["stddev_order_value"]), 2) if r["stddev_order_value"] is not None else None,
+            "value_tier": _value_tier(float(r["revenue"] or 0), value_p80, value_p50),
         })
     return predictions
 
@@ -294,12 +303,12 @@ def record_predictions(predictions: list[dict]) -> None:
                         (partner_id, name, order_count, confidence, last_order_date, avg_gap_days,
                          stddev_gap_days, expected_window_start, expected_window_end,
                          days_since_last_order, status, days_overdue, days_until_due, timing_bucket,
-                         overdue_severity, revenue, avg_order_value, stddev_order_value, generated_at)
+                         overdue_severity, revenue, avg_order_value, stddev_order_value, value_tier, generated_at)
                     VALUES
                         (:partner_id, :name, :order_count, :confidence, :last_order_date, :avg_gap_days,
                          :stddev_gap_days, :expected_window_start, :expected_window_end,
                          :days_since_last_order, :status, :days_overdue, :days_until_due, :timing_bucket,
-                         :overdue_severity, :revenue, :avg_order_value, :stddev_order_value, :generated_at)
+                         :overdue_severity, :revenue, :avg_order_value, :stddev_order_value, :value_tier, :generated_at)
                 """),
                 [{**p, "generated_at": generated_at} for p in predictions],
             )

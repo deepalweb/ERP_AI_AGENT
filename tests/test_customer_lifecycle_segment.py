@@ -240,3 +240,42 @@ def test_outlet_behavior_merges_repeat_rate_and_second_order_rate(monkeypatch):
     assert len(result) == 1
     assert result[0]["repeat_rate_pct"] == 50.0  # 20 of 40 unique customers ordered there twice+
     assert result[0]["second_order_rate_pct"] == 100.0
+
+
+# ---------------------------------------------------------------------------
+# compute_predictions -- value_tier is attached per row from the SAME
+# _value_tier() helper and percentile thresholds compute_lifecycle_summary()
+# uses, so "High value" can't drift into meaning two different things
+# between the Customers table and the heatmap.
+
+def _prediction_row(partner_id, revenue, avg_gap=10.0, order_count=10,
+                     last_order=datetime(2026, 10, 1), as_of=datetime(2026, 10, 5)):
+    return {
+        "partner_id": partner_id, "customer_name": f"Customer {partner_id}", "order_count": order_count,
+        "revenue": revenue, "avg_order_value": revenue / order_count if order_count else 0,
+        "stddev_order_value": None, "last_order": last_order,
+        "avg_gap_all": avg_gap, "stddev_gap_all": 2.0, "avg_gap_recent": avg_gap, "stddev_gap_recent": 2.0,
+        "n_gaps_recent": order_count - 1, "n_gaps": order_count - 1, "as_of_date": as_of,
+    }
+
+
+def test_compute_predictions_attaches_value_tier_from_population_percentiles(monkeypatch):
+    rows = [
+        _prediction_row(1, revenue=600_000),  # high (>= p80)
+        _prediction_row(2, revenue=50_000),  # mid (>= p50, < p80)
+        _prediction_row(3, revenue=1_000),  # low
+    ]
+
+    def run_query(sql, params=None):
+        if "gap_stats" in sql:
+            return rows
+        if "PERCENTILE_CONT" in sql:
+            return [{"p80": 100_000, "p50": 10_000}]
+        raise AssertionError(f"unexpected query: {sql[:80]}")
+
+    monkeypatch.setattr(cp.reporting, "run_query", run_query)
+    predictions = cp.compute_predictions()
+    by_id = {p["partner_id"]: p for p in predictions}
+    assert by_id[1]["value_tier"] == "high"
+    assert by_id[2]["value_tier"] == "mid"
+    assert by_id[3]["value_tier"] == "low"
