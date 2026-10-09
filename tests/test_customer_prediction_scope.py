@@ -9,7 +9,7 @@ import pytest
 from dotenv import load_dotenv
 from sqlalchemy import text
 
-from backend.app.db import reporting
+from backend.app.db import appdb, reporting
 from backend.app.services import customer_predictions as cp
 
 pytestmark = pytest.mark.real_backend
@@ -86,6 +86,7 @@ def test_live_scoped_snapshot_roundtrip_uses_only_isolated_appdb(appdb_reset, mo
     load_dotenv()
     monkeypatch.setattr(cp, "_SCHEMA_READY", False)
     monkeypatch.setattr(cp, "_LIFECYCLE_SCHEMA_READY", False)
+    monkeypatch.setattr(cp, "_LIFECYCLE_SNAPSHOT_SCHEMA_READY", False)
     with reporting.get_engine().connect() as conn:
         conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         conn.execute(text("SET LOCAL statement_timeout = '90s'"))
@@ -102,6 +103,16 @@ def test_live_scoped_snapshot_roundtrip_uses_only_isolated_appdb(appdb_reset, mo
         assert summary["predictable_customers"] == len(predictions)
         assert summary["total_customers"] >= len(predictions)
         cp.record_lifecycle_summary(cp.compute_lifecycle_summary())
+        snapshot_rows = cp.compute_lifecycle_snapshot_rows()
+        assert snapshot_rows
+        cp.record_lifecycle_snapshot(snapshot_rows)
+        stored = appdb.run_query("SELECT COUNT(*) AS n FROM customer_lifecycle_snapshots")
+        assert stored[0]["n"] == len(snapshot_rows)
+        # Re-running on the same as_of_date must not duplicate -- see
+        # record_lifecycle_snapshot()'s own docstring for why.
+        cp.record_lifecycle_snapshot(snapshot_rows)
+        stored_again = appdb.run_query("SELECT COUNT(*) AS n FROM customer_lifecycle_snapshots")
+        assert stored_again[0]["n"] == len(snapshot_rows)
         assert cp.get_lifecycle_summary()["as_of_date"] == summary["as_of_date"]
         chart = cp.get_order_forecast_chart()
         assert chart["forecast_scope"] == "repeat_customers_only"

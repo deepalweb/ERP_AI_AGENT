@@ -57,6 +57,8 @@ def _stub_sources(monkeypatch):
     monkeypatch.setattr(predictions, "build_home_finding", lambda _: None)
     monkeypatch.setattr(predictions, "compute_lifecycle_summary", dict)
     monkeypatch.setattr(predictions, "record_lifecycle_summary", lambda _: None)
+    monkeypatch.setattr(predictions, "compute_lifecycle_snapshot_rows", list)
+    monkeypatch.setattr(predictions, "record_lifecycle_snapshot", lambda _: None)
     return sources
 
 

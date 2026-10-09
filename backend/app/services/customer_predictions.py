@@ -1153,6 +1153,90 @@ def list_customers_by_segment(category: str, value_tier: str | None = None) -> d
     }
 
 
+_LIFECYCLE_SNAPSHOT_SCHEMA_READY = False
+
+
+def _ensure_lifecycle_snapshot_schema():
+    global _LIFECYCLE_SNAPSHOT_SCHEMA_READY
+    if _LIFECYCLE_SNAPSHOT_SCHEMA_READY:
+        return
+    appdb.run_query("""
+        CREATE TABLE IF NOT EXISTS customer_lifecycle_snapshots (
+            partner_id INTEGER NOT NULL,
+            as_of_date TEXT NOT NULL,
+            category TEXT NOT NULL,
+            value_tier TEXT NOT NULL,
+            revenue REAL NOT NULL,
+            PRIMARY KEY (partner_id, as_of_date)
+        )
+    """)
+    _LIFECYCLE_SNAPSHOT_SCHEMA_READY = True
+
+
+def compute_lifecycle_snapshot_rows() -> list[dict]:
+    """Per-customer lifecycle category + value tier, one row per customer —
+    the historical record compute_lifecycle_summary() deliberately doesn't
+    keep (its own docstring: aggregates only; list_customers_by_segment()
+    above already established the pattern of a second LIFECYCLE_SQL pass
+    rather than reshaping that contract). This is the raw material lifecycle
+    TRANSITION rates (Active -> Due, Due -> Lapsing, Lapsing -> Churned,
+    etc.) will eventually be computed from — accumulating here starting
+    now, before any transition math is built, since transitions need real
+    day-over-day history that doesn't exist yet. See
+    record_lifecycle_snapshot() for why a frozen as_of_date doesn't
+    fabricate a new day of history."""
+    rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS, "partner_id": None})
+    if not rows:
+        return []
+
+    as_of_date = rows[0]["as_of_date"]
+    percentile_rows = reporting.run_query(VALUE_PERCENTILE_SQL)
+    p80 = float(percentile_rows[0]["p80"] or 0) if percentile_rows else 0.0
+    p50 = float(percentile_rows[0]["p50"] or 0) if percentile_rows else 0.0
+
+    as_of_iso = as_of_date.date().isoformat()
+    return [
+        {
+            "partner_id": int(row["partner_id"]),
+            "as_of_date": as_of_iso,
+            "category": _lifecycle_category(row, as_of_date),
+            "value_tier": _value_tier(float(row["revenue"] or 0), p80, p50),
+            "revenue": round(float(row["revenue"] or 0), 2),
+        }
+        for row in rows
+    ]
+
+
+def record_lifecycle_snapshot(rows: list[dict]) -> None:
+    """Appends one row per customer for today's as_of_date. Deliberately a
+    no-op if this as_of_date already has a snapshot — the daily scan can
+    run more than once on the same day, and while Odoo's feed is frozen
+    (see [[project_celeste_intelligence_status]]) every run shares the
+    same as_of_date. A snapshot answers "what did the customer base look
+    like on this real data date"; recording it twice, or recording a day
+    where the underlying data never actually moved, would fabricate a
+    transition that never happened once transition rates get built on top
+    of this table."""
+    if not rows:
+        return
+    _ensure_lifecycle_snapshot_schema()
+    as_of_date = rows[0]["as_of_date"]
+    existing = appdb.run_query(
+        "SELECT COUNT(*) AS n FROM customer_lifecycle_snapshots WHERE as_of_date = :d", {"d": as_of_date}
+    )
+    if existing[0]["n"]:
+        return
+    engine = appdb.get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO customer_lifecycle_snapshots (partner_id, as_of_date, category, value_tier, revenue)
+                VALUES (:partner_id, :as_of_date, :category, :value_tier, :revenue)
+            """),
+            rows,
+        )
+
+
 SECOND_ORDER_HEADLINE_WINDOW_DAYS = 30
 SECOND_ORDER_COHORT_WINDOWS = (30, 60, 90)
 SECOND_ORDER_COHORT_MONTHS = 12

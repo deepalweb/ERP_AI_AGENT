@@ -287,6 +287,10 @@ def _compute_daily_brief():
     customer_predictions.record_pattern_stats(customer_predictions.compute_pattern_stats(len(customer_preds)))
     customer_finding = customer_predictions.build_home_finding(customer_predictions.get_summary())
     customer_predictions.record_lifecycle_summary(customer_predictions.compute_lifecycle_summary())
+    # Starts accumulating per-customer lifecycle history now, ahead of any
+    # transition-rate feature -- see record_lifecycle_snapshot()'s own
+    # docstring for why a frozen as_of_date doesn't fabricate a new day.
+    customer_predictions.record_lifecycle_snapshot(customer_predictions.compute_lifecycle_snapshot_rows())
 
     generated_at = datetime.utcnow().isoformat()
     appdb.run_query(

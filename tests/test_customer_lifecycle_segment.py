@@ -7,6 +7,7 @@ monkeypatched, dispatching on a distinguishing keyword in each query string
 
 from datetime import datetime
 
+from backend.app.db import appdb
 from backend.app.services import customer_predictions as cp
 
 AS_OF = datetime(2026, 10, 5)
@@ -279,3 +280,31 @@ def test_compute_predictions_attaches_value_tier_from_population_percentiles(mon
     assert by_id[1]["value_tier"] == "high"
     assert by_id[2]["value_tier"] == "mid"
     assert by_id[3]["value_tier"] == "low"
+
+
+# ---------------------------------------------------------------------------
+# compute_lifecycle_snapshot_rows / record_lifecycle_snapshot -- the raw
+# per-customer history lifecycle TRANSITION rates will eventually be built
+# from. No transition math here yet; just the accumulation starting point.
+
+def test_record_lifecycle_snapshot_writes_one_row_per_customer(appdb_reset, monkeypatch):
+    monkeypatch.setattr(cp, "_LIFECYCLE_SNAPSHOT_SCHEMA_READY", False)
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_run_query([HIGH_LAPSING, LOW_ACTIVE, MID_LAPSING]))
+    rows = cp.compute_lifecycle_snapshot_rows()
+    assert len(rows) == 3
+    cp.record_lifecycle_snapshot(rows)
+    stored = appdb.run_query("SELECT * FROM customer_lifecycle_snapshots ORDER BY partner_id")
+    assert [r["partner_id"] for r in stored] == [1, 2, 3]
+    assert [r["category"] for r in stored] == ["lapsing", "active", "lapsing"]
+    assert [r["value_tier"] for r in stored] == ["high", "low", "mid"]
+    assert [r["as_of_date"] for r in stored] == ["2026-10-05"] * 3
+
+
+def test_record_lifecycle_snapshot_is_a_no_op_for_an_already_recorded_as_of_date(appdb_reset, monkeypatch):
+    monkeypatch.setattr(cp, "_LIFECYCLE_SNAPSHOT_SCHEMA_READY", False)
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_run_query([HIGH_LAPSING]))
+    rows = cp.compute_lifecycle_snapshot_rows()
+    cp.record_lifecycle_snapshot(rows)
+    cp.record_lifecycle_snapshot(rows)  # same frozen as_of_date -- must not fabricate a second "day"
+    stored = appdb.run_query("SELECT COUNT(*) AS n FROM customer_lifecycle_snapshots")
+    assert stored[0]["n"] == 1

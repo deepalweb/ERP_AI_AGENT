@@ -272,6 +272,8 @@ async def test_brief_response_gains_case_id_without_losing_existing_fields(appdb
     monkeypatch.setattr(predictions, "build_home_finding", lambda _: None)
     monkeypatch.setattr(predictions, "compute_lifecycle_summary", dict)
     monkeypatch.setattr(predictions, "record_lifecycle_summary", lambda _: None)
+    monkeypatch.setattr(predictions, "compute_lifecycle_snapshot_rows", list)
+    monkeypatch.setattr(predictions, "record_lifecycle_snapshot", lambda _: None)
 
     # Home now returns 202 on a cold cache. This compatibility test exercises
     # the completed snapshot; cold/background transitions have their own tests.
