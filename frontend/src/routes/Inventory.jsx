@@ -140,6 +140,39 @@ function ExposureTable({ items }) {
   );
 }
 
+/** Same reasoning as ExposureTable -- product name + outlet combined into
+ * one bar label wrapped onto 2-3 lines once a real outlet name was appended,
+ * cluttering the ranking it was supposed to make scannable. */
+function TopOutOfStockTable({ items }) {
+  if (!items || items.length === 0) {
+    return <p className="text-sm text-foreground/50">No out-of-stock products right now.</p>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-foreground/60">
+            <th className="pb-2 font-medium">Product</th>
+            <th className="pb-2 font-medium">Outlet</th>
+            <th className="pb-2 text-right font-medium">Qty on hand</th>
+            <th className="pb-2 pl-4 text-right font-medium">Sold (30d)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((i, idx) => (
+            <tr key={`${i.sku ?? i.name}-${i.outlet}-${idx}`} className="border-t border-border">
+              <td className="py-1.5 font-medium text-foreground-strong">{stripSkuSuffix(i.name)}</td>
+              <td className="py-1.5 text-foreground/80">{outletShort(i.outlet)}</td>
+              <td className="py-1.5 text-right">{formatNumber(i.qty)}</td>
+              <td className="py-1.5 pl-4 text-right text-foreground-strong">{formatNumber(i.sold_30d)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** Each row pairs a BulletBar (how close to the 3-day line) with the exact
  * numbers a manager needs to act -- the chart answers "how bad," the table
  * answers "which SKU, which outlet, right now." Negative stock is its own
@@ -464,15 +497,7 @@ export default function Inventory() {
               demand actually lost during it.
             </p>
             <div className="mt-2">
-              <RankedBarChart
-                data={(sa.top_out_of_stock ?? []).slice(0, 10).map((i) => ({
-                  name: `${stripSkuSuffix(i.name)} · ${outletShort(i.outlet)}`,
-                  value: i.sold_30d,
-                }))}
-                formatValue={(v) => `${formatNumber(v)} sold/30d`}
-                labelWidth={260}
-                rowHeight={40}
-              />
+              <TopOutOfStockTable items={(sa.top_out_of_stock ?? []).slice(0, 10)} />
             </div>
 
             <h3 className="mt-6 text-xs font-semibold uppercase tracking-wide text-foreground/50">Stock state by outlet</h3>
