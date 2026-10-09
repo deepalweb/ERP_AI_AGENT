@@ -127,6 +127,12 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
             <div aria-live="polite" className="mt-3 rounded-lg border border-border p-3 text-xs leading-relaxed">
               {selected ? <><strong>{selected.label}: {count(selected.count)} customers.</strong> {count(selectedMix?.high)} high value. Historical revenue: {Number.isFinite(selected.revenue) ? formatCurrency(selected.revenue) : "Unavailable"}.</> : "Select a stage above."}
               <p className="mt-1 text-foreground/60">Value tiers use lifetime revenue. Lapsing and churned are heuristic stages, not confirmed customer loss.</p>
+              <p className="mt-1 text-foreground/60">
+                New: first order in the last 30 days. Active/Due/Lapsing/Churned come from each customer&rsquo;s own
+                expected order window. Win-back: just ordered again after an unusually long gap versus their own
+                normal pattern. Dormant: 1&ndash;2 orders, not recent, not enough history to score against a
+                personal window.
+              </p>
             </div>
 
             {selectedTier && (

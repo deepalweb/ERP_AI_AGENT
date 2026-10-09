@@ -759,38 +759,6 @@ function TopProductStockCoverageTable({ data }) {
   );
 }
 
-const LIFECYCLE_TONE = {
-  new: "accent",
-  active: "good",
-  due: "warning",
-  lapsing: "serious",
-  churned: "critical",
-  win_back: "accent",
-  dormant: "neutral",
-  excluded: "neutral",
-};
-
-const TILE_TONE_CLASS = {
-  accent: "border-accent-border bg-accent-soft",
-  good: "border-good/30 bg-good/10",
-  warning: "border-warning/30 bg-warning/10",
-  serious: "border-serious/30 bg-serious/10",
-  critical: "border-critical/30 bg-critical/10",
-  neutral: "border-border bg-background",
-};
-
-/** One lifecycle-category tile — icon, count, label, and the lifetime
- * revenue behind it, colored by how urgent/positive that stage is. Same
- * "icons + real numbers, no raw statistics" posture as the rest of this
- * page. */
-// Whether a rising count is good or bad news, per lifecycle category — used
-// to color the day-over-day delta. Categories left out (New/Due/Dormant/
-// Excluded) don't have an obvious "up is good/bad" reading (more New
-// customers is good but reflects acquisition, not lifecycle health; more
-// Due is neutral, just more people approaching their own window), so their
-// delta shows neutral, not a guessed color.
-const LIFECYCLE_DELTA_SENSE = { active: "up_good", win_back: "up_good", lapsing: "up_bad", churned: "up_bad" };
-
 /** Day-over-day change, colored by whether "up" is good or bad news for
  * this specific number — reusing the same up/down-arrow convention as
  * Home's Business Health strip. null means no prior day to compare against
@@ -806,23 +774,6 @@ function DeltaBadge({ value, sense = "neutral" }) {
     <span className={toneClass}>
       {value > 0 ? "↑" : "↓"} {Math.abs(value)}
     </span>
-  );
-}
-
-function LifecycleTile({ category }) {
-  const tone = LIFECYCLE_TONE[category.id] ?? "neutral";
-  return (
-    <div className={`rounded-xl border p-3 ${TILE_TONE_CLASS[tone]}`}>
-      <div className="flex items-center gap-2">
-        <span className="text-xl">{category.icon}</span>
-        <span className="text-lg font-bold text-foreground-strong">{formatNumber(category.count)}</span>
-        <span className="text-xs">
-          <DeltaBadge value={category.delta} sense={LIFECYCLE_DELTA_SENSE[category.id]} />
-        </span>
-      </div>
-      <div className="mt-1 text-xs font-medium text-foreground-strong">{category.label}</div>
-      <div className="text-xs text-foreground/50">{formatCurrency(category.revenue)} lifetime</div>
-    </div>
   );
 }
 
@@ -857,52 +808,31 @@ function ChannelTile({ channel }) {
   );
 }
 
-/** Customer Lifecycle — every customer sorted into one of 8 stages (New /
- * Active / Due / Lapsing / Churned / Win-back / Dormant / Excluded) plus
- * an independent High/Mid/Low value tier. See
+/** Channel & churn -- does churn/lapsing cluster on one delivery platform.
+ * The per-category counts/revenue this section used to also show (a flat
+ * tile per lifecycle stage) were a straight duplicate of the Lifecycle x
+ * customer value heatmap above (CustomerGrowthOverview) -- same 8
+ * categories, same counts, just without the value-tier breakdown or the
+ * click-through to real customers the heatmap has. Removed rather than
+ * kept "for redundancy" (Customer Intelligence review, 2026-10-09): this
+ * is the one piece of that old section genuinely NOT shown anywhere else
+ * -- churn/lapsing broken out by channel instead of by value tier. See
  * backend/app/services/customer_predictions.py compute_lifecycle_summary()
- * for the exact rule behind each stage — checked against the live data
- * before picking the Lapsing-vs-Churned cutoff (2x a customer's own
- * window width) and adding the Dormant bucket (without it, ~45% of the
- * customer base — everyone with 1-2 old orders — wouldn't fit anywhere in
- * the 6 stages originally proposed). */
-function CustomerLifecycleSection({ lifecycle }) {
-  if (!lifecycle) return null;
+ * for the exact rule behind each lifecycle stage this still references. */
+function ChannelChurnSection({ lifecycle }) {
+  if (!lifecycle?.channel_breakdown) return null;
   return (
-    <Section
-      title="Customer lifecycle"
-      note={`${formatNumber(lifecycle.total_customers)} customers · data through ${formatDate(lifecycle.as_of_date)}`}
-    >
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {lifecycle.categories.map((c) => (
-          <LifecycleTile key={c.id} category={c} />
+    <Section title="Channel & churn" note={`${formatNumber(lifecycle.total_customers)} customers · data through ${formatDate(lifecycle.as_of_date)}`}>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {lifecycle.channel_breakdown.map((c) => (
+          <ChannelTile key={c.id} channel={c} />
         ))}
       </div>
-
-      <p className="mt-4 text-xs text-foreground/50">
-        New: first order in the last 30 days. Active/Due/Lapsing/Churned come from each customer&rsquo;s own
-        expected order window, same as the rest of this page. Win-back: just ordered again after an unusually
-        long gap versus their own normal pattern. Dormant: 1&ndash;2 orders, not recent, not enough history to
-        score against a personal window.
+      <p className="mt-2 text-xs text-foreground/50">
+        Churn/lapsing rate is a share of each channel&rsquo;s own customers with an established pattern
+        (Active/Due/Lapsing/Churned/Win-back) — not of every customer who&rsquo;s ever used that channel, so
+        a channel full of brand-new customers doesn&rsquo;t look falsely healthy.
       </p>
-
-      {lifecycle.channel_breakdown && (
-        <div className="mt-6">
-          <div className="text-xs font-semibold uppercase tracking-wide text-foreground/50">
-            Channel &amp; churn
-          </div>
-          <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
-            {lifecycle.channel_breakdown.map((c) => (
-              <ChannelTile key={c.id} channel={c} />
-            ))}
-          </div>
-          <p className="mt-2 text-xs text-foreground/50">
-            Churn/lapsing rate is a share of each channel&rsquo;s own customers with an established pattern
-            (Active/Due/Lapsing/Churned/Win-back) — not of every customer who&rsquo;s ever used that channel, so
-            a channel full of brand-new customers doesn&rsquo;t look falsely healthy.
-          </p>
-        </div>
-      )}
     </Section>
   );
 }
@@ -1171,11 +1101,13 @@ export default function CustomerPredictions() {
           same customer could read as "Critical" in one section and
           "Lapsing" in the other. One place for that answer now. */}
 
-      {/* Customer lifecycle */}
+      {/* Channel & churn -- the lifecycle-stage tile grid that used to live
+          here was a duplicate of the heatmap above it (CustomerGrowthOverview);
+          removed, see ChannelChurnSection's own docstring. */}
       {lifecycle.isLoading && (
         <div className="mt-4 h-40 animate-pulse rounded-2xl border border-border bg-chart-surface" />
       )}
-      {lifecycle.data?.status === "ok" && <CustomerLifecycleSection lifecycle={lifecycle.data} />}
+      {lifecycle.data?.status === "ok" && <ChannelChurnSection lifecycle={lifecycle.data} />}
 
       {/* Outlet-wise customer behavior */}
       <Section title="Outlet-wise customer behavior" note="Configured Celeste outlets only">
