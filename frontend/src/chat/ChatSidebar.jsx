@@ -38,7 +38,7 @@ export default function ChatSidebar({ conversations, activeId, collapsed, onNewC
                   className="chat-sidebar-item-delete"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onDelete(c.id);
+                    if (window.confirm(`Delete "${c.title}"? This can't be undone.`)) onDelete(c.id);
                   }}
                   title="Delete conversation"
                   aria-label={`Delete conversation "${c.title}"`}

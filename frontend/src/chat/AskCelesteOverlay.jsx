@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import "./legacy-cards.css";
 import { sendChatMessage } from "../api";
 import ChatSidebar from "./ChatSidebar";
+import SuggestedQuestions from "./SuggestedQuestions";
 import { loadConversations, saveConversations, newConversation, titleFromMessage } from "./storage";
 import CustomerIntelligence from "../CustomerIntelligence";
 import InventoryDepth from "../InventoryDepth";
@@ -70,6 +71,23 @@ function SalesSummaryCard({ result }) {
   );
 }
 
+/** A tool call with no matching case below used to silently render
+ * nothing — real data Celeste looked up, invisible in the UI, with no sign
+ * anything was even missing. This is the safety net: raw but visible,
+ * never silent. Collapsed by default since a reader rarely needs the raw
+ * payload when the model's own prose already summarized it in the message
+ * bubble above -- this is a fallback for the summary, not a replacement. */
+function UnknownToolCard({ name, result }) {
+  return (
+    <details className="tool-card">
+      <summary className="tool-card-title cursor-pointer">{name.replace(/_/g, " ")}</summary>
+      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all text-xs text-foreground/70">
+        {JSON.stringify(result, null, 2)}
+      </pre>
+    </details>
+  );
+}
+
 /** Tool name -> specialized result card. Ported from the pre-rebuild
  * App.jsx's switch, plus 4 cases that were missing there even before this
  * rebuild (get_basket_analysis, get_brand_and_department_mix,
@@ -130,8 +148,10 @@ function ToolCalls({ toolCalls }) {
             return <DataControlsCard key={i} result={call.result} />;
           case "get_customer_lookup":
             return <CustomerLookupCard key={i} result={call.result} />;
+          case "list_metrics":
+            return null; // metadata listing, nothing meaningful to render
           default:
-            return null;
+            return <UnknownToolCard key={i} name={call.name} result={call.result} />;
         }
       })}
     </div>
@@ -185,6 +205,7 @@ function Message({ message, isLast, onFollowUp }) {
  * starts a fresh conversation and sends it immediately. */
 export default function AskCelesteOverlay({ open, question, onClose }) {
   const dialogRef = useRef(null);
+  const abortControllerRef = useRef(null);
   const [{ conversations, activeId }, setChatState] = useState(loadConversations);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 640);
   const [input, setInput] = useState("");
@@ -254,15 +275,19 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
   // unchanged (the failed turn's user message is already in there from
   // the original send), so a failed call can be rerun without ever
   // appending a second, duplicate user bubble.
+  //
+  // readResponse() (http.js) already throws on a {status:"error"} body
+  // before sendChatMessage ever returns one -- there is no successful
+  // return path with status==="error" to branch on here, only the catch
+  // below. abortControllerRef is how the Cancel button reaches an
+  // in-flight request from outside this function.
   async function callAgent(messages, targetId) {
     setLoading(true);
     setError(null);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     try {
-      const data = await sendChatMessage(messages.map(({ role, content }) => ({ role, content })));
-            if (data.status === "error") {
-        setError(data.detail || "The agent failed to process this request.");
-        return;
-      }
+      const data = await sendChatMessage(messages.map(({ role, content }) => ({ role, content })), controller.signal);
       setChatState((prev) => ({
         ...prev,
         conversations: prev.conversations.map((c) =>
@@ -271,9 +296,16 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
             : c,
         ),
       }));
-    } catch {
-      setError("Could not reach the agent backend. Is it running on port 8000?");
+    } catch (err) {
+      if (err.name === "AbortError") {
+        // User hit Cancel -- they chose to stop, not an error to report.
+      } else if (err.name === "TimeoutError") {
+        setError("This is taking longer than usual -- Celeste may be working through several data lookups. Try again in a moment.");
+      } else {
+        setError(err.body?.detail || "Couldn't reach Celeste. Check your connection and try again.");
+      }
     } finally {
+      abortControllerRef.current = null;
       setLoading(false);
     }
   }
@@ -349,14 +381,31 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
 
           <main className="flex-1 space-y-4 overflow-y-auto p-6">
             {activeMessages.length === 0 && (
-              <div className="chat-welcome"><p className="eyebrow">Start with a question</p><h3>A closer look at<br />your business.</h3><p>Ask about sales, products, inventory, or customer patterns.</p><p className="mt-3 text-xs text-foreground-subtle">Saved case evidence and decisions are available in Investigate.</p><button type="button" onClick={() => setInput("How were sales last month?")}>How were sales last month? →</button></div>
+              <>
+                <div className="chat-welcome">
+                  <p className="eyebrow">Start with a question</p>
+                  <h3>A closer look at<br />your business.</h3>
+                  <p>Ask about sales, products, inventory, or customer patterns.</p>
+                  <p className="mt-3 text-xs text-foreground-subtle">Saved case evidence and decisions are available in Investigate.</p>
+                </div>
+                <SuggestedQuestions conversations={conversations} onPick={(text) => sendText(text, activeMessages, activeId)} />
+              </>
             )}
             {activeMessages.map((m, i) => (
               <Message key={i} message={m} isLast={i === activeMessages.length - 1} onFollowUp={handleFollowUp} />
             ))}
             {loading && (
               <div className="message message-assistant">
-                <div className="message-bubble message-loading">Thinking&hellip;</div>
+                <div className="message-bubble message-loading flex items-center gap-3">
+                  Thinking&hellip;
+                  <button
+                    type="button"
+                    onClick={() => abortControllerRef.current?.abort()}
+                    className="text-xs font-medium text-accent hover:underline"
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             )}
             {error && (

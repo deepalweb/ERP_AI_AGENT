@@ -1,5 +1,13 @@
 const STORAGE_KEY = "celeste-chat-conversations";
 const TITLE_MAX_LENGTH = 40;
+// Every "Ask Celeste about this" click (KPI tiles, tracked issues, a
+// customer row) starts a brand-new saved conversation -- with that many
+// entry points now wired up, history grows faster than a single chat
+// window ever did. Oldest-by-updatedAt conversations are dropped past
+// this cap, not a message-count limit per conversation: an open question
+// a manager is actually working through should never get truncated
+// mid-thread, only old abandoned ones should age out.
+const MAX_CONVERSATIONS = 50;
 
 function emptyConversation() {
   return {
@@ -35,9 +43,17 @@ export function loadConversations() {
   return { conversations: [fresh], activeId: fresh.id };
 }
 
+// Trims what's PERSISTED, not the caller's in-memory React state -- the
+// in-memory list can briefly exceed MAX_CONVERSATIONS (harmless, it's
+// just the sidebar list) and reconciles to the capped set on next
+// loadConversations(), same as a page refresh already does.
 export function saveConversations(state) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    let { conversations } = state;
+    if (conversations.length > MAX_CONVERSATIONS) {
+      conversations = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_CONVERSATIONS);
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, conversations }));
   } catch {
     // Private-mode/full storage — chat still works, it just won't persist.
   }

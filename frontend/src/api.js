@@ -431,11 +431,19 @@ export async function reopenCase(caseId, reason) {
   return readResponse(response);
 }
 
-export async function sendChatMessage(messages) {
+// 90s, not the usual 15s-60s elsewhere in this file -- a chat turn can
+// chain up to 6 tool-call round-trips server-side (agent.py's
+// MAX_TOOL_ROUNDS), each a real reporting-DB query, before the model
+// produces a final reply. `signal` lets the caller add a user-initiated
+// Cancel on top of this timeout via AbortSignal.any, same pattern
+// fetchBrief/fetchCurrentPeriod already use.
+export async function sendChatMessage(messages, signal) {
+  const timeout = AbortSignal.timeout(90000);
   const response = await apiFetch(`${API_BASE_URL}/agent/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages }),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
 
   return readResponse(response);
