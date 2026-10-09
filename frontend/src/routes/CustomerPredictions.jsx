@@ -1035,7 +1035,7 @@ export default function CustomerPredictions() {
         )}
         {s && (
           <>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
               <ExecutiveTile label="Customers analyzed" value={formatNumber(s.total_customers)} />
               <ExecutiveTile
                 label="With a usable pattern"
@@ -1044,7 +1044,6 @@ export default function CustomerPredictions() {
               />
               <ExecutiveTile label="Approaching / due" value={formatNumber(s.due.count)} tone="warning" />
               <ExecutiveTile label="Overdue" value={formatNumber(s.overdue.count)} tone="critical" />
-              <ExecutiveTile label="Customers in reorder window" value={formatNumber(s.expected_orders)} />
               <ExecutiveTile
                 label="Typical baskets across due customers"
                 value={formatCurrency(s.expected_revenue)}
