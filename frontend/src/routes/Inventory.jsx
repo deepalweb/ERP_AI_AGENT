@@ -173,6 +173,37 @@ function TopOutOfStockTable({ items }) {
   );
 }
 
+/** Shared by Top shortage products and Top damaged products -- same shape
+ * ({name, sku, lines, qty}), same wrapped-label problem the ranked bar had
+ * with real product names, same table fix as ExposureTable/TopOutOfStockTable. */
+function ProductQtyTable({ items }) {
+  if (!items || items.length === 0) {
+    return <p className="text-sm text-foreground/50">No items.</p>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-foreground/60">
+            <th className="pb-2 font-medium">Product</th>
+            <th className="pb-2 text-right font-medium">Lines</th>
+            <th className="pb-2 pl-4 text-right font-medium">Qty</th>
+          </tr>
+        </thead>
+        <tbody>
+          {items.map((i) => (
+            <tr key={i.sku ?? i.name} className="border-t border-border">
+              <td className="py-1.5 font-medium text-foreground-strong">{stripSkuSuffix(i.name)}</td>
+              <td className="py-1.5 text-right">{formatNumber(i.lines)}</td>
+              <td className="py-1.5 pl-4 text-right text-foreground-strong">{formatNumber(i.qty)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** Each row pairs a BulletBar (how close to the 3-day line) with the exact
  * numbers a manager needs to act -- the chart answers "how bad," the table
  * answers "which SKU, which outlet, right now." Negative stock is its own
@@ -634,23 +665,13 @@ export default function Inventory() {
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Top shortage products</h3>
                 <div className="mt-2">
-                  <RankedBarChart
-                    data={(lad.shortage_top_products ?? []).slice(0, 8).map((p) => ({ name: stripSkuSuffix(p.name), value: p.qty }))}
-                    formatValue={formatNumber}
-                    labelWidth={200}
-                    rowHeight={40}
-                  />
+                  <ProductQtyTable items={(lad.shortage_top_products ?? []).slice(0, 8)} />
                 </div>
               </div>
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Top damaged products</h3>
                 <div className="mt-2">
-                  <RankedBarChart
-                    data={(lad.damaged_top_products ?? []).slice(0, 8).map((p) => ({ name: stripSkuSuffix(p.name), value: p.qty }))}
-                    formatValue={formatNumber}
-                    labelWidth={200}
-                    rowHeight={40}
-                  />
+                  <ProductQtyTable items={(lad.damaged_top_products ?? []).slice(0, 8)} />
                 </div>
               </div>
             </div>
