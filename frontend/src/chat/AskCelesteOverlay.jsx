@@ -3,7 +3,7 @@ import { useLocation } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "./legacy-cards.css";
-import { sendChatMessage } from "../api";
+import { streamChatMessage } from "../api";
 import ChatSidebar from "./ChatSidebar";
 import SuggestedQuestions from "./SuggestedQuestions";
 import { loadConversations, saveConversations, newConversation, titleFromMessage } from "./storage";
@@ -181,15 +181,41 @@ function FollowUpChips({ followUps, onPick }) {
   );
 }
 
-function Message({ message, isLast, onFollowUp }) {
+/** `message.pending` marks the one in-progress assistant reply (if any) --
+ * seeded the instant a turn starts (see callAgent) and cleared on "done".
+ * Its content/activeTools fill in live as stream events arrive, so this
+ * renders real progress ("Running get_stock_alerts…", then streaming
+ * answer text) instead of a separate static "Thinking…" bubble. */
+function Message({ message, isLast, onFollowUp, onCancel }) {
   const hasTools = message.toolCalls && message.toolCalls.length > 0;
+  const activeTools = message.activeTools ?? [];
   return (
     <div className={`message message-${message.role}${hasTools ? " message-has-tools" : ""}`}>
       <div className="message-bubble">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+        {message.pending && activeTools.length > 0 && (
+          <div className="mb-1.5 text-xs text-foreground/50">
+            {activeTools.map((name) => `Looking up ${name.replace(/^get_/, "").replace(/_/g, " ")}…`).join(", ")}
+          </div>
+        )}
+        {message.pending && !message.content && activeTools.length === 0 ? (
+          // Reasoning-model turns can spend several real seconds "thinking"
+          // before the first tool_start or token event ever arrives (the
+          // model's reasoning_content isn't rendered -- see callAgent's own
+          // comment on why) -- a static label here reads as frozen/hung
+          // during that whole window, confirmed live. The pulse is the
+          // honest fix: it claims nothing specific, just "still working".
+          <span className="animate-pulse text-foreground/50">Thinking&hellip;</span>
+        ) : (
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+        )}
+        {message.pending && (
+          <button type="button" onClick={onCancel} className="ml-2 text-xs font-medium text-accent hover:underline">
+            Cancel
+          </button>
+        )}
       </div>
       <ToolCalls toolCalls={message.toolCalls} />
-      {isLast && message.role === "assistant" && (
+      {isLast && message.role === "assistant" && !message.pending && (
         <FollowUpChips followUps={message.followUps} onPick={onFollowUp} />
       )}
     </div>
@@ -274,29 +300,97 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
   // reply gets appended onto -- a retry passes the current conversation
   // unchanged (the failed turn's user message is already in there from
   // the original send), so a failed call can be rerun without ever
-  // appending a second, duplicate user bubble.
+  // appending a second, duplicate user bubble. abortControllerRef is how
+  // the Cancel button (rendered on the pending message itself -- see
+  // Message/onCancel) reaches an in-flight request from outside this
+  // function.
   //
-  // readResponse() (http.js) already throws on a {status:"error"} body
-  // before sendChatMessage ever returns one -- there is no successful
-  // return path with status==="error" to branch on here, only the catch
-  // below. abortControllerRef is how the Cancel button reaches an
-  // in-flight request from outside this function.
+  // A pending assistant message is pushed the instant the turn starts
+  // (not lazily on the first stream event) so the bubble -- and its
+  // Cancel button -- appear immediately, same as the old static
+  // "Thinking…" block did, but this one is real: `content`/`activeTools`
+  // fill in live as token/tool_start/tool_result events arrive, instead
+  // of waiting for one final append. updateLastMessage patches ONLY that
+  // placeholder (by position, not id, since it has none yet) -- correct
+  // as long as nothing else can append a message to this conversation
+  // while a turn is in flight, which the `loading` guard on
+  // handleSend/handleFollowUp/handleRetry already ensures.
   async function callAgent(messages, targetId) {
     setLoading(true);
     setError(null);
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    try {
-      const data = await sendChatMessage(messages.map(({ role, content }) => ({ role, content })), controller.signal);
+
+    function updateLastMessage(patch) {
       setChatState((prev) => ({
         ...prev,
-        conversations: prev.conversations.map((c) =>
-          c.id === targetId
-            ? { ...c, messages: [...messages, { role: "assistant", content: data.reply, toolCalls: data.tool_calls, followUps: data.follow_ups }], updatedAt: Date.now() }
-            : c,
-        ),
+        conversations: prev.conversations.map((c) => {
+          if (c.id !== targetId) return c;
+          const msgs = c.messages.slice();
+          msgs[msgs.length - 1] = { ...msgs[msgs.length - 1], ...patch };
+          return { ...c, messages: msgs };
+        }),
+      }));
+    }
+
+    setChatState((prev) => ({
+      ...prev,
+      conversations: prev.conversations.map((c) =>
+        c.id === targetId
+          ? { ...c, messages: [...messages, { role: "assistant", content: "", toolCalls: [], followUps: [], activeTools: [], pending: true }] }
+          : c,
+      ),
+    }));
+
+    let content = "";
+    let activeTools = [];
+    try {
+      await streamChatMessage(
+        messages.map(({ role, content }) => ({ role, content })),
+        {
+          signal: controller.signal,
+          onEvent: (event) => {
+            if (event.type === "token") {
+              content += event.delta;
+              updateLastMessage({ content });
+            } else if (event.type === "tool_start") {
+              activeTools = [...activeTools, event.name];
+              updateLastMessage({ activeTools });
+            } else if (event.type === "tool_result") {
+              activeTools = activeTools.filter((n) => n !== event.name);
+              updateLastMessage({ activeTools });
+            } else if (event.type === "done") {
+              updateLastMessage({
+                content: event.reply, toolCalls: event.tool_calls, followUps: event.follow_ups,
+                activeTools: [], pending: false,
+              });
+            }
+            // "reasoning" events: no UI update in v1 -- the model's internal
+            // chain-of-thought isn't written in Celeste's voice, and its
+            // presence already keeps the connection (and Cancel button)
+            // visibly alive via the token/tool events around it.
+          },
+        },
+      );
+      setChatState((prev) => ({
+        ...prev,
+        conversations: prev.conversations.map((c) => (c.id === targetId ? { ...c, updatedAt: Date.now() } : c)),
       }));
     } catch (err) {
+      // An empty, never-finished placeholder (cancelled before any token or
+      // tool even started) is dropped rather than left as a blank bubble;
+      // one with partial content/tool activity stays, just no longer "live".
+      if (!content && activeTools.length === 0) {
+        setChatState((prev) => ({
+          ...prev,
+          conversations: prev.conversations.map((c) =>
+            c.id === targetId ? { ...c, messages: c.messages.slice(0, -1) } : c,
+          ),
+        }));
+      } else {
+        updateLastMessage({ activeTools: [], pending: false });
+      }
+
       if (err.name === "AbortError") {
         // User hit Cancel -- they chose to stop, not an error to report.
       } else if (err.name === "TimeoutError") {
@@ -392,22 +486,14 @@ export default function AskCelesteOverlay({ open, question, onClose }) {
               </>
             )}
             {activeMessages.map((m, i) => (
-              <Message key={i} message={m} isLast={i === activeMessages.length - 1} onFollowUp={handleFollowUp} />
+              <Message
+                key={i}
+                message={m}
+                isLast={i === activeMessages.length - 1}
+                onFollowUp={handleFollowUp}
+                onCancel={() => abortControllerRef.current?.abort()}
+              />
             ))}
-            {loading && (
-              <div className="message message-assistant">
-                <div className="message-bubble message-loading flex items-center gap-3">
-                  Thinking&hellip;
-                  <button
-                    type="button"
-                    onClick={() => abortControllerRef.current?.abort()}
-                    className="text-xs font-medium text-accent hover:underline"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
             {error && (
               <div className="flex flex-wrap items-center gap-3 text-sm text-critical">
                 {error}

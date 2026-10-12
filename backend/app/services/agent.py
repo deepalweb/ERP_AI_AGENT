@@ -1,11 +1,15 @@
 import inspect
 import json
+import logging
 import os
 import re
+import time
 from datetime import date
 
 import anyio
-from openai import OpenAI
+from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
 
 from mcp_server.tools import intelligence, sales
 from . import (
@@ -921,10 +925,16 @@ def _extract_follow_ups(text: str | None) -> tuple[str | None, list[str]]:
     return clean, questions[:3]
 
 
-def _get_client() -> OpenAI:
+def _get_client() -> AsyncOpenAI:
+    # Async client, not the sync OpenAI() the rest of this module's
+    # non-streaming callers used to reach for -- a sync client's stream
+    # object only supports next() per chunk, which would mean dispatching
+    # a whole anyio.to_thread.run_sync round trip per chunk (a reasoning
+    # round can be 1000+ chunks, confirmed live). AsyncOpenAI streams
+    # natively via `async for`, no thread-pool overhead per chunk.
     api_key = os.getenv("NVIDIA_API_KEY") or os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("NVIDIA_BASE_URL")
-    return OpenAI(api_key=api_key, base_url=base_url)
+    return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
 
 def _get_model() -> str:
@@ -932,62 +942,147 @@ def _get_model() -> str:
     return model_name()
 
 
-async def run_agent_turn(messages: list[dict]) -> dict:
-    """Run one agent turn, letting the model call tools repeatedly (e.g. list_metrics
-    then investigate_metric, or investigate a second related metric) until it settles
-    on a final answer or hits MAX_TOOL_ROUNDS."""
+async def _stream_round(client, model, messages, *, use_tools: bool):
+    """One streamed chat-completion call. Yields client-facing events
+    ("reasoning"/"token" deltas) as they arrive, then a final internal
+    marker (never forwarded to the HTTP response — see stream_agent_turn)
+    carrying the round's accumulated content, finish_reason, and any
+    tool_calls reconstructed from their streamed fragments.
+
+    kimi-k3 is a reasoning model: it streams `delta.reasoning_content`
+    (the model's internal chain-of-thought) separately from
+    `delta.content` (the actual answer) — confirmed live against the real
+    NVIDIA NIM endpoint before building this (a plain non-streamed call
+    for "say hello in 5 words" cost 2000+ completion tokens, almost all
+    reasoning). reasoning_content is surfaced as its own event so the
+    frontend can show real progress instead of a static "Thinking…", but
+    deliberately isn't accumulated into the reply -- it's the model's
+    scratch work, not written in Celeste's voice, and was never part of
+    the non-streaming reply either.
+
+    Tool-call deltas arrive fragmented across many chunks, indexed by
+    position in this round's tool_calls array (OpenAI streaming
+    convention) -- id/name arrive once near the start, `arguments` trickle
+    in as partial JSON string pieces that must be concatenated in order
+    before the whole thing is valid JSON."""
+    kwargs = {"model": model, "messages": messages, "stream": True}
+    if use_tools:
+        kwargs["tools"] = TOOLS
+        kwargs["tool_choice"] = "auto"
+    stream = await client.chat.completions.create(**kwargs)
+
+    content = ""
+    finish_reason = None
+    tool_calls_by_index: dict[int, dict] = {}
+
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        if choice.finish_reason:
+            finish_reason = choice.finish_reason
+        delta = choice.delta
+        if delta is None:
+            continue
+
+        reasoning = getattr(delta, "reasoning_content", None)
+        if reasoning:
+            yield {"type": "reasoning", "delta": reasoning}
+        if delta.content:
+            content += delta.content
+            yield {"type": "token", "delta": delta.content}
+        if delta.tool_calls:
+            for tc in delta.tool_calls:
+                entry = tool_calls_by_index.setdefault(tc.index, {"id": None, "name": "", "arguments": ""})
+                if tc.id:
+                    entry["id"] = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        entry["name"] += tc.function.name
+                    if tc.function.arguments:
+                        entry["arguments"] += tc.function.arguments
+
+    ordered_tool_calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
+    yield {"_round_done": True, "content": content, "finish_reason": finish_reason, "tool_calls": ordered_tool_calls}
+
+
+async def stream_agent_turn(messages: list[dict]):
+    """Streaming replacement for the old one-shot run_agent_turn — same
+    tool-calling loop (up to MAX_TOOL_ROUNDS), same TOOL_FUNCTIONS dispatch,
+    same FOLLOW_UPS trailer convention, but yields SSE-ready event dicts as
+    it goes instead of blocking until the whole turn finishes:
+      {"type": "reasoning", "delta": str}      -- model's internal reasoning
+      {"type": "token", "delta": str}          -- visible answer text
+      {"type": "tool_start", "name": str}      -- about to run a tool
+      {"type": "tool_result", "name": str, "duration_ms": int}
+      {"type": "done", "reply": str, "tool_calls": [...], "follow_ups": [...]}
+      {"type": "error", "detail": str}
+    main.py wraps this as a text/event-stream response -- the first
+    streaming route in this codebase (see commit history for the live
+    smoke test against the real NIM endpoint that preceded building this,
+    confirming stream=True works cleanly both with and without tools)."""
     client = _get_client()
     model = _get_model()
 
     full_messages = [{"role": "system", "content": _system_prompt()}, *messages]
     executed_calls = []
 
-    for _ in range(MAX_TOOL_ROUNDS):
-        response = await anyio.to_thread.run_sync(
-            lambda: client.chat.completions.create(
-                model=model,
-                messages=full_messages,
-                tools=TOOLS,
-                tool_choice="auto",
-            )
-        )
-        choice_message = response.choices[0].message
+    try:
+        for round_num in range(MAX_TOOL_ROUNDS):
+            round_result = None
+            async for event in _stream_round(client, model, full_messages, use_tools=True):
+                if event.get("_round_done"):
+                    round_result = event
+                else:
+                    yield event
 
-        if not choice_message.tool_calls:
-            reply, follow_ups = _extract_follow_ups(choice_message.content)
-            return {"reply": reply, "tool_calls": executed_calls, "follow_ups": follow_ups}
+            if round_result["finish_reason"] != "tool_calls" or not round_result["tool_calls"]:
+                reply, follow_ups = _extract_follow_ups(round_result["content"])
+                yield {"type": "done", "reply": reply, "tool_calls": executed_calls, "follow_ups": follow_ups}
+                return
 
-        full_messages.append(choice_message)
+            full_messages.append({
+                "role": "assistant",
+                "content": round_result["content"] or None,
+                "tool_calls": [
+                    {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments"]}}
+                    for tc in round_result["tool_calls"]
+                ],
+            })
 
-        for tool_call in choice_message.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments or "{}")
-            func = TOOL_FUNCTIONS.get(name)
+            for tc in round_result["tool_calls"]:
+                name = tc["name"]
+                args = json.loads(tc["arguments"] or "{}")
+                func = TOOL_FUNCTIONS.get(name)
 
-            if func is None:
-                result = {"error": f"Unknown tool '{name}'"}
-            elif inspect.iscoroutinefunction(func):
-                result = await func(**args)
-            else:
-                result = await anyio.to_thread.run_sync(lambda: func(**args))
+                yield {"type": "tool_start", "name": name}
+                started = time.perf_counter()
+                if func is None:
+                    result = {"error": f"Unknown tool '{name}'"}
+                elif inspect.iscoroutinefunction(func):
+                    result = await func(**args)
+                else:
+                    result = await anyio.to_thread.run_sync(lambda: func(**args))
+                duration_ms = round((time.perf_counter() - started) * 1000)
+                yield {"type": "tool_result", "name": name, "duration_ms": duration_ms}
 
-            executed_calls.append({"name": name, "arguments": args, "result": result})
-            full_messages.append(
-                {
+                executed_calls.append({"name": name, "arguments": args, "result": result})
+                full_messages.append({
                     "role": "tool",
-                    "tool_call_id": tool_call.id,
+                    "tool_call_id": tc["id"],
                     "content": json.dumps(result, default=str),
-                }
-            )
+                })
 
-    # Hit the round cap still wanting to call tools — force a final text answer
-    # from what's already been gathered rather than looping forever.
-    final_response = await anyio.to_thread.run_sync(
-        lambda: client.chat.completions.create(model=model, messages=full_messages)
-    )
-    reply, follow_ups = _extract_follow_ups(final_response.choices[0].message.content)
-    return {
-        "reply": reply,
-        "tool_calls": executed_calls,
-        "follow_ups": follow_ups,
-    }
+        # Hit the round cap still wanting to call tools — force a final text
+        # answer from what's already been gathered rather than looping forever.
+        round_result = None
+        async for event in _stream_round(client, model, full_messages, use_tools=False):
+            if event.get("_round_done"):
+                round_result = event
+            else:
+                yield event
+        reply, follow_ups = _extract_follow_ups(round_result["content"])
+        yield {"type": "done", "reply": reply, "tool_calls": executed_calls, "follow_ups": follow_ups}
+    except Exception as e:
+        logger.exception("agent turn stream failed")
+        yield {"type": "error", "detail": str(e)}

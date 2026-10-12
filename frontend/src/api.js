@@ -437,7 +437,18 @@ export async function reopenCase(caseId, reason) {
 // produces a final reply. `signal` lets the caller add a user-initiated
 // Cancel on top of this timeout via AbortSignal.any, same pattern
 // fetchBrief/fetchCurrentPeriod already use.
-export async function sendChatMessage(messages, signal) {
+//
+// /agent/chat is a Server-Sent Events stream (backend/app/services/agent.py
+// stream_agent_turn), not one JSON blob -- each line is `data: {...}\n\n`,
+// one event dict per line, no [DONE] sentinel (that's an OpenAI upstream
+// convention; this route just closes the HTTP stream when the generator
+// ends). An {type:"error"} event means the agent turn itself failed after
+// streaming had already started (a mid-turn tool/model exception) -- there's
+// no HTTP-status-code channel left to carry that once the stream is open,
+// so it's surfaced the same way readResponse() surfaces a JSON error body:
+// thrown as an Error with `.body` set, so callers can keep using the same
+// `err.body?.detail` pattern regardless of which path failed.
+export async function streamChatMessage(messages, { signal, onEvent } = {}) {
   const timeout = AbortSignal.timeout(90000);
   const response = await apiFetch(`${API_BASE_URL}/agent/chat`, {
     method: "POST",
@@ -445,8 +456,35 @@ export async function sendChatMessage(messages, signal) {
     body: JSON.stringify({ messages }),
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
+  if (!response.ok) {
+    // Only reachable for a failure before the route ever starts streaming
+    // (e.g. a 422 on malformed request body) -- a failure during the turn
+    // itself arrives as a {type:"error"} event in an otherwise-200 stream.
+    return readResponse(response);
+  }
 
-  return readResponse(response);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary;
+    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+      const rawEvent = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const line = rawEvent.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(6));
+      if (event.type === "error") {
+        const error = new Error(event.detail || "The agent failed to process this request.");
+        error.body = event;
+        throw error;
+      }
+      onEvent?.(event);
+    }
+  }
 }
 
 export async function fetchPerformanceSummary(month, storeId) {

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 
@@ -5,7 +6,7 @@ import anyio
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
@@ -1161,10 +1162,21 @@ async def investigations():
 @app.post("/agent/chat")
 async def agent_chat(request: ChatRequest):
     """Run one agent turn: send the conversation to the model, execute any
-    requested ERP tools, and return the final reply."""
-    try:
-        messages = [m.model_dump() for m in request.messages]
-        return await agent.run_agent_turn(messages)
-    except Exception:
-        logger.exception("agent chat turn failed")
-        return {"status": "error", "detail": "The agent failed to process this request."}
+    requested ERP tools, and stream progress back as it happens -- token
+    deltas for the answer, tool_start/tool_result for each ERP lookup along
+    the way -- instead of one blocking JSON response after the whole
+    tool-calling loop (up to 6 rounds, each a real reporting-DB query)
+    finishes. See agent.stream_agent_turn for the event shapes. The one
+    exception path that can't come from inside the generator (request
+    parsing itself) still needs its own try/except, since nothing has
+    started streaming yet at that point."""
+    async def event_stream():
+        try:
+            messages = [m.model_dump() for m in request.messages]
+            async for event in agent.stream_agent_turn(messages):
+                yield f"data: {json.dumps(event, default=str)}\n\n"
+        except Exception:
+            logger.exception("agent chat turn failed")
+            yield f"data: {json.dumps({'type': 'error', 'detail': 'The agent failed to process this request.'})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
