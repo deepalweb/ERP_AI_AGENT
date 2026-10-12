@@ -297,6 +297,19 @@ export async function saveCompletedStockCountVarianceCase(startDate, endDate) {
   return readResponse(response);
 }
 
+// Generic counterpart for every other investigate_metric-flagged metric
+// (revenue, supplier_fill_rate, purchase_price_variance, supplier_
+// concentration, ...) -- no scope params, the backend recomputes the
+// current flagged month for metricId itself.
+export async function saveMetricInvestigationCase(metricId) {
+  const response = await apiFetch(
+    `${API_BASE_URL}/intelligence/investigate/${encodeURIComponent(metricId)}/save-as-case`,
+    { method: "POST" },
+  );
+
+  return readResponse(response);
+}
+
 export async function fetchOutletOrderForecast(forecastDays = 5) {
   const response = await apiFetch(
     `${API_BASE_URL}/customers/predictions/outlet-forecast?forecast_days=${forecastDays}`

@@ -808,6 +808,33 @@ async def intelligence_investigate(metric_id: str):
         return {"status": "error", "detail": "Could not run the investigation."}
 
 
+@app.post("/intelligence/investigate/{metric_id}/save-as-case")
+async def save_metric_investigation_case(metric_id: str):
+    """Generalizes "save as case" -- previously wired only for completed-
+    stock-count-variance (see save_completed_stock_count_variance_case
+    above) -- to every metric investigate_metric/Ask Celeste can flag:
+    revenue, supplier_fill_rate, purchase_price_variance, supplier_
+    concentration, and any other entry in intelligence.METRICS. Recomputes
+    via investigation.build_investigation(), the SAME finding builder the
+    daily scan already uses for these metrics (sync_cases -> scan_all ->
+    build_investigation), so a manually-saved case is identical to one the
+    scan would have produced on its own -- never a client-supplied
+    finding/evidence/impact blob. See case_engine.save_ad_hoc_case."""
+    from mcp_server.tools.investigation import build_investigation
+
+    try:
+        finding = await anyio.to_thread.run_sync(build_investigation, metric_id)
+        if "error" in finding:
+            return {"status": "error", "detail": finding["error"]}
+        if finding.get("status") != "completed":
+            return {"status": "error", "detail": "Nothing to save — this metric isn't currently flagged."}
+        case_id = await anyio.to_thread.run_sync(case_engine.save_ad_hoc_case, finding)
+        return {"status": "ok", "case_id": case_id}
+    except Exception:
+        logger.exception("save metric investigation as case failed for %s", metric_id)
+        return {"status": "error", "detail": "Could not save this investigation as a case."}
+
+
 def _attach_actions(findings: list[dict], actions: dict[str, dict]) -> None:
     for f in findings:
         f["action"] = actions.get(f["id"], finding_actions.DEFAULT_ACTION)
