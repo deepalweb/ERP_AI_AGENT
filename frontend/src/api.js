@@ -365,6 +365,12 @@ export async function fetchSecondOrderConversion() {
   return readResponse(response);
 }
 
+export async function fetchCustomerLifecycleTransitions() {
+  const response = await apiFetch(`${API_BASE_URL}/customers/lifecycle/transitions`);
+
+  return readResponse(response);
+}
+
 export async function fetchCustomerOutletBehavior() {
   const response = await apiFetch(`${API_BASE_URL}/customers/outlet-behavior`);
 

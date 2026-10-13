@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchCustomerLifecycleSegment, fetchSecondOrderConversion } from "../api";
+import { fetchCustomerLifecycleSegment, fetchCustomerLifecycleTransitions, fetchSecondOrderConversion } from "../api";
 import Card from "./Card";
+import CohortConversionChart from "../charts/CohortConversionChart";
 import { formatCurrency, formatDate, formatNumber } from "../format";
 
 const SECOND_ORDER_WINDOWS = [30, 60, 90];
@@ -45,6 +46,7 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
   const segmentPage = (segmentQuery.data?.customers ?? []).slice(segmentOffset, segmentOffset + SEGMENT_PAGE_SIZE);
   const segmentShown = segmentQuery.data?.customers?.length ?? 0;
   const secondOrder = useQuery({ queryKey: ["secondOrderConversion"], queryFn: fetchSecondOrderConversion });
+  const transitions = useQuery({ queryKey: ["customerLifecycleTransitions"], queryFn: fetchCustomerLifecycleTransitions });
   function selectCell(stageId, tierId) {
     setSelectedStage(stageId);
     setSelectedTier((current) => (current === tierId && selectedStage === stageId ? null : tierId));
@@ -200,6 +202,49 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
         </Card>
       </div>
 
+      <Card title="Customer movement">
+        {transitions.isLoading && <p className="text-sm text-foreground/60">Loading…</p>}
+        {transitions.data?.status === "error" && <p className="text-sm text-warning">Customer movement unavailable.</p>}
+        {transitions.data?.status === "insufficient_history" && (
+          <p className="text-sm text-foreground/60">
+            Needs at least 2 days of customer lifecycle history to show real movement between stages
+            ({transitions.data.snapshots_available} recorded so far). This isn&rsquo;t a bug &mdash; it fills in
+            once a new day of order data lands.
+          </p>
+        )}
+        {transitions.data?.status === "ok" && (() => {
+          const byFrom = Object.fromEntries(transitions.data.transitions.map((t) => [t.from, t.to]));
+          const KEY_MOVES = [
+            { from: "active", to: "due", label: "Active → Due" },
+            { from: "due", to: "lapsing", label: "Due → Lapsing" },
+            { from: "lapsing", to: "churned", label: "Lapsing → Churned" },
+            { from: "churned", to: "win_back", label: "Churned → Win-back" },
+            { from: "win_back", to: "active", label: "Win-back → Active" },
+          ];
+          return (
+            <>
+              <p className="text-xs text-foreground/60">
+                Who actually moved between {formatDate(transitions.data.prev_date)} and {formatDate(transitions.data.curr_date)} &mdash;
+                not just a change in how many are in each stage.
+              </p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-5">
+                {KEY_MOVES.map((move) => (
+                  <div key={move.label} className="rounded-lg border border-border p-3 text-center">
+                    <div className="text-2xl font-semibold tabular-nums text-foreground-strong">
+                      {formatNumber(byFrom[move.from]?.[move.to] ?? 0)}
+                    </div>
+                    <div className="mt-1 text-xs text-foreground/60">{move.label}</div>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-3 text-xs text-foreground/50">
+                {formatNumber(transitions.data.new_customers)} new customers acquired in between, not counted as a transition from any prior stage.
+              </p>
+            </>
+          );
+        })()}
+      </Card>
+
       <Card title="Are new customers coming back for a second order?">
         {secondOrder.isLoading && <p className="text-sm text-foreground/60">Loading…</p>}
         {secondOrder.data?.status === "error" && <p className="text-sm text-warning">Second-order conversion unavailable.</p>}
@@ -215,6 +260,12 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
           <p className="mt-1 text-xs text-foreground/50">
             Retrospective — based on each customer&rsquo;s own order history, not affected by how current today&rsquo;s data is. As of {formatDate(secondOrder.data.as_of_date)}.
           </p>
+
+          {secondOrder.data.cohorts.length > 0 && (
+            <div className="mt-4">
+              <CohortConversionChart cohorts={secondOrder.data.cohorts} formatX={formatMonthLabel} />
+            </div>
+          )}
 
           {secondOrder.data.cohorts.length > 0 && (
             <div className="mt-4 overflow-x-auto">

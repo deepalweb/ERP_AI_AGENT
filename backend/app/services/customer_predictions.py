@@ -1429,6 +1429,7 @@ def build_second_order_decline_finding() -> list[dict]:
     cohort = next(c for c in result["cohorts"] if c["month"] == anomaly["latest_month"])
     window = cohort["windows"]["30"]
     moved = "fallen" if anomaly["category"] == "critical" else "risen"
+    persistence = intelligence.classify_persistence(trend, "higher_is_good")
 
     return [{
         "id": f"second_order_conversion_decline-{anomaly['latest_month']}",
@@ -1439,10 +1440,23 @@ def build_second_order_decline_finding() -> list[dict]:
         "title": f"Second-order conversion has {moved} to {anomaly['latest_value']}% "
                  f"for customers acquired in {anomaly['latest_month']}",
         "detected": date.today().isoformat(),
+        # Same generic shape investigation.build_investigation() returns for
+        # every registered trend metric (metric/trend/persistence alongside
+        # confirm/root_cause/impact) -- case_engine.get_case_detail already
+        # whitelists all three through to the frontend's `latest`, and
+        # CaseDetail.jsx's SecondOrderConversionInvestigationPanel renders
+        # them with the exact same TrendChart SupplierInvestigationPanel
+        # already uses, no new whitelisting or chart component needed.
+        "metric": {
+            "id": "second_order_conversion_rate_30d", "label": "Second-order conversion (30-day)",
+            "unit": "percent", "direction": "higher_is_good", "notes": None,
+        },
+        "trend": trend,
+        "persistence": persistence,
         "confirm": {
             "period": anomaly["latest_month"], "current": anomaly["latest_value"],
             "baseline": anomaly["baseline_mean"], "pct_change": anomaly["pct_change_vs_baseline"],
-            "unit": "pct",
+            "unit": "percent",
         },
         "root_cause": {
             "checks": [],

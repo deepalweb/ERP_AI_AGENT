@@ -33,6 +33,7 @@ import TransferDiscrepancyInvestigationPanel from "../design/TransferDiscrepancy
 import ExtremeEventInvestigationPanel from "../design/ExtremeEventInvestigationPanel";
 import InventoryCaseView from "../design/InventoryCaseView";
 import SupplierInvestigationPanel from "../design/SupplierInvestigationPanel";
+import SecondOrderConversionInvestigationPanel from "../design/SecondOrderConversionInvestigationPanel";
 import { BusinessBrief, CaseStatusPanel, EvidenceKnowledge, PrimaryMetricStrip, TechnicalDetails } from "../design/CaseVisuals";
 import { primaryMetricsFor } from "../design/caseTemplates";
 import { ActionTracker, SEVERITY_TAG_META } from "../design/SignalCard";
@@ -851,6 +852,18 @@ export default function CaseDetail() {
   // as incident_engine's isIncidentCase above.
   const isTransferDiscrepancyCase = typeof c.metric_id === "string" && c.metric_id.startsWith("transfer_discrepancy_");
   const isExtremeEventCase = typeof c.metric_id === "string" && c.metric_id.startsWith("extreme_event_");
+  // customer_predictions.build_second_order_decline_finding uses a FIXED
+  // metric_id ("second_order_conversion_rate_30d", same convention as
+  // revenue/gross_margin) -- only the finding's own "id" field varies by
+  // flagged acquisition month, and case_engine never persists "id" as the
+  // case's metric_id (confirmed live: a saved case's metric_id is the
+  // fixed string, not "second_order_conversion_decline-2026-09" -- an
+  // earlier version of this flag matched the wrong field and silently
+  // never rendered this panel). Metric-id-matched, not domain-matched: the
+  // "order_customer" domain is shared with customer_retention_rate/
+  // cancellation_rate/order_volume, which correctly keep using the generic
+  // trend fallback below, not this panel.
+  const isSecondOrderConversionCase = c.metric_id === "second_order_conversion_rate_30d";
   const isControlsCase = c.domain === "controls";
   const isSupplierCase = c.domain === "supplier";
   const hasTrendResults = ["monthly", "weekly"].includes(c.horizon) && latest && (latest.confirm?.baseline != null || latest.trend?.length || latest.breakdowns?.length || latest.how?.stages?.length);
@@ -1067,7 +1080,8 @@ export default function CaseDetail() {
               at all; a metric with neither renders nothing here rather
               than an empty labeled box. */}
           {(isStuckStockCount || isInventoryStockOut || isRevenueCase || isCompletedVarianceCase || isIncidentCase
-            || isTransferDiscrepancyCase || isExtremeEventCase || isControlsCase || isSupplierCase || (!hasTrendResults && trendPoints.length > 1)) && (
+            || isTransferDiscrepancyCase || isExtremeEventCase || isControlsCase || isSupplierCase
+            || isSecondOrderConversionCase || (!hasTrendResults && trendPoints.length > 1)) && (
             <Section title={isControlsCase ? "Control investigation" : "Investigation"}>
               {isStuckStockCount ? (
                 <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
@@ -1087,6 +1101,8 @@ export default function CaseDetail() {
                 <ControlsInvestigationPanel latest={latest} statusLabel={statusMeta.label} />
               ) : isSupplierCase ? (
                 <SupplierInvestigationPanel latest={latest} />
+              ) : isSecondOrderConversionCase ? (
+                <SecondOrderConversionInvestigationPanel latest={latest} />
               ) : (
                 <div>
                   <p className="mb-2 text-xs text-foreground-subtle">Recorded observations over time (real scan history, never interpolated).</p>
