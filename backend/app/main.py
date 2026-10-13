@@ -591,6 +591,22 @@ async def customer_lifecycle_segment(category: str, value_tier: str | None = Non
         return {"status": "error", "detail": "Could not load customers for this segment."}
 
 
+@app.get("/customers/lifecycle/segment/behavior")
+async def customer_lifecycle_segment_behavior(category: str, value_tier: str | None = None):
+    """One lifecycle x value-tier cell's behavior CHANGE -- order frequency,
+    basket value, cancellation rate, channel mix -- the "Segment
+    Intelligence" counterpart to /customers/lifecycle/segment's customer
+    roster above. See customer_predictions.get_segment_behavior()."""
+    try:
+        result = await anyio.to_thread.run_sync(
+            customer_predictions.get_segment_behavior, category, value_tier
+        )
+        return result
+    except Exception:
+        logger.exception("customer lifecycle segment behavior lookup failed")
+        return {"status": "error", "detail": "Could not load this segment's behavior."}
+
+
 @app.get("/customers/lifecycle/transitions")
 async def customer_lifecycle_transitions():
     """Real customer-level movement between the two most recent lifecycle

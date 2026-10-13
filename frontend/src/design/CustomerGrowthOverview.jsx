@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchCustomerLifecycleSegment, fetchCustomerLifecycleTransitions, fetchSecondOrderConversion } from "../api";
+import { fetchCustomerLifecycleSegment, fetchCustomerLifecycleSegmentBehavior, fetchCustomerLifecycleTransitions, fetchSecondOrderConversion } from "../api";
 import Card from "./Card";
 import CohortConversionChart from "../charts/CohortConversionChart";
 import { formatCurrency, formatDate, formatNumber } from "../format";
@@ -45,6 +45,15 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
   });
   const segmentPage = (segmentQuery.data?.customers ?? []).slice(segmentOffset, segmentOffset + SEGMENT_PAGE_SIZE);
   const segmentShown = segmentQuery.data?.customers?.length ?? 0;
+  // Behavior CHANGE for the whole cell (recent-vs-prior order frequency/
+  // basket/cancellation, channel mix) -- a separate query from segmentQuery
+  // above since it's an aggregate over the WHOLE segment, not the
+  // capped-200-by-revenue roster that backs the customer list.
+  const behaviorQuery = useQuery({
+    queryKey: ["customerLifecycleSegmentBehavior", selectedStage, selectedTier],
+    queryFn: () => fetchCustomerLifecycleSegmentBehavior(selectedStage, selectedTier),
+    enabled: Boolean(selectedStage && selectedTier),
+  });
   const secondOrder = useQuery({ queryKey: ["secondOrderConversion"], queryFn: fetchSecondOrderConversion });
   const transitions = useQuery({ queryKey: ["customerLifecycleTransitions"], queryFn: fetchCustomerLifecycleTransitions });
   function selectCell(stageId, tierId) {
@@ -147,6 +156,62 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
                     <span className="text-xs text-foreground/60">{formatNumber(segmentQuery.data.total)} customer{segmentQuery.data.total === 1 ? "" : "s"}</span>
                   )}
                 </div>
+
+                {behaviorQuery.isLoading && <p className="mt-2 text-xs text-foreground/60">Loading segment behavior…</p>}
+                {behaviorQuery.data?.status === "ok" && behaviorQuery.data.customers > 0 && (() => {
+                  const b = behaviorQuery.data;
+                  const freqDelta = b.order_frequency.recent_per_customer - b.order_frequency.prior_per_customer;
+                  const basketDelta = Number.isFinite(b.basket.recent_aov) && Number.isFinite(b.basket.prior_aov)
+                    ? b.basket.recent_aov - b.basket.prior_aov : null;
+                  const totalChannel = b.channel_mix.reduce((sum, c) => sum + c.count, 0);
+                  const topChannel = b.channel_mix.reduce((best, c) => (c.count > (best?.count ?? -1) ? c : best), null);
+                  return (
+                    <div className="mt-2 space-y-3 border-t border-border pt-2">
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                        <div>
+                          <span className="text-[10px] uppercase tracking-wider text-foreground/50">Historical revenue</span>
+                          <p className="text-sm font-medium text-foreground-strong">{formatCurrency(b.historical_revenue)}</p>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase tracking-wider text-foreground/50">Recent {b.window_days}d revenue</span>
+                          <p className="text-sm font-medium text-foreground-strong">{formatCurrency(b.recent_revenue)}</p>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase tracking-wider text-foreground/50">Orders/customer ({b.window_days}d)</span>
+                          <p className="text-sm font-medium text-foreground-strong">
+                            {b.order_frequency.recent_per_customer}
+                            <span className={freqDelta < 0 ? "text-warning" : freqDelta > 0 ? "text-good" : "text-foreground/50"}>
+                              {" "}({freqDelta >= 0 ? "+" : ""}{freqDelta.toFixed(2)} vs prior {b.window_days}d)
+                            </span>
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-[10px] uppercase tracking-wider text-foreground/50">Avg basket ({b.window_days}d)</span>
+                          <p className="text-sm font-medium text-foreground-strong">
+                            {b.basket.recent_aov != null ? formatCurrency(b.basket.recent_aov) : "—"}
+                            {basketDelta != null && (
+                              <span className={basketDelta < 0 ? "text-warning" : basketDelta > 0 ? "text-good" : "text-foreground/50"}>
+                                {" "}({basketDelta >= 0 ? "+" : ""}{formatCurrency(basketDelta)})
+                              </span>
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-foreground/60">
+                        <span>
+                          Cancellation rate ({b.window_days}d): {b.cancellation_rate.rate_pct != null ? `${b.cancellation_rate.rate_pct}%` : "too few orders to show a reliable rate"}
+                        </span>
+                        {topChannel && totalChannel > 0 && (
+                          <span>Mostly {topChannel.label} ({Math.round(topChannel.count / totalChannel * 100)}% of this segment)</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] leading-relaxed text-foreground/50">
+                        Recent vs. the same-length prior window, both ending {formatDate(b.as_of_date)}. A behavior change here is not yet attributed to a cause.
+                      </p>
+                    </div>
+                  );
+                })()}
+
                 {segmentQuery.isLoading && <p className="mt-2 text-xs text-foreground/60">Loading…</p>}
                 {segmentQuery.data?.status === "error" && <p className="mt-2 text-xs text-warning">Couldn&rsquo;t load this segment.</p>}
                 {segmentQuery.data?.status === "ok" && (

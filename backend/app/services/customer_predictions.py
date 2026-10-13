@@ -1173,6 +1173,118 @@ def list_customers_by_segment(category: str, value_tier: str | None = None) -> d
     }
 
 
+# Segment Intelligence, 2026-10-13: the behavior-CHANGE counterpart to
+# list_customers_by_segment()'s customer roster above -- "how many
+# customers" vs "are they ordering less, spending less, cancelling more."
+# Reuses get_deterioration_window()'s existing recent-vs-prior windowed
+# measurement (Customer deterioration, Wave 1 Phase B) rather than a new
+# definition of "behavior change" -- the same two-window math, so this
+# page and any other future caller never disagree on what "order
+# frequency change" means for the same customer.
+SEGMENT_CANCELLATION_SQL = customer_order_query(f"""
+    WITH ordered AS (
+        SELECT so.state, so.date_order
+        FROM customer_orders so
+        WHERE so.partner_id = ANY(:ids) AND so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)}
+    ),
+    bounds AS (SELECT MAX(date_order) AS as_of_date FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES}),
+    aged AS (
+        SELECT o.state, EXTRACT(EPOCH FROM (b.as_of_date - o.date_order)) / 86400.0 AS days_ago
+        FROM ordered o CROSS JOIN bounds b
+    )
+    SELECT
+        COUNT(*) FILTER (WHERE days_ago <= :window_days) AS total,
+        COUNT(*) FILTER (WHERE days_ago <= :window_days AND state = 'cancel') AS cancelled
+    FROM aged
+""")
+
+
+def get_segment_behavior(category: str, value_tier: str | None = None) -> dict:
+    """One lifecycle x value-tier cell's behavior, not just its roster --
+    the "Segment Intelligence" drill-down: historical + recent revenue
+    represented, order-frequency and basket-value change (recent vs prior
+    DETERIORATION_WINDOW_DAYS_DEFAULT-day windows), cancellation rate in
+    that same recent window, and the segment's channel mix. Deliberately
+    stops short of outlet/product-category concentration and cross-domain
+    "related signals" overlap (availability/cancellation correlation) --
+    real asks, but each is its own new query/join, not a extension of
+    this one; scoped out rather than half-built here."""
+    if category not in {cid for cid, _, _ in LIFECYCLE_CATEGORIES}:
+        return {"status": "error", "detail": f"Unknown lifecycle category: {category}"}
+    if value_tier is not None and value_tier not in {vid for vid, _, _ in VALUE_TIERS}:
+        return {"status": "error", "detail": f"Unknown value tier: {value_tier}"}
+
+    rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS, "partner_id": None})
+    if not rows:
+        return {"status": "ok", "as_of_date": None, "customers": 0}
+    as_of_date = rows[0]["as_of_date"]
+    percentile_rows = reporting.run_query(VALUE_PERCENTILE_SQL)
+    p80 = float(percentile_rows[0]["p80"] or 0) if percentile_rows else 0.0
+    p50 = float(percentile_rows[0]["p50"] or 0) if percentile_rows else 0.0
+
+    segment_partner_ids = []
+    channel_counts = {chid: 0 for chid, _, _ in CHANNELS}
+    historical_revenue = 0.0
+    for row in rows:
+        if _lifecycle_category(row, as_of_date) != category:
+            continue
+        revenue = float(row["revenue"] or 0)
+        if value_tier is not None and _value_tier(revenue, p80, p50) != value_tier:
+            continue
+        segment_partner_ids.append(int(row["partner_id"]))
+        channel_counts[_primary_channel(row)] += 1
+        historical_revenue += revenue
+
+    if not segment_partner_ids:
+        return {
+            "status": "ok", "as_of_date": as_of_date.date().isoformat(),
+            "customers": 0, "historical_revenue": 0.0,
+        }
+
+    window_days = DETERIORATION_WINDOW_DAYS_DEFAULT
+    behavior_by_partner = {r["partner_id"]: r for r in get_deterioration_window(None, window_days)}
+    recent_orders = prior_orders = 0
+    recent_revenue_sum = prior_revenue_sum = 0.0
+    for pid in segment_partner_ids:
+        b = behavior_by_partner.get(pid)
+        if not b:
+            continue
+        recent_orders += b["recent_orders"]
+        prior_orders += b["prior_orders"]
+        recent_revenue_sum += float(b["recent_revenue"] or 0)
+        prior_revenue_sum += float(b["prior_revenue"] or 0)
+
+    n = len(segment_partner_ids)
+    cancel_rows = reporting.run_query(SEGMENT_CANCELLATION_SQL, {"ids": segment_partner_ids, "window_days": window_days})
+    cancel_total = cancel_rows[0]["total"] if cancel_rows else 0
+    cancel_cancelled = cancel_rows[0]["cancelled"] if cancel_rows else 0
+
+    return {
+        "status": "ok",
+        "as_of_date": as_of_date.date().isoformat(),
+        "customers": n,
+        "historical_revenue": round(historical_revenue, 2),
+        "recent_revenue": round(recent_revenue_sum, 2),
+        "window_days": window_days,
+        "order_frequency": {
+            "recent_per_customer": round(recent_orders / n, 2),
+            "prior_per_customer": round(prior_orders / n, 2),
+        },
+        "basket": {
+            "recent_aov": round(recent_revenue_sum / recent_orders, 2) if recent_orders else None,
+            "prior_aov": round(prior_revenue_sum / prior_orders, 2) if prior_orders else None,
+        },
+        "cancellation_rate": {
+            "orders": cancel_total,
+            "cancelled": cancel_cancelled,
+            "rate_pct": round(cancel_cancelled / cancel_total * 100, 1) if cancel_total >= SECOND_ORDER_MIN_ELIGIBLE else None,
+        },
+        "channel_mix": [
+            {"id": chid, "label": label, "count": channel_counts[chid]} for chid, label, _icon in CHANNELS
+        ],
+    }
+
+
 _LIFECYCLE_SNAPSHOT_SCHEMA_READY = False
 
 

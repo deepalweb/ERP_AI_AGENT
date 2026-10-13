@@ -106,6 +106,60 @@ def test_compute_lifecycle_summary_tracks_revenue_by_tier(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# get_segment_behavior -- behavior CHANGE for a lifecycle x value-tier cell
+# (recent-vs-prior order frequency/basket, reusing get_deterioration_window's
+# existing measurement; cancellation rate; channel mix), the "Segment
+# Intelligence" counterpart to list_customers_by_segment's customer roster.
+
+def _fake_segment_behavior_run_query(lifecycle_rows, deterioration_rows, cancel_row):
+    def run_query(sql, params=None):
+        if "gap_stats" in sql:
+            return lifecycle_rows
+        if "PERCENTILE_CONT" in sql:
+            return [{"p80": 100_000, "p50": 10_000}]
+        if "windowed" in sql:
+            return deterioration_rows
+        if "state = 'cancel'" in sql:
+            return [cancel_row]
+        raise AssertionError(f"unexpected query: {sql[:80]}")
+    return run_query
+
+
+def test_get_segment_behavior_scopes_to_the_cell_and_computes_deltas(monkeypatch):
+    deterioration_rows = [
+        {"partner_id": 1, "recent_orders": 5, "recent_revenue": 5000.0, "prior_orders": 4, "prior_revenue": 4400.0},
+        # partner 3 is mid-tier -- must NOT leak into a "high" tier query.
+        {"partner_id": 3, "recent_orders": 100, "recent_revenue": 999_999.0, "prior_orders": 1, "prior_revenue": 1.0},
+    ]
+    monkeypatch.setattr(
+        cp.reporting, "run_query",
+        _fake_segment_behavior_run_query([HIGH_LAPSING, MID_LAPSING], deterioration_rows, {"total": 50, "cancelled": 2}),
+    )
+    result = cp.get_segment_behavior("lapsing", "high")
+    assert result["status"] == "ok"
+    assert result["customers"] == 1
+    assert result["historical_revenue"] == 600_000.0
+    assert result["recent_revenue"] == 5000.0
+    assert result["order_frequency"] == {"recent_per_customer": 5.0, "prior_per_customer": 4.0}
+    assert result["basket"] == {"recent_aov": 1000.0, "prior_aov": 1100.0}
+    assert result["cancellation_rate"] == {"orders": 50, "cancelled": 2, "rate_pct": 4.0}
+
+
+def test_get_segment_behavior_rejects_unknown_category(monkeypatch):
+    assert cp.get_segment_behavior("not_a_real_category")["status"] == "error"
+
+
+def test_get_segment_behavior_handles_an_empty_segment(monkeypatch):
+    monkeypatch.setattr(
+        cp.reporting, "run_query",
+        _fake_segment_behavior_run_query([LOW_ACTIVE], [], {"total": 0, "cancelled": 0}),
+    )
+    result = cp.get_segment_behavior("lapsing", "high")  # LOW_ACTIVE is active, not lapsing
+    assert result["status"] == "ok"
+    assert result["customers"] == 0
+
+
+# ---------------------------------------------------------------------------
 # get_second_order_intelligence -- second-order conversion headline + cohort
 # table. A RETROSPECTIVE calculation (see SECOND_ORDER_SQL's own docstring):
 # every customer's first/second order is already fully recorded, so this

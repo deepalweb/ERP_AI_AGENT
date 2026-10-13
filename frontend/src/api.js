@@ -359,6 +359,14 @@ export async function fetchCustomerLifecycleSegment(category, valueTier) {
   return readResponse(response);
 }
 
+export async function fetchCustomerLifecycleSegmentBehavior(category, valueTier) {
+  const params = new URLSearchParams({ category });
+  if (valueTier) params.set("value_tier", valueTier);
+  const response = await apiFetch(`${API_BASE_URL}/customers/lifecycle/segment/behavior?${params}`);
+
+  return readResponse(response);
+}
+
 export async function fetchSecondOrderConversion() {
   const response = await apiFetch(`${API_BASE_URL}/customers/second-order-conversion`);
 
