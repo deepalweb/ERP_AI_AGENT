@@ -5,7 +5,9 @@ Customer growth heatmap's click-to-filter), and second-order conversion
 monkeypatched, dispatching on a distinguishing keyword in each query string
 (same pattern as test_stock_counts.py)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
+
+from sqlalchemy import text
 
 from backend.app.db import appdb
 from backend.app.services import customer_predictions as cp
@@ -185,6 +187,51 @@ def test_second_order_cohorts_separate_different_acquisition_months(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# build_second_order_decline_finding -- runs the cohort table through
+# intelligence.detect_anomaly(), the SAME anomaly rule every registered
+# trend metric uses, to turn a real conversion decline into a case-eligible
+# finding (see customer_predictions.py's own docstring on why this is
+# reused rather than a new threshold).
+
+def _second_order_cohort_rows(month_start, converted_n, total_n):
+    rows = []
+    for i in range(total_n):
+        second_order = month_start + timedelta(days=10) if i < converted_n else None
+        rows.append(_order_row(month_start.toordinal() * 1000 + i, month_start, second_order))
+    return rows
+
+
+def test_build_second_order_decline_finding_flags_a_real_decline(monkeypatch):
+    rows = (
+        _second_order_cohort_rows(datetime(2026, 6, 1), 16, 20)
+        + _second_order_cohort_rows(datetime(2026, 7, 1), 16, 20)
+        + _second_order_cohort_rows(datetime(2026, 8, 1), 16, 20)
+        + _second_order_cohort_rows(datetime(2026, 9, 1), 8, 20)  # the decline: 80% -> 40%
+    )
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    findings = cp.build_second_order_decline_finding()
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["category"] == "critical"
+    assert finding["metric_id"] == "second_order_conversion_rate_30d"
+    assert finding["domain"] == "order_customer"
+    assert finding["confirm"]["period"] == "2026-09"
+    assert finding["confirm"]["current"] == 40.0
+    assert finding["confirm"]["baseline"] == 80.0
+
+
+def test_build_second_order_decline_finding_returns_nothing_when_rate_is_stable(monkeypatch):
+    rows = (
+        _second_order_cohort_rows(datetime(2026, 6, 1), 16, 20)
+        + _second_order_cohort_rows(datetime(2026, 7, 1), 16, 20)
+        + _second_order_cohort_rows(datetime(2026, 8, 1), 16, 20)
+        + _second_order_cohort_rows(datetime(2026, 9, 1), 16, 20)  # same rate, no decline
+    )
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_second_order_run_query(rows))
+    assert cp.build_second_order_decline_finding() == []
+
+
+# ---------------------------------------------------------------------------
 # get_outlet_second_order_rates -- same 30-day conversion math as the
 # company-wide headline, sliced by the outlet of each customer's FIRST
 # order instead of acquisition month.
@@ -308,3 +355,49 @@ def test_record_lifecycle_snapshot_is_a_no_op_for_an_already_recorded_as_of_date
     cp.record_lifecycle_snapshot(rows)  # same frozen as_of_date -- must not fabricate a second "day"
     stored = appdb.run_query("SELECT COUNT(*) AS n FROM customer_lifecycle_snapshots")
     assert stored[0]["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# compute_lifecycle_transitions -- real customer-level movement between the
+# two most recent snapshot dates, distinct from compute_lifecycle_summary's
+# day-over-day CATEGORY COUNT delta (which can't say WHO moved where).
+
+def test_compute_lifecycle_transitions_reports_insufficient_history_with_fewer_than_2_dates(appdb_reset, monkeypatch):
+    monkeypatch.setattr(cp, "_LIFECYCLE_SNAPSHOT_SCHEMA_READY", False)
+    monkeypatch.setattr(cp.reporting, "run_query", _fake_run_query([HIGH_LAPSING]))
+    cp.record_lifecycle_snapshot(cp.compute_lifecycle_snapshot_rows())
+    result = cp.compute_lifecycle_transitions()
+    assert result == {"status": "insufficient_history", "snapshots_available": 1}
+
+
+def test_compute_lifecycle_transitions_builds_a_real_per_customer_matrix(appdb_reset, monkeypatch):
+    monkeypatch.setattr(cp, "_LIFECYCLE_SNAPSHOT_SCHEMA_READY", False)
+    cp._ensure_lifecycle_snapshot_schema()
+    engine = appdb.get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO customer_lifecycle_snapshots (partner_id, as_of_date, category, value_tier, revenue) "
+                "VALUES (:partner_id, :as_of_date, :category, :value_tier, :revenue)"
+            ),
+            [
+                {"partner_id": 1, "as_of_date": "2026-10-01", "category": "active", "value_tier": "high", "revenue": 100.0},
+                {"partner_id": 2, "as_of_date": "2026-10-01", "category": "due", "value_tier": "low", "revenue": 10.0},
+                {"partner_id": 1, "as_of_date": "2026-10-02", "category": "due", "value_tier": "high", "revenue": 100.0},
+                {"partner_id": 2, "as_of_date": "2026-10-02", "category": "lapsing", "value_tier": "low", "revenue": 10.0},
+                # Not present on 2026-10-01 -- acquired in between, a new
+                # customer, not a transition from any prior state.
+                {"partner_id": 3, "as_of_date": "2026-10-02", "category": "new", "value_tier": "low", "revenue": 5.0},
+            ],
+        )
+
+    result = cp.compute_lifecycle_transitions()
+    assert result["status"] == "ok"
+    assert result["prev_date"] == "2026-10-01"
+    assert result["curr_date"] == "2026-10-02"
+    assert result["new_customers"] == 1
+    active_row = next(t for t in result["transitions"] if t["from"] == "active")
+    assert active_row["to"]["due"] == 1
+    due_row = next(t for t in result["transitions"] if t["from"] == "due")
+    assert due_row["to"]["lapsing"] == 1
+    assert due_row["to"]["active"] == 0

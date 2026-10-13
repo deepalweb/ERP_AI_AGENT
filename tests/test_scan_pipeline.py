@@ -37,6 +37,12 @@ def _stub_sources(monkeypatch):
         "dispatch_overage": [],
         # Same reasoning again, for the dispatcher/product pattern detector added 2026-10-07.
         "dispatch_pattern": [],
+        # Same reasoning again, for the second-order-conversion-decline
+        # finding added 2026-10-13 -- without this it falls through to the
+        # real function, hits the live reporting DB, and (since this test
+        # DB's real cohort data genuinely has a flagged decline) adds an
+        # unexpected 4th state_findings entry to these tests' fixed counts.
+        "customer_second_order_decline": [],
     }
     monkeypatch.setattr(brain.state_findings, "build_inventory_findings", lambda: sources["inventory"])
     monkeypatch.setattr(brain.state_findings, "build_operational_findings", lambda: sources["operations"])
@@ -46,6 +52,10 @@ def _stub_sources(monkeypatch):
     monkeypatch.setattr(brain.extreme_event, "build_extreme_event_findings", lambda: sources["extreme_event"])
     monkeypatch.setattr(brain.dispatch_overage, "build_dispatch_overage_findings", lambda: sources["dispatch_overage"])
     monkeypatch.setattr(brain.dispatch_pattern, "build_dispatch_pattern_findings", lambda: sources["dispatch_pattern"])
+    monkeypatch.setattr(
+        brain.customer_predictions, "build_second_order_decline_finding",
+        lambda: sources["customer_second_order_decline"],
+    )
     monkeypatch.setattr(brain, "_snapshot_health", dict)
     monkeypatch.setattr(brain, "_data_freshness", dict)
     predictions = brain.customer_predictions

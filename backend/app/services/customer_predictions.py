@@ -19,6 +19,7 @@ from sqlalchemy import text
 from backend.app.db import appdb, reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from backend.app.services.order_history import customer_order_query
+from mcp_server.tools import intelligence
 
 MIN_ORDER_COUNT = 3
 HIGH_CONFIDENCE_ORDER_COUNT = 10
@@ -1256,6 +1257,65 @@ def record_lifecycle_snapshot(rows: list[dict]) -> None:
         )
 
 
+def compute_lifecycle_transitions() -> dict:
+    """Real customer-level movement between the two most recent lifecycle
+    snapshots -- distinct from compute_lifecycle_summary()'s day-over-day
+    CATEGORY COUNT delta (e.g. "Lapsing +12 since yesterday"), which can't
+    say whether that +12 is 12 people moving in or 12 moving in and 24
+    moving out netting to +12. This is the transition math
+    compute_lifecycle_snapshot_rows()'s own docstring said would eventually
+    get built on top of its accumulating history.
+
+    Needs at least 2 DISTINCT as_of_dates in customer_lifecycle_snapshots
+    to show anything -- returns status="insufficient_history" honestly
+    rather than fabricating a transition from a single snapshot (see
+    record_lifecycle_snapshot's own docstring on why a frozen as_of_date,
+    the reporting mirror's own lag, doesn't add a second day on its own).
+    Checked live, 2026-10-13: exactly 1 distinct as_of_date exists so far,
+    so this returns insufficient_history today -- correct behavior, not a
+    bug, until the mirror's order data actually advances."""
+    _ensure_lifecycle_snapshot_schema()
+    dates = appdb.run_query(
+        "SELECT DISTINCT as_of_date FROM customer_lifecycle_snapshots ORDER BY as_of_date DESC LIMIT 2"
+    )
+    if len(dates) < 2:
+        return {"status": "insufficient_history", "snapshots_available": len(dates)}
+
+    curr_date, prev_date = dates[0]["as_of_date"], dates[1]["as_of_date"]
+    curr_rows = appdb.run_query(
+        "SELECT partner_id, category FROM customer_lifecycle_snapshots WHERE as_of_date = :d", {"d": curr_date}
+    )
+    prev_by_partner = {
+        r["partner_id"]: r["category"]
+        for r in appdb.run_query(
+            "SELECT partner_id, category FROM customer_lifecycle_snapshots WHERE as_of_date = :d", {"d": prev_date}
+        )
+    }
+
+    matrix = {cid: {cid2: 0 for cid2, _, _ in LIFECYCLE_CATEGORIES} for cid, _, _ in LIFECYCLE_CATEGORIES}
+    new_customers = 0
+    for row in curr_rows:
+        prev_category = prev_by_partner.get(row["partner_id"])
+        if prev_category is None:
+            # Acquired between the two snapshot dates -- a real new
+            # customer, not a transition from any prior state, so counted
+            # separately rather than invented as a fake "from" category.
+            new_customers += 1
+            continue
+        matrix[prev_category][row["category"]] += 1
+
+    return {
+        "status": "ok",
+        "prev_date": prev_date,
+        "curr_date": curr_date,
+        "new_customers": new_customers,
+        "transitions": [
+            {"from": cid, "label": label, "to": matrix[cid]}
+            for cid, label, _icon in LIFECYCLE_CATEGORIES
+        ],
+    }
+
+
 SECOND_ORDER_HEADLINE_WINDOW_DAYS = 30
 SECOND_ORDER_COHORT_WINDOWS = (30, 60, 90)
 SECOND_ORDER_COHORT_MONTHS = 12
@@ -1332,6 +1392,74 @@ def get_second_order_intelligence() -> dict | None:
         },
         "cohorts": cohort_rows,
     }
+
+
+def build_second_order_decline_finding() -> list[dict]:
+    """Second-order conversion by acquisition cohort, run through the SAME
+    anomaly rule intelligence.detect_anomaly() applies to every registered
+    trend metric -- reused directly rather than inventing a new threshold,
+    since a cohort's 30-day conversion rate is itself just one value per
+    month, same shape as any other monthly trend once mature cohorts are
+    lined up chronologically. Not registered in intelligence.METRICS
+    outright: that registry's get_trend() assumes a metric computed by its
+    own SQL path, and this one is retrospective cohort data this module
+    already owns (see SECOND_ORDER_SQL's own docstring on why that's safe
+    to treat as historical fact even while the order feed is stale).
+    Checked live, 2026-10-13: 8 mature cohorts, a real, substantial decline
+    from 69.1% (2026-03) to 28.6% (2026-09) -- this is not a theoretical
+    detector, it has something to catch today. Returns a plain list (empty,
+    or one finding) for brain.py's measurement.combine([...]) -- the same
+    shape every other state_findings.py builder returns."""
+    result = get_second_order_intelligence()
+    if result is None:
+        return []
+
+    trend = [
+        {
+            "month": c["month"],
+            "value": c["windows"]["30"]["rate_pct"],
+            "is_partial": c["windows"]["30"]["rate_pct"] is None,
+        }
+        for c in result["cohorts"]
+    ]
+    anomaly = intelligence.detect_anomaly(trend, "higher_is_good")
+    if anomaly["category"] not in ("critical", "opportunity"):
+        return []
+
+    cohort = next(c for c in result["cohorts"] if c["month"] == anomaly["latest_month"])
+    window = cohort["windows"]["30"]
+    moved = "fallen" if anomaly["category"] == "critical" else "risen"
+
+    return [{
+        "id": f"second_order_conversion_decline-{anomaly['latest_month']}",
+        "metric_id": "second_order_conversion_rate_30d",
+        "domain": "order_customer",
+        "category": anomaly["category"],
+        "priority": "high" if anomaly["category"] == "critical" else "medium",
+        "title": f"Second-order conversion has {moved} to {anomaly['latest_value']}% "
+                 f"for customers acquired in {anomaly['latest_month']}",
+        "detected": date.today().isoformat(),
+        "confirm": {
+            "period": anomaly["latest_month"], "current": anomaly["latest_value"],
+            "baseline": anomaly["baseline_mean"], "pct_change": anomaly["pct_change_vs_baseline"],
+            "unit": "pct",
+        },
+        "root_cause": {
+            "checks": [],
+            "summary": f"{window['converted']} of {window['eligible']} customers acquired in "
+                       f"{anomaly['latest_month']} placed a second order within 30 days "
+                       f"({anomaly['latest_value']}%), vs a {round(anomaly['baseline_mean'], 1)}% "
+                       f"average across prior mature cohorts.",
+        },
+        "impact": {
+            "kind": "second_order_conversion_decline",
+            "count": cohort["customers"],
+            "confidence": "measured",
+            "detail": f"{cohort['customers']} customers acquired in {anomaly['latest_month']}.",
+        },
+        "recommendations": [],
+        "status": "completed",
+    }]
 
 
 _LIFECYCLE_SCHEMA_READY = False

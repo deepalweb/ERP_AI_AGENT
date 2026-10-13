@@ -241,6 +241,11 @@ def _compute_daily_brief():
         extreme_event.build_extreme_event_findings(),
         dispatch_overage.build_dispatch_overage_findings(),
         dispatch_pattern.build_dispatch_pattern_findings(),
+        # Customer module review, 2026-10-13: the first customer-domain
+        # signal wired into the case system -- a pure function of already-
+        # historical cohort data, so (unlike lifecycle/predictions below)
+        # it needs no reordering of this scan to run before sync_cases.
+        customer_predictions.build_second_order_decline_finding(),
     ])
     data_freshness = _data_freshness()
     if data_freshness.get("status") != "fresh":

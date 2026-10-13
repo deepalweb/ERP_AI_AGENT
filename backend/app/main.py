@@ -591,6 +591,21 @@ async def customer_lifecycle_segment(category: str, value_tier: str | None = Non
         return {"status": "error", "detail": "Could not load customers for this segment."}
 
 
+@app.get("/customers/lifecycle/transitions")
+async def customer_lifecycle_transitions():
+    """Real customer-level movement between the two most recent lifecycle
+    snapshots (Active -> Due, Due -> Lapsing, etc.) -- see
+    customer_predictions.compute_lifecycle_transitions(). Returns
+    status="insufficient_history" honestly when fewer than 2 distinct
+    snapshot dates exist yet, rather than faking a transition."""
+    try:
+        result = await anyio.to_thread.run_sync(customer_predictions.compute_lifecycle_transitions)
+        return result
+    except Exception:
+        logger.exception("customer lifecycle transitions failed")
+        return {"status": "error", "detail": "Could not load customer lifecycle transitions."}
+
+
 @app.get("/customers/second-order-conversion")
 async def customer_second_order_conversion():
     """Second-order conversion: of customers whose first order is old
