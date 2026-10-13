@@ -468,8 +468,7 @@ investigation.py's anomaly-based findings, this signal is always present
 question isn't "is this unusual," it's "is this big enough to be worth a
 manager's attention today." This is a floor to avoid a trivial-looking
 card, not a tuned business threshold — there's no historical baseline yet
-to tune one against (same honest caveat as other untuned thresholds in
-this codebase, e.g. customers.py's AT_RISK_DAYS)."""
+to tune one against."""
 
 
 def build_home_finding(summary: dict) -> dict | None:
@@ -972,6 +971,26 @@ def _value_tier(revenue: float, p80: float, p50: float) -> str:
     drift onto two different definitions of "high value" (same reasoning
     as _lifecycle_category being shared, not reimplemented, per caller)."""
     return "high" if revenue >= p80 else "mid" if revenue >= p50 else "low"
+
+
+def get_lifecycle_rows() -> tuple[list[dict], object]:
+    """Raw per-customer rows, each annotated with its lifecycle_category --
+    the one live query + classification rule compute_lifecycle_summary()
+    and list_customers_by_segment() already use internally, now exposed so
+    a DIFFERENT module (customers.get_customer_intelligence(), the Ask
+    Celeste chat card's coarser 4-bucket vocabulary) can derive its
+    segments from this SAME per-customer classification, rather than a
+    second, independently-tuned rule that can silently disagree with it --
+    the exact cross-module drift the 2026-10-13 Customer module review
+    flagged (customers.py used to classify "at risk" by a flat 28/60-day
+    threshold, unrelated to a customer's own order cadence)."""
+    rows = reporting.run_query(LIFECYCLE_SQL, {"recent_window_gaps": RECENT_WINDOW_GAPS, "partner_id": None})
+    if not rows:
+        return [], None
+    as_of_date = rows[0]["as_of_date"]
+    for row in rows:
+        row["lifecycle_category"] = _lifecycle_category(row, as_of_date)
+    return rows, as_of_date
 
 
 def compute_lifecycle_summary() -> dict | None:

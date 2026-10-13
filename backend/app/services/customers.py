@@ -4,36 +4,22 @@ registry — customer_retention_rate — so it gets anomaly detection, narrated
 investigation, and AI Impact tracking for free; this module covers what that
 registry entry doesn't: per-customer segmentation and the actionable at-risk list.
 
-"Recency" is anchored to the data's own MAX(last_order), not date.today() —
-the DB snapshot lags the system clock by weeks, so anchoring to the wall clock
-would make every customer look artificially more idle than they are.
+Segmentation is DERIVED from customer_predictions.get_lifecycle_rows() -- the
+same personalized-cadence classification the Customer page's lifecycle view
+uses -- rather than this module's own independent day-threshold rule (the
+original design, before the 2026-10-13 Customer module review found the two
+could disagree: a customer could read "at risk" here, in Ask Celeste chat,
+and "active" on the Customer page at the same moment, for the same person).
+LIFECYCLE_TO_SEGMENT below is the only place that mapping lives.
 """
 
 import anyio
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import SALE_ORDER_LIVE_STATES
+from backend.app.services import customer_predictions
 from mcp_server.tools import intelligence
 
-AT_RISK_DAYS = 28   # p90 gap between orders for repeat customers
-CHURNED_DAYS = 60   # ~2x that — clearly disengaged
-
 TOP_AT_RISK = 8
-
-CUSTOMER_STATS_SQL = f"""
-    WITH customer_orders AS (
-        SELECT so.partner_id, rp.name AS customer_name, COUNT(*) AS order_count,
-               SUM(so.amount_total) AS revenue,
-               MIN(so.date_order) AS first_order, MAX(so.date_order) AS last_order
-        FROM sale_order so
-        JOIN res_partner rp ON rp.id = so.partner_id
-        WHERE so.state IN {SALE_ORDER_LIVE_STATES}
-        GROUP BY so.partner_id, rp.name
-    ),
-    bounds AS (SELECT MAX(last_order) AS as_of_date FROM customer_orders)
-    SELECT co.*, b.as_of_date
-    FROM customer_orders co CROSS JOIN bounds b
-"""
 
 SEGMENT_LABELS = {
     "active": "Active",
@@ -42,19 +28,26 @@ SEGMENT_LABELS = {
     "one_time": "One-time",
 }
 
-
-def _classify(order_count: int, days_since_last: float) -> str:
-    if order_count == 1:
-        return "one_time"
-    if days_since_last <= AT_RISK_DAYS:
-        return "active"
-    if days_since_last <= CHURNED_DAYS:
-        return "at_risk"
-    return "churned"
+# win_back/excluded -> active: both are currently-transacting customers
+# (win_back just placed an order after a long gap; excluded are atypically
+# fast-ordering bulk accounts, never scored against a personal window in
+# the first place). dormant -> one_time: the closest existing bucket for
+# customers with too few lifetime orders (< customer_predictions.
+# MIN_ORDER_COUNT) to ever be scored against a personal cadence.
+LIFECYCLE_TO_SEGMENT = {
+    "new": "active",
+    "active": "active",
+    "due": "at_risk",
+    "lapsing": "at_risk",
+    "churned": "churned",
+    "win_back": "active",
+    "dormant": "one_time",
+    "excluded": "active",
+}
 
 
 async def get_customer_intelligence():
-    rows = await reporting.fetch_report(CUSTOMER_STATS_SQL)
+    rows, as_of_date = await anyio.to_thread.run_sync(customer_predictions.get_lifecycle_rows)
 
     if not rows:
         return {
@@ -65,29 +58,53 @@ async def get_customer_intelligence():
             "retention_trend": [],
         }
 
-    as_of_date = rows[0]["as_of_date"]
-
     segment_counts = {key: 0 for key in SEGMENT_LABELS}
     segment_revenue = {key: 0.0 for key in SEGMENT_LABELS}
     at_risk_rows = []
+    repeat_customers = 0
 
     for r in rows:
-        days_since_last = (as_of_date - r["last_order"]).total_seconds() / 86400.0
-        segment = _classify(int(r["order_count"]), days_since_last)
+        segment = LIFECYCLE_TO_SEGMENT[r["lifecycle_category"]]
+        revenue = float(r["revenue"] or 0)
         segment_counts[segment] += 1
-        segment_revenue[segment] += float(r["revenue"] or 0)
+        segment_revenue[segment] += revenue
+        # Independent of segment membership on purpose -- "repeat customer"
+        # means order_count > 1, full stop, same definition this metric has
+        # always had. Deriving it from segment counts instead would quietly
+        # change its meaning: a brand-new customer with exactly 1 order now
+        # segments as "active" (see LIFECYCLE_TO_SEGMENT), which is correct
+        # for segmentation but would wrongly count them as a repeat buyer.
+        if int(r["order_count"]) > 1:
+            repeat_customers += 1
 
         if segment == "at_risk":
+            days_since_last = (as_of_date - r["last_order"]).total_seconds() / 86400.0
             at_risk_rows.append({
-                "name": r["customer_name"] or "Unknown",
-                "revenue": float(r["revenue"] or 0),
+                "partner_id": r["partner_id"],
+                "revenue": revenue,
                 "days_since_last_order": round(days_since_last),
             })
 
     total_customers = len(rows)
-    repeat_customers = segment_counts["active"] + segment_counts["at_risk"] + segment_counts["churned"]
-
     at_risk_rows.sort(key=lambda c: c["revenue"], reverse=True)
+    at_risk_rows = at_risk_rows[:TOP_AT_RISK]
+
+    names = {}
+    partner_ids = [c["partner_id"] for c in at_risk_rows]
+    if partner_ids:
+        name_rows = await reporting.fetch_report(
+            "SELECT id, name FROM res_partner WHERE id = ANY(:ids)", {"ids": partner_ids}
+        )
+        names = {row["id"]: row["name"] for row in name_rows}
+
+    at_risk_customers = [
+        {
+            "name": names.get(c["partner_id"]) or "Unknown",
+            "revenue": round(c["revenue"], 2),
+            "days_since_last_order": c["days_since_last_order"],
+        }
+        for c in at_risk_rows
+    ]
 
     metric = intelligence.METRICS["customer_retention_rate"]
     trend = await anyio.to_thread.run_sync(intelligence.get_trend, metric)
@@ -108,6 +125,6 @@ async def get_customer_intelligence():
             }
             for key in ("active", "at_risk", "churned", "one_time")
         ],
-        "at_risk_customers": at_risk_rows[:TOP_AT_RISK],
+        "at_risk_customers": at_risk_customers,
         "retention_trend": retention_trend,
     }
