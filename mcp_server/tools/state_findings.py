@@ -623,6 +623,11 @@ def build_completed_stock_count_variance_finding(result: dict, metric_id: str):
         # detail-only, carried through so the case-detail page can render
         # a real per-session table instead of only the worst one's prose.
         "sessions": result["sessions"],
+        # Normalized variance -- Rs 500K on Rs 100M counted stock reads
+        # differently from Rs 500K on Rs 5M; raw gross/net above can't say
+        # that. None (not 0) when no session had a priceable line.
+        "counted_value_rs": result.get("counted_value_rs"),
+        "variance_rate_pct": result.get("variance_rate_pct"),
         "status": "completed",
     }
 

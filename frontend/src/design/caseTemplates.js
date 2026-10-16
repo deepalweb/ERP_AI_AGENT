@@ -36,6 +36,22 @@ export function primaryMetricsFor({ c, latest, statusLabel }) {
     ];
   }
 
+  if (c.metric_id === "completed_stock_count_variance") {
+    // Stock-count variance RATE, 2026-10-16: raw Rs variance alone can't
+    // say whether this is actually bad -- the rate (gross variance over
+    // counted inventory value) is what makes outlets/sessions comparable.
+    return [
+      { label: "Completed sessions", value: formatNumber(latest.confirm?.current) },
+      { label: "Gross variance", value: formatCurrency(latest.impact?.financial_impact_rs) },
+      {
+        label: "Variance rate",
+        value: latest.variance_rate_pct != null ? `${latest.variance_rate_pct}%` : "Unknown",
+        caption: "Gross variance as a share of counted inventory value",
+      },
+      { label: "Status", value: statusLabel },
+    ];
+  }
+
   if (c.metric_id.startsWith("extreme_event_")) {
     // The card date is when the largest event happened, not when data was synced:
     // the investigation sync time is shown in the page header instead.

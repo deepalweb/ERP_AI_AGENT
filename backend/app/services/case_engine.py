@@ -1570,6 +1570,12 @@ def get_case_detail(case_id: str) -> dict | None:
             # in one recommendation string. Detail-only, same reasoning as
             # trend above. None for every other finding shape.
             "sessions": latest_snapshot.get("sessions"),
+            # Stock-count variance RATE, 2026-10-16: gross/net variance
+            # normalized by counted inventory value -- CompletedVariance
+            # InvestigationPanel.jsx reads these directly off `latest`.
+            # None (not 0) when no session had a priceable line.
+            "counted_value_rs": latest_snapshot.get("counted_value_rs"),
+            "variance_rate_pct": latest_snapshot.get("variance_rate_pct"),
             # Case Detail V3 bug fix: ControlsInvestigationPanel.jsx and
             # IncidentInvestigationPanel.jsx both read these directly off
             # `latest`, but they were never added to this whitelist -- so

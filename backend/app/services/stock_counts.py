@@ -400,6 +400,30 @@ COMPLETED_SESSIONS_SQL = f"""
     ORDER BY gross_abs_variance_value DESC
 """
 
+# Stock-count variance RATE, 2026-10-16: raw Rs variance alone can't say
+# whether a session is actually bad -- Rs 500K variance on Rs 100M counted
+# stock is healthier than Rs 150K on Rs 5M. counted_value needs its own
+# per-line fetch (not addable to COMPLETED_SESSIONS_SQL's aggregate) because
+# valuing a line needs the SAME avg_cost-with-catalog-fallback logic
+# get_stuck_stock_counts() already uses -- checked live, 2026-10-16: raw
+# avg_cost alone undercounts badly (up to ~65% of a completed session's
+# lines carry avg_cost IS NULL/0, same gap already documented for stuck
+# sessions above), so a naive SUM(counted_qty * avg_cost) would make several
+# real sessions look like variance EXCEEDED counted value, which is not a
+# real possible condition, just an underpriced denominator.
+COMPLETED_SESSION_LINES_SQL = f"""
+    SELECT scl.count_id, scl.counted_qty, scl.avg_cost, pt.celeste_cost_price_ex_vat AS cost, pt.list_price
+    FROM stock_count sc
+    JOIN stock_location sl ON sl.id = sc.location_id
+    JOIN res_store rs ON rs.warehouse_id = sl.warehouse_id
+    JOIN stock_count_line scl ON scl.count_id = sc.id
+    JOIN product_product pp ON pp.id = scl.product_id
+    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    WHERE rs.id IN {CELESTE_STORE_IDS}
+      AND sc.state = 'done'
+      AND sc.completed_datetime >= :start AND sc.completed_datetime <= :end
+"""
+
 PRODUCT_TYPE_VARIANCE_SQL = f"""
     SELECT COALESCE(pt.celeste_product_type, 'UNSPECIFIED') AS product_type,
            SUM(ABS(scl.variance_value)) AS gross_abs_variance_value,
@@ -441,6 +465,21 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
         session_rows = [r for r in session_rows if r["store_id"] == store_id]
     product_type_rows = reporting.run_query(PRODUCT_TYPE_VARIANCE_SQL, params)
 
+    counted_value_by_session: dict[int, float] = {}
+    for line in reporting.run_query(COMPLETED_SESSION_LINES_SQL, params):
+        avg_cost = float(line["avg_cost"] or 0)
+        usable_cost = avg_cost if avg_cost > 0 else _usable_cost(line["cost"], line["list_price"])
+        if usable_cost is None:
+            continue
+        counted_value_by_session[line["count_id"]] = (
+            counted_value_by_session.get(line["count_id"], 0.0) + float(line["counted_qty"] or 0) * usable_cost
+        )
+
+    def _variance_rate(gross_abs_value: float, counted_value: float) -> float | None:
+        # None, not 0 -- a session with no valuable counted lines has an
+        # UNKNOWN rate, not a healthy one.
+        return round(gross_abs_value / counted_value * 100, 2) if counted_value > 0 else None
+
     sessions = [{
         "id": r["id"],
         "name": r["name"],
@@ -449,12 +488,28 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
         "lines": r["lines"],
         "net_variance_value_rs": round(float(r["net_variance_value"] or 0), 2),
         "gross_abs_variance_value_rs": round(float(r["gross_abs_variance_value"] or 0), 2),
+        "counted_value_rs": round(counted_value_by_session.get(r["id"], 0.0), 2),
+        # Normalized the same way outlet comparisons already need to be --
+        # an outlet with Rs 500K variance on Rs 100M counted stock is
+        # healthier than one with Rs 150K on Rs 5M; raw Rs alone can't say
+        # that, this can.
+        "variance_rate_pct": _variance_rate(
+            float(r["gross_abs_variance_value"] or 0), counted_value_by_session.get(r["id"], 0.0)
+        ),
     } for r in session_rows]
 
     by_outlet = {}
+    by_outlet_counted_value = {}
     for s in sessions:
         by_outlet[s["outlet"]] = by_outlet.get(s["outlet"], 0.0) + s["gross_abs_variance_value_rs"]
-    outlet_contributors = [{"name": name, "current": round(v, 2), "delta": round(v, 2)} for name, v in by_outlet.items()]
+        by_outlet_counted_value[s["outlet"]] = by_outlet_counted_value.get(s["outlet"], 0.0) + s["counted_value_rs"]
+    outlet_contributors = [
+        {
+            "name": name, "current": round(v, 2), "delta": round(v, 2),
+            "variance_rate_pct": _variance_rate(v, by_outlet_counted_value.get(name, 0.0)),
+        }
+        for name, v in by_outlet.items()
+    ]
     outlet_contributors.sort(key=lambda c: c["current"], reverse=True)
 
     product_type_contributors = [
@@ -473,6 +528,7 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
 
     total_gross = round(sum(s["gross_abs_variance_value_rs"] for s in sessions), 2)
     total_net = round(sum(s["net_variance_value_rs"] for s in sessions), 2)
+    total_counted_value = round(sum(s["counted_value_rs"] for s in sessions), 2)
 
     breakdowns = [{
         "dimension": "store", "label": "Estimated completed-count variance by outlet",
@@ -498,5 +554,7 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
         "sessions": sorted(sessions, key=lambda s: s["gross_abs_variance_value_rs"], reverse=True),
         "net_variance_value_rs": total_net,
         "gross_abs_variance_value_rs": total_gross,
+        "counted_value_rs": total_counted_value,
+        "variance_rate_pct": _variance_rate(total_gross, total_counted_value),
         "breakdowns": breakdowns,
     }

@@ -275,10 +275,12 @@ def test_valuation_basis_labels_each_line_by_how_it_was_actually_valued(monkeypa
     assert detail["unscanned_value_rs"] == 41.0
 
 
-def _fake_completed_variance_run_query(session_rows, product_type_rows):
+def _fake_completed_variance_run_query(session_rows, product_type_rows, line_rows=None):
     def run_query(sql, params=None):
         if "celeste_product_type" in sql:
             return product_type_rows
+        if "scl.counted_qty, scl.avg_cost" in sql:
+            return line_rows or []
         if "GROUP BY sc.id, sc.name, rs.id" in sql:
             return session_rows
         raise AssertionError(f"unexpected query: {sql[:60]}")
@@ -320,6 +322,52 @@ def test_get_completed_stock_count_variance_computes_totals_and_breakdowns(monke
 
     product_type_breakdown = next(b for b in result["breakdowns"] if b["dimension"] == "product_type")
     assert [c["name"] for c in product_type_breakdown["top_contributors"]] == ["INVENTORY", "PACKING MATERIAL"]
+
+
+def test_get_completed_stock_count_variance_normalizes_variance_by_counted_value(monkeypatch):
+    # Session A: Rs 500K variance on Rs 100M counted stock (0.5%) -- healthy
+    # despite the big raw number. Session B: Rs 150K on Rs 5M (3%) -- worse,
+    # despite the smaller raw number. Raw Rs alone would rank these backwards.
+    session_rows = [
+        _completed_session_row(1, "SC-A", 1, "Outlet A", datetime(2026, 9, 1), 100, 0.0, 500_000.0),
+        _completed_session_row(2, "SC-B", 2, "Outlet B", datetime(2026, 9, 1), 100, 0.0, 150_000.0),
+    ]
+    line_rows = (
+        [{"count_id": 1, "counted_qty": 100, "avg_cost": 1_000_000.0, "cost": 0.0, "list_price": 0.0}]
+        + [{"count_id": 2, "counted_qty": 100, "avg_cost": 50_000.0, "cost": 0.0, "list_price": 0.0}]
+    )
+    monkeypatch.setattr(
+        stock_counts.reporting, "run_query",
+        _fake_completed_variance_run_query(session_rows, [], line_rows),
+    )
+
+    result = stock_counts.get_completed_stock_count_variance(start_date="2026-06-01", end_date="2026-09-15")
+    by_name = {s["name"]: s for s in result["sessions"]}
+    assert by_name["SC-A"]["counted_value_rs"] == 100_000_000.0
+    assert by_name["SC-A"]["variance_rate_pct"] == 0.5
+    assert by_name["SC-B"]["counted_value_rs"] == 5_000_000.0
+    assert by_name["SC-B"]["variance_rate_pct"] == 3.0
+    assert result["counted_value_rs"] == 105_000_000.0
+    assert result["variance_rate_pct"] == round(650_000 / 105_000_000 * 100, 2)
+
+    outlet_breakdown = next(b for b in result["breakdowns"] if b["dimension"] == "store")
+    outlet_a = next(c for c in outlet_breakdown["top_contributors"] if c["name"] == "Outlet A")
+    assert outlet_a["variance_rate_pct"] == 0.5
+
+
+def test_get_completed_stock_count_variance_rate_is_none_without_priceable_lines(monkeypatch):
+    session_rows = [_completed_session_row(1, "SC-A", 1, "Outlet A", datetime(2026, 9, 1), 100, 0.0, 500_000.0)]
+    # No usable cost anywhere (avg_cost 0, catalog cost 0) -- counted_value
+    # stays 0, so the rate must be None (unknown), never a fabricated 0%.
+    line_rows = [{"count_id": 1, "counted_qty": 100, "avg_cost": 0.0, "cost": 0.0, "list_price": 0.0}]
+    monkeypatch.setattr(
+        stock_counts.reporting, "run_query",
+        _fake_completed_variance_run_query(session_rows, [], line_rows),
+    )
+    result = stock_counts.get_completed_stock_count_variance(start_date="2026-06-01", end_date="2026-09-15")
+    assert result["sessions"][0]["counted_value_rs"] == 0.0
+    assert result["sessions"][0]["variance_rate_pct"] is None
+    assert result["variance_rate_pct"] is None
 
 
 def test_get_completed_stock_count_variance_returns_zero_state_for_no_sessions(monkeypatch):

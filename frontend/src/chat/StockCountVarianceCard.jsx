@@ -51,6 +51,12 @@ export default function StockCountVarianceCard({ result }) {
           <span className="tool-card-label">Net variance (signed)</span>
           <span className="tool-card-value">{formatCurrency(result.net_variance_value_rs)}</span>
         </div>
+        <div>
+          <span className="tool-card-label">Variance rate</span>
+          <span className="tool-card-value">
+            {result.variance_rate_pct != null ? `${result.variance_rate_pct}%` : "Unknown"}
+          </span>
+        </div>
       </div>
 
       {result.session_count === 0 ? (
