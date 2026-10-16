@@ -111,7 +111,7 @@ def test_compute_lifecycle_summary_tracks_revenue_by_tier(monkeypatch):
 # existing measurement; cancellation rate; channel mix), the "Segment
 # Intelligence" counterpart to list_customers_by_segment's customer roster.
 
-def _fake_segment_behavior_run_query(lifecycle_rows, deterioration_rows, cancel_row):
+def _fake_segment_behavior_run_query(lifecycle_rows, deterioration_rows, cancel_row, baseline_row=None):
     def run_query(sql, params=None):
         if "gap_stats" in sql:
             return lifecycle_rows
@@ -120,7 +120,9 @@ def _fake_segment_behavior_run_query(lifecycle_rows, deterioration_rows, cancel_
         if "windowed" in sql:
             return deterioration_rows
         if "state = 'cancel'" in sql:
-            return [cancel_row]
+            # Both the segment and company-wide cancellation queries share
+            # this substring -- only the segment one filters by partner_id.
+            return [cancel_row] if "partner_id = ANY" in sql else [baseline_row or {"total": 0, "cancelled": 0}]
         raise AssertionError(f"unexpected query: {sql[:80]}")
     return run_query
 
@@ -133,7 +135,10 @@ def test_get_segment_behavior_scopes_to_the_cell_and_computes_deltas(monkeypatch
     ]
     monkeypatch.setattr(
         cp.reporting, "run_query",
-        _fake_segment_behavior_run_query([HIGH_LAPSING, MID_LAPSING], deterioration_rows, {"total": 50, "cancelled": 2}),
+        _fake_segment_behavior_run_query(
+            [HIGH_LAPSING, MID_LAPSING], deterioration_rows,
+            {"total": 50, "cancelled": 2}, {"total": 1000, "cancelled": 20},
+        ),
     )
     result = cp.get_segment_behavior("lapsing", "high")
     assert result["status"] == "ok"
@@ -142,7 +147,10 @@ def test_get_segment_behavior_scopes_to_the_cell_and_computes_deltas(monkeypatch
     assert result["recent_revenue"] == 5000.0
     assert result["order_frequency"] == {"recent_per_customer": 5.0, "prior_per_customer": 4.0}
     assert result["basket"] == {"recent_aov": 1000.0, "prior_aov": 1100.0}
-    assert result["cancellation_rate"] == {"orders": 50, "cancelled": 2, "rate_pct": 4.0}
+    # Segment rate 4% vs. baseline 2% -> lift 2.0 ("exposure is 2x higher").
+    assert result["cancellation_rate"] == {
+        "orders": 50, "cancelled": 2, "rate_pct": 4.0, "baseline_rate_pct": 2.0, "lift": 2.0,
+    }
 
 
 def test_get_segment_behavior_rejects_unknown_category(monkeypatch):

@@ -200,13 +200,18 @@ export default function CustomerGrowthOverview({ summary, lifecycle, loading, on
                       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-foreground/60">
                         <span>
                           Cancellation rate ({b.window_days}d): {b.cancellation_rate.rate_pct != null ? `${b.cancellation_rate.rate_pct}%` : "too few orders to show a reliable rate"}
+                          {b.cancellation_rate.lift != null && (
+                            <span className={b.cancellation_rate.lift > 1 ? "text-warning" : b.cancellation_rate.lift < 1 ? "text-good" : ""}>
+                              {" "}&mdash; {b.cancellation_rate.lift.toFixed(1)}&times; the {b.cancellation_rate.baseline_rate_pct}% company-wide rate
+                            </span>
+                          )}
                         </span>
                         {topChannel && totalChannel > 0 && (
                           <span>Mostly {topChannel.label} ({Math.round(topChannel.count / totalChannel * 100)}% of this segment)</span>
                         )}
                       </div>
                       <p className="text-[11px] leading-relaxed text-foreground/50">
-                        Recent vs. the same-length prior window, both ending {formatDate(b.as_of_date)}. A behavior change here is not yet attributed to a cause.
+                        Recent vs. the same-length prior window, both ending {formatDate(b.as_of_date)}. A behavior change or higher exposure here is not yet attributed to a cause.
                       </p>
                     </div>
                   );

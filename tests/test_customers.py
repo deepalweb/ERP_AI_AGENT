@@ -18,10 +18,21 @@ AS_OF = datetime(2026, 10, 5)
 
 
 @pytest.fixture(autouse=True)
-def _no_live_retention_trend(monkeypatch):
-    # retention_trend isn't what these tests check -- stub it out so they
-    # don't depend on a real reporting DB connection.
+def _no_live_reporting_db(monkeypatch):
+    # retention_trend and the at-risk customers' names aren't what most of
+    # these tests check -- stub both out so NO test in this file can
+    # silently depend on a real reporting DB connection being reachable.
+    # Bug caught live, 2026-10-16: two tests here (whichever produced an
+    # at_risk segment) had no mock for fetch_report at all and quietly hit
+    # the real DB -- harmless while it was reachable, a hard failure the
+    # moment it wasn't. Tests that DO care about the real names (just one,
+    # below) override this locally.
     monkeypatch.setattr(customers.intelligence, "get_trend", lambda metric: [])
+
+    async def fake_fetch_report(sql, params=None):
+        return []
+
+    monkeypatch.setattr(customers.reporting, "fetch_report", fake_fetch_report)
 
 
 def _row(partner_id, category, revenue, order_count=5, days_since_last=1):

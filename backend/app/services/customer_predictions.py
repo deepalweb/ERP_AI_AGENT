@@ -1198,14 +1198,39 @@ SEGMENT_CANCELLATION_SQL = customer_order_query(f"""
     FROM aged
 """)
 
+# Same shape as SEGMENT_CANCELLATION_SQL, minus the partner_id filter -- the
+# "lift" baseline (Customer math review, 2026-10-16: lift = segment rate /
+# baseline rate, e.g. "cancellation exposure is 2x higher in this segment").
+# A separate query, not SEGMENT_CANCELLATION_SQL called with every customer's
+# id, since an ~85K-element ANY(:ids) array is a different (worse) query
+# plan than no partner filter at all for the same population.
+ALL_CUSTOMERS_CANCELLATION_SQL = customer_order_query(f"""
+    WITH ordered AS (
+        SELECT so.state, so.date_order
+        FROM customer_orders so
+        WHERE so.state IN {SALE_ORDER_LIVE_STATES + ("cancel",)}
+    ),
+    bounds AS (SELECT MAX(date_order) AS as_of_date FROM customer_orders WHERE state IN {SALE_ORDER_LIVE_STATES}),
+    aged AS (
+        SELECT o.state, EXTRACT(EPOCH FROM (b.as_of_date - o.date_order)) / 86400.0 AS days_ago
+        FROM ordered o CROSS JOIN bounds b
+    )
+    SELECT
+        COUNT(*) FILTER (WHERE days_ago <= :window_days) AS total,
+        COUNT(*) FILTER (WHERE days_ago <= :window_days AND state = 'cancel') AS cancelled
+    FROM aged
+""")
+
 
 def get_segment_behavior(category: str, value_tier: str | None = None) -> dict:
     """One lifecycle x value-tier cell's behavior, not just its roster --
     the "Segment Intelligence" drill-down: historical + recent revenue
     represented, order-frequency and basket-value change (recent vs prior
     DETERIORATION_WINDOW_DAYS_DEFAULT-day windows), cancellation rate in
-    that same recent window, and the segment's channel mix. Deliberately
-    stops short of outlet/product-category concentration and cross-domain
+    that same recent window (plus its LIFT against the same rate over
+    every customer in the same window -- "exposure is 2x higher," not a
+    claim about cause), and the segment's channel mix. Deliberately stops
+    short of outlet/product-category concentration and cross-domain
     "related signals" overlap (availability/cancellation correlation) --
     real asks, but each is its own new query/join, not a extension of
     this one; scoped out rather than half-built here."""
@@ -1258,6 +1283,12 @@ def get_segment_behavior(category: str, value_tier: str | None = None) -> dict:
     cancel_rows = reporting.run_query(SEGMENT_CANCELLATION_SQL, {"ids": segment_partner_ids, "window_days": window_days})
     cancel_total = cancel_rows[0]["total"] if cancel_rows else 0
     cancel_cancelled = cancel_rows[0]["cancelled"] if cancel_rows else 0
+    segment_cancel_rate = cancel_cancelled / cancel_total * 100 if cancel_total >= SECOND_ORDER_MIN_ELIGIBLE else None
+
+    baseline_rows = reporting.run_query(ALL_CUSTOMERS_CANCELLATION_SQL, {"window_days": window_days})
+    baseline_total = baseline_rows[0]["total"] if baseline_rows else 0
+    baseline_cancelled = baseline_rows[0]["cancelled"] if baseline_rows else 0
+    baseline_cancel_rate = baseline_cancelled / baseline_total * 100 if baseline_total >= SECOND_ORDER_MIN_ELIGIBLE else None
 
     return {
         "status": "ok",
@@ -1277,7 +1308,14 @@ def get_segment_behavior(category: str, value_tier: str | None = None) -> dict:
         "cancellation_rate": {
             "orders": cancel_total,
             "cancelled": cancel_cancelled,
-            "rate_pct": round(cancel_cancelled / cancel_total * 100, 1) if cancel_total >= SECOND_ORDER_MIN_ELIGIBLE else None,
+            "rate_pct": round(segment_cancel_rate, 1) if segment_cancel_rate is not None else None,
+            "baseline_rate_pct": round(baseline_cancel_rate, 1) if baseline_cancel_rate is not None else None,
+            # Lift, not causality -- "exposure is Nx higher," never "caused
+            # by." Same evidence discipline the rest of this codebase
+            # already applies (e.g. related_signals.py's cross-metric
+            # corroboration checks).
+            "lift": round(segment_cancel_rate / baseline_cancel_rate, 2)
+            if segment_cancel_rate is not None and baseline_cancel_rate else None,
         },
         "channel_mix": [
             {"id": chid, "label": label, "count": channel_counts[chid]} for chid, label, _icon in CHANNELS
