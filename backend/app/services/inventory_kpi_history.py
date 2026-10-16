@@ -77,7 +77,7 @@ def record_inventory_kpi_snapshot(*, stock_alerts: dict | None, depth: dict | No
             "generated_at": datetime.utcnow().isoformat(),
             "out_of_stock_products": (stock_alerts or {}).get("distinct_out_of_stock_products", 0),
             "low_stock_products": (stock_alerts or {}).get("distinct_low_stock_products", 0),
-            "dead_stock_value": (segments.get("dead_stock") or {}).get("value", 0),
+            "dead_stock_value": (segments.get("potential_dead_stock") or {}).get("value", 0),
             "overstock_value": (segments.get("overstock") or {}).get("value", 0),
             "stuck_count_sessions": len((stuck_counts or {}).get("sessions", [])),
             "stuck_count_value_at_risk": (stuck_counts or {}).get("total_value_at_risk_rs", 0),

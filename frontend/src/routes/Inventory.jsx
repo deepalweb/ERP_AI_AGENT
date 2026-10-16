@@ -23,7 +23,14 @@ import TrendChart from "../charts/TrendChart";
 import AskCelesteButton from "../design/AskCelesteButton";
 import { formatCurrency, formatDate, formatNumber, stripSkuSuffix } from "../format";
 
-const DEPTH_COLOR = { healthy: "var(--status-good)", overstock: "var(--status-warning)", dead_stock: "var(--status-critical)" };
+const DEPTH_COLOR = {
+  healthy: "var(--status-good)",
+  overstock: "var(--status-warning)",
+  slow_moving: "var(--series-2)",
+  potential_dead_stock: "var(--status-critical)",
+  uncertain: "var(--foreground)",
+  never_sold: "var(--foreground)",
+};
 const SHORTAGE_REASON_COLOR = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--accent)"];
 
 function outletShort(name) {
@@ -124,6 +131,7 @@ function ExposureTable({ items }) {
             <th className="pb-2 font-medium">Product</th>
             <th className="pb-2 text-right font-medium">Units</th>
             <th className="pb-2 text-right font-medium">Days of cover</th>
+            <th className="pb-2 text-right font-medium">Last sale</th>
             <th className="pb-2 pl-4 text-right font-medium">Value</th>
           </tr>
         </thead>
@@ -133,6 +141,7 @@ function ExposureTable({ items }) {
               <td className="py-1.5 font-medium text-foreground-strong">{stripSkuSuffix(i.name)}</td>
               <td className="py-1.5 text-right">{formatNumber(i.units)}</td>
               <td className="py-1.5 text-right">{i.days_of_stock != null ? `${formatNumber(i.days_of_stock)}d` : "n/a"}</td>
+              <td className="py-1.5 text-right">{i.days_since_last_sale != null ? `${i.days_since_last_sale}d ago` : "Never sold"}</td>
               <td className="py-1.5 pl-4 text-right text-foreground-strong">{formatCurrency(i.estimated_value)}</td>
             </tr>
           ))}
@@ -425,14 +434,22 @@ export default function Inventory({ onAskCelesteQuestion }) {
           question={`${sa ? formatNumber(sa.distinct_low_stock_products) : "How many"} products are low on stock -- which ones are most urgent?`}
         />
         <KpiTile
-          label="Dead stock"
-          value={segByid.dead_stock ? formatCurrency(segByid.dead_stock.value) : "--"}
-          note={segByid.dead_stock ? `${formatNumber(segByid.dead_stock.count)} SKUs` : undefined}
+          label="Potential dead stock"
+          value={segByid.potential_dead_stock ? formatCurrency(segByid.potential_dead_stock.value) : "--"}
+          note={segByid.potential_dead_stock ? `${formatNumber(segByid.potential_dead_stock.count)} SKUs` : undefined}
           status="critical"
           delta={kpi?.dead_stock_value.delta}
           formatDelta={formatCurrency}
           onAskCeleste={onAskCelesteQuestion}
-          question={`We have ${segByid.dead_stock ? formatCurrency(segByid.dead_stock.value) : "a lot of"} tied up in dead stock -- what's driving it and what should we do about it?`}
+          question={`We have ${segByid.potential_dead_stock ? formatCurrency(segByid.potential_dead_stock.value) : "a lot of"} tied up in potential dead stock -- what's driving it and what should we do about it?`}
+        />
+        <KpiTile
+          label="Slow-moving"
+          value={segByid.slow_moving ? formatCurrency(segByid.slow_moving.value) : "--"}
+          note={segByid.slow_moving ? `${formatNumber(segByid.slow_moving.count)} SKUs` : undefined}
+          status="warning"
+          onAskCeleste={onAskCelesteQuestion}
+          question={`We have ${segByid.slow_moving ? formatCurrency(segByid.slow_moving.value) : "some"} tied up in slow-moving stock -- which products are cooling off, and why?`}
         />
         <KpiTile
           label="Overstock"
@@ -485,16 +502,32 @@ export default function Inventory({ onAskCelesteQuestion }) {
                 segments={[
                   { name: "Healthy", value: segByid.healthy?.value ?? 0, color: DEPTH_COLOR.healthy },
                   { name: "Overstock", value: segByid.overstock?.value ?? 0, color: DEPTH_COLOR.overstock },
-                  { name: "Dead stock", value: segByid.dead_stock?.value ?? 0, color: DEPTH_COLOR.dead_stock },
+                  { name: "Slow-moving", value: segByid.slow_moving?.value ?? 0, color: DEPTH_COLOR.slow_moving },
+                  { name: "Potential dead stock", value: segByid.potential_dead_stock?.value ?? 0, color: DEPTH_COLOR.potential_dead_stock },
+                  { name: "Uncertain", value: segByid.uncertain?.value ?? 0, color: DEPTH_COLOR.uncertain },
                 ]}
                 formatValue={formatCurrency}
               />
             </div>
-            <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <p className="mt-2 text-xs text-foreground/50">
+              Dead stock, slow-moving, and overstock are kept separate on purpose -- they're related but not the same
+              condition. "Uncertain" ({segByid.uncertain ? formatNumber(segByid.uncertain.count) : 0} SKUs) means too
+              little sales history or cost data to classify confidently, not a healthy reading.
+              {segByid.never_sold && segByid.never_sold.count > 0
+                ? ` ${formatNumber(segByid.never_sold.count)} SKUs have never sold at all and are excluded from every segment above.`
+                : ""}
+            </p>
+            <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-3">
               <div>
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Top dead-stock exposure</h3>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Top potential-dead-stock exposure</h3>
                 <div className="mt-2">
-                  <ExposureTable items={(d.dead_stock_items ?? []).slice(0, 8)} />
+                  <ExposureTable items={(d.potential_dead_stock_items ?? []).slice(0, 8)} />
+                </div>
+              </div>
+              <div>
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-foreground/50">Top slow-moving exposure</h3>
+                <div className="mt-2">
+                  <ExposureTable items={(d.slow_moving_items ?? []).slice(0, 8)} />
                 </div>
               </div>
               <div>
@@ -505,11 +538,26 @@ export default function Inventory({ onAskCelesteQuestion }) {
               </div>
             </div>
             <p className="mt-3 text-xs text-foreground/50">
-              Value coverage ({segByid.healthy?.value_coverage}, {segByid.overstock?.value_coverage}, {segByid.dead_stock?.value_coverage} items
+              Value coverage ({segByid.healthy?.value_coverage}, {segByid.overstock?.value_coverage}, {segByid.potential_dead_stock?.value_coverage} items
               with a real cost) means a small share of SKUs are counted by units only, not value -- the totals above are a floor, not an
               overstatement.
             </p>
           </>
+        )}
+      </Section>
+
+      {/* Stock aging -- complementary to the segments above: how long since
+          each in-stock product last sold, independent of its velocity/cover
+          classification (an overstock item and a healthy item can both have
+          sold yesterday). */}
+      <Section title="Stock aging" note="Days since last sale, across all in-stock SKUs">
+        {d && (d.aging_bands ?? []).length > 0 && (
+          <OrderedBarList
+            data={d.aging_bands}
+            nameKey="label"
+            valueKey="count"
+            formatValue={(v) => `${formatNumber(v)} SKUs`}
+          />
         )}
       </Section>
 

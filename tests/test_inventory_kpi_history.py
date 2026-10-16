@@ -10,7 +10,7 @@ from backend.app.services import inventory_kpi_history as kh
 
 STOCK_ALERTS = {"distinct_out_of_stock_products": 1113, "distinct_low_stock_products": 690}
 DEPTH = {"segments": [
-    {"id": "dead_stock", "value": 882433.28},
+    {"id": "potential_dead_stock", "value": 882433.28},
     {"id": "overstock", "value": 12876792.26},
     {"id": "healthy", "value": 69183708.8},
 ]}

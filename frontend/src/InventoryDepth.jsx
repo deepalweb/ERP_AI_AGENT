@@ -2,8 +2,9 @@ import StatTile from "./charts/StatTile";
 import { formatCurrency, formatNumber } from "./format";
 
 const SEGMENT_STATUS = {
-  dead_stock: "critical",
+  potential_dead_stock: "critical",
   overstock: "warning",
+  slow_moving: "warning",
 };
 
 function DeadStockTable({ items }) {
@@ -17,6 +18,7 @@ function DeadStockTable({ items }) {
         <tr>
           <th>Product</th>
           <th>Units</th>
+          <th>Last sale</th>
           <th>Est. value</th>
         </tr>
       </thead>
@@ -25,6 +27,40 @@ function DeadStockTable({ items }) {
           <tr key={item.name}>
             <td>{item.name}</td>
             <td className="anomalies-table-change">{formatNumber(item.units)}</td>
+            <td className="anomalies-table-change">
+              {item.days_since_last_sale != null ? `${item.days_since_last_sale}d ago` : "Never sold"}
+            </td>
+            <td className="anomalies-table-change">
+              {item.estimated_value !== null ? formatCurrency(item.estimated_value) : "n/a"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function SlowMovingTable({ items }) {
+  if (!items || items.length === 0) {
+    return <div className="chart-empty">Nothing slow-moving right now.</div>;
+  }
+
+  return (
+    <table className="anomalies-table">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th>Units</th>
+          <th>Last sale</th>
+          <th>Est. value</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items.map((item) => (
+          <tr key={item.name}>
+            <td>{item.name}</td>
+            <td className="anomalies-table-change">{formatNumber(item.units)}</td>
+            <td className="anomalies-table-change">{item.days_since_last_sale}d ago</td>
             <td className="anomalies-table-change">
               {item.estimated_value !== null ? formatCurrency(item.estimated_value) : "n/a"}
             </td>
@@ -67,7 +103,7 @@ function OverstockTable({ items }) {
 export default function InventoryDepth({ data }) {
   if (!data) return null;
 
-  const { segments, dead_stock_items, overstock_items } = data;
+  const { segments, potential_dead_stock_items, slow_moving_items, overstock_items } = data;
   const segmentById = Object.fromEntries((segments || []).map((s) => [s.id, s]));
 
   return (
@@ -75,7 +111,7 @@ export default function InventoryDepth({ data }) {
       <div className="overview-full-feed-title customer-intel-title">Inventory Depth</div>
 
       <div className="kpi-row inventory-depth-segments">
-        {["dead_stock", "overstock", "healthy"].map((id) => {
+        {["potential_dead_stock", "slow_moving", "overstock", "healthy", "uncertain", "never_sold"].map((id) => {
           const seg = segmentById[id];
           if (!seg) return null;
           return (
@@ -92,8 +128,12 @@ export default function InventoryDepth({ data }) {
 
       <div className="customer-intel-row">
         <div className="chart-card customer-intel-at-risk">
-          <div className="chart-card-title">Dead stock &mdash; top by value</div>
-          <DeadStockTable items={dead_stock_items} />
+          <div className="chart-card-title">Potential dead stock &mdash; top by value</div>
+          <DeadStockTable items={potential_dead_stock_items} />
+        </div>
+        <div className="chart-card customer-intel-at-risk">
+          <div className="chart-card-title">Slow-moving &mdash; top by value</div>
+          <SlowMovingTable items={slow_moving_items} />
         </div>
         <div className="chart-card customer-intel-at-risk">
           <div className="chart-card-title">Overstocked &mdash; top by value</div>

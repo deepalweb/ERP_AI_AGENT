@@ -86,7 +86,7 @@ async def _inventory_domain():
     total_value = sum(segment_value.values())
 
     if total_value:
-        dead_share = segment_value.get("dead_stock", 0) / total_value * 100
+        dead_share = segment_value.get("potential_dead_stock", 0) / total_value * 100
         if dead_share > DEAD_STOCK_VALUE_SHARE_THRESHOLD_PCT:
             score -= 10
             drivers.append(f"Dead stock accounts for {dead_share:.1f}% of inventory value — not moving")

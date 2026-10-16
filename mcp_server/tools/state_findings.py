@@ -233,16 +233,22 @@ def _dead_overstock_finding():
     as_of_date = rows[0]["as_of"]
     measurement.source_as_of(as_of_date, verifies_source=False)
 
-    segment_value = {"dead_stock": 0.0, "overstock": 0.0, "healthy": 0.0}
+    # All 6 segments (inventory.SEGMENT_LABELS) -- this finding only ALERTS
+    # on potential_dead_stock/overstock, but total_value below needs every
+    # bucket's share to sum to the real 100% of valued inventory, not just
+    # the two this finding flags on.
+    segment_value = {key: 0.0 for key in inventory_service.SEGMENT_LABELS}
     dead_stock_candidates = []
     overstock_candidates = []
 
     for r in rows:
         total_qty = float(r["total_qty"] or 0)
         sold_30d = float(r["sold_30d"] or 0)
+        sold_90d = float(r["sold_90d"] or 0)
+        has_sold_ever = r["last_sale_date"] is not None
         days_of_stock = (total_qty / (sold_30d / 30.0)) if sold_30d > 0 else None
-        segment = inventory_service._classify(sold_30d, days_of_stock)
         usable_cost = inventory_service._usable_cost(r["cost"], r["list_price"])
+        segment = inventory_service._classify(sold_30d, sold_90d, has_sold_ever, days_of_stock, usable_cost)
         estimated_value = total_qty * usable_cost if usable_cost is not None else None
         if estimated_value is not None:
             segment_value[segment] += estimated_value
@@ -250,7 +256,7 @@ def _dead_overstock_finding():
         if estimated_value:
             item = {"name": r["product_name"] or "Unknown", "current": round(estimated_value, 2),
                      "delta": round(estimated_value, 2)}
-            if segment == "dead_stock":
+            if segment == "potential_dead_stock":
                 dead_stock_candidates.append(item)
             elif segment == "overstock":
                 overstock_candidates.append(item)
@@ -260,7 +266,7 @@ def _dead_overstock_finding():
         measurement.source_unavailable("Inventory cannot be valued.")
         return None
 
-    dead_share = segment_value["dead_stock"] / total_value * 100
+    dead_share = segment_value["potential_dead_stock"] / total_value * 100
     overstock_share = segment_value["overstock"] / total_value * 100
 
     dead_flagged = dead_share > DEAD_STOCK_VALUE_SHARE_THRESHOLD_PCT
@@ -282,7 +288,7 @@ def _dead_overstock_finding():
                 if top else "Review dead-stock SKUs for liquidation or discounting",
                 "owner": "Merchandising team",
                 "priority": "medium",
-                "expected_benefit": f"Frees up roughly Rs. {segment_value['dead_stock']:,.0f} in tied-up inventory value.",
+                "expected_benefit": f"Frees up roughly Rs. {segment_value['potential_dead_stock']:,.0f} in tied-up inventory value.",
             }
         )
     if overstock_flagged:
@@ -305,7 +311,7 @@ def _dead_overstock_finding():
         b
         for b in [
             {"dimension": "product", "label": "Dead stock by product", "mode": "contribution",
-             "baseline_month": None, "total": round(segment_value["dead_stock"], 2),
+             "baseline_month": None, "total": round(segment_value["potential_dead_stock"], 2),
              "top_contributors": dead_stock_candidates[:5]}
             if dead_flagged else None,
             {"dimension": "product", "label": "Overstock by product", "mode": "contribution",
@@ -318,7 +324,7 @@ def _dead_overstock_finding():
 
     evidence = evidence_engine.build_snapshot_evidence(breakdowns, as_of_date) if breakdowns else None
     priority = _priority_for_share(worst_share, worst_threshold)
-    at_risk_rs = segment_value["dead_stock"] + segment_value["overstock"]
+    at_risk_rs = segment_value["potential_dead_stock"] + segment_value["overstock"]
     impact = {
         "kind": "inventory_value_at_risk",
         "financial_impact_rs": round(at_risk_rs, 2),
