@@ -623,11 +623,16 @@ def build_completed_stock_count_variance_finding(result: dict, metric_id: str):
         # detail-only, carried through so the case-detail page can render
         # a real per-session table instead of only the worst one's prose.
         "sessions": result["sessions"],
-        # Normalized variance -- Rs 500K on Rs 100M counted stock reads
-        # differently from Rs 500K on Rs 5M; raw gross/net above can't say
-        # that. None (not 0) when no session had a priceable line.
+        # Normalized variance, TWO denominators kept distinct (math review,
+        # 2026-10-16): vs_counted can read misleadingly high on a complete
+        # shortage (a line counted to 0 contributes nothing to counted
+        # value despite carrying the full variance) -- vs_system doesn't
+        # have that blind spot, since the system-recorded quantity still
+        # counts. None (not 0) when no session had a priceable line.
         "counted_value_rs": result.get("counted_value_rs"),
-        "variance_rate_pct": result.get("variance_rate_pct"),
+        "system_value_rs": result.get("system_value_rs"),
+        "variance_rate_vs_counted_pct": result.get("variance_rate_vs_counted_pct"),
+        "variance_rate_vs_system_pct": result.get("variance_rate_vs_system_pct"),
         "status": "completed",
     }
 

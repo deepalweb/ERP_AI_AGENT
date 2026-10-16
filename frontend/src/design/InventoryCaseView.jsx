@@ -93,7 +93,8 @@ const RECORD_COLUMNS_COMPLETED_SESSIONS = [
   { key: "completed_at", label: "Completed", format: formatWhen },
   { key: "lines", label: "Lines" },
   { key: "gross_abs_variance_value_rs", label: "Variance", format: (v) => formatCurrency(v) },
-  { key: "variance_rate_pct", label: "Rate", format: (v) => (v == null ? "Unknown" : `${v}%`) },
+  { key: "variance_rate_vs_system_pct", label: "Rate (vs. system qty)", format: (v) => (v == null ? "Unknown" : `${v}%`) },
+  { key: "variance_rate_vs_counted_pct", label: "Rate (vs. counted qty)", format: (v) => (v == null ? "Unknown" : `${v}%`) },
 ];
 
 const RECORD_COLUMNS_DAMAGE_PRODUCTS = [
@@ -194,9 +195,9 @@ function valueLineFor(latest) {
     return `Inventory value tied up: ${formatCurrency(latest.impact.financial_impact_rs)} at the recorded value · not confirmed loss.`;
   }
   if (kind === "completed_stock_count_variance") {
-    const rate = latest.variance_rate_pct;
+    const rate = latest.variance_rate_vs_system_pct;
     return `Estimated variance in completed counts: ${formatCurrency(latest.impact.financial_impact_rs)} at the recorded estimate`
-      + (rate != null ? ` — ${rate}% of counted inventory value` : "") + " · not confirmed loss.";
+      + (rate != null ? ` — ${rate}% of system-recorded inventory value` : "") + " · not confirmed loss.";
   }
   if (kind === "damage_writeoff") {
     const v = latest.impact.valuation_coverage ?? {};

@@ -37,16 +37,25 @@ export function primaryMetricsFor({ c, latest, statusLabel }) {
   }
 
   if (c.metric_id === "completed_stock_count_variance") {
-    // Stock-count variance RATE, 2026-10-16: raw Rs variance alone can't
-    // say whether this is actually bad -- the rate (gross variance over
-    // counted inventory value) is what makes outlets/sessions comparable.
+    // Stock-count variance RATE, 2026-10-16, revised same day after review:
+    // raw Rs variance alone can't say whether this is actually bad, but
+    // ONE rate isn't enough either -- "vs counted" can read misleadingly
+    // high on a complete shortage (a line counted to 0 contributes nothing
+    // to counted value despite carrying the full variance). Both shown,
+    // explicitly labeled by denominator, never blended into one number.
+    const rate = (pct) => (pct != null ? `${pct}%` : "Unknown");
     return [
       { label: "Completed sessions", value: formatNumber(latest.confirm?.current) },
       { label: "Gross variance", value: formatCurrency(latest.impact?.financial_impact_rs) },
       {
-        label: "Variance rate",
-        value: latest.variance_rate_pct != null ? `${latest.variance_rate_pct}%` : "Unknown",
-        caption: "Gross variance as a share of counted inventory value",
+        label: "Variance rate, vs. system qty",
+        value: rate(latest.variance_rate_vs_system_pct),
+        caption: "Against what should have been there -- doesn't understate complete shortages",
+      },
+      {
+        label: "Variance rate, vs. counted qty",
+        value: rate(latest.variance_rate_vs_counted_pct),
+        caption: "Against what's still there now -- can read high on a shortage",
       },
       { label: "Status", value: statusLabel },
     ];

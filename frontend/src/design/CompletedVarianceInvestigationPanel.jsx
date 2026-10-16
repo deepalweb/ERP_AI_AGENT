@@ -40,18 +40,24 @@ export default function CompletedVarianceInvestigationPanel({ latest }) {
         <MetricSummaryCard label="Net variance" value={formatCurrency(netTotal)} caption="Overs and unders offsetting each other" />
         <MetricSummaryCard label="Overs vs. unders" value={`${formatCurrency(positiveTotal)} / ${formatCurrency(negativeTotal)}`} />
         <MetricSummaryCard
-          label="Variance rate"
-          value={formatRate(latest.variance_rate_pct)}
-          caption="Gross variance as a share of counted inventory value -- comparable across outlets, unlike raw Rs"
+          label="Variance rate, vs. system qty"
+          value={formatRate(latest.variance_rate_vs_system_pct)}
+          caption="Against what should have been there -- doesn't understate complete shortages"
+        />
+        <MetricSummaryCard
+          label="Variance rate, vs. counted qty"
+          value={formatRate(latest.variance_rate_vs_counted_pct)}
+          caption="Against what's still there now -- can read misleadingly high on a shortage"
         />
       </div>
       <p className="mt-2 text-xs text-foreground-subtle">
         Gross and net are different real numbers, not a typo -- a store with Rs 50,000 counted over on one line and Rs
         50,000 under on another shows Rs 100,000 gross, Rs 0 net. Neither figure is a shrinkage or loss estimate by
-        itself; see "What the evidence establishes" below for whether picking-loss or damage data overlaps. The
-        variance rate can read above 100% when discrepancies concentrate on lines counted as zero stock (onhand said
-        there should have been stock, the physical count found none) -- those lines contribute nothing to counted
-        value but can carry a large variance.
+        itself; see "What the evidence establishes" below for whether picking-loss or damage data overlaps. The two
+        variance rates use different denominators on purpose: a product counted as zero stock (onhand said there
+        should have been stock, the physical count found none) contributes its full variance to both, but contributes
+        nothing to counted value -- only system value. "Vs. counted" can read above 100% in that case; "vs. system"
+        doesn't have that blind spot.
       </p>
 
       {outletBreakdown?.top_contributors?.length > 0 && (
@@ -83,7 +89,8 @@ export default function CompletedVarianceInvestigationPanel({ latest }) {
               <th className="pb-2 pr-3 font-medium">Lines</th>
               <th className="pb-2 pr-3 font-medium">Net variance</th>
               <th className="pb-2 pr-3 font-medium">Gross variance</th>
-              <th className="pb-2 font-medium">Rate</th>
+              <th className="pb-2 pr-3 font-medium">Rate (vs. system)</th>
+              <th className="pb-2 font-medium">Rate (vs. counted)</th>
             </tr>
           </thead>
           <tbody>
@@ -95,7 +102,8 @@ export default function CompletedVarianceInvestigationPanel({ latest }) {
                 <td className="py-1.5 pr-3 tabular-nums text-foreground">{formatNumber(s.lines)}</td>
                 <td className="py-1.5 pr-3 tabular-nums text-foreground">{formatCurrency(s.net_variance_value_rs)}</td>
                 <td className="py-1.5 pr-3 tabular-nums text-foreground">{formatCurrency(s.gross_abs_variance_value_rs)}</td>
-                <td className="py-1.5 tabular-nums text-foreground-subtle">{formatRate(s.variance_rate_pct)}</td>
+                <td className="py-1.5 pr-3 tabular-nums text-foreground-subtle">{formatRate(s.variance_rate_vs_system_pct)}</td>
+                <td className="py-1.5 tabular-nums text-foreground-subtle">{formatRate(s.variance_rate_vs_counted_pct)}</td>
               </tr>
             ))}
           </tbody>

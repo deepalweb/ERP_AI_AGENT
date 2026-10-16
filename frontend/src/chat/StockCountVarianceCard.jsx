@@ -52,9 +52,15 @@ export default function StockCountVarianceCard({ result }) {
           <span className="tool-card-value">{formatCurrency(result.net_variance_value_rs)}</span>
         </div>
         <div>
-          <span className="tool-card-label">Variance rate</span>
+          <span className="tool-card-label">Variance rate (vs. system qty)</span>
           <span className="tool-card-value">
-            {result.variance_rate_pct != null ? `${result.variance_rate_pct}%` : "Unknown"}
+            {result.variance_rate_vs_system_pct != null ? `${result.variance_rate_vs_system_pct}%` : "Unknown"}
+          </span>
+        </div>
+        <div>
+          <span className="tool-card-label">Variance rate (vs. counted qty)</span>
+          <span className="tool-card-value">
+            {result.variance_rate_vs_counted_pct != null ? `${result.variance_rate_vs_counted_pct}%` : "Unknown"}
           </span>
         </div>
       </div>

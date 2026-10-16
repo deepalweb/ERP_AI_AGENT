@@ -1570,12 +1570,16 @@ def get_case_detail(case_id: str) -> dict | None:
             # in one recommendation string. Detail-only, same reasoning as
             # trend above. None for every other finding shape.
             "sessions": latest_snapshot.get("sessions"),
-            # Stock-count variance RATE, 2026-10-16: gross/net variance
-            # normalized by counted inventory value -- CompletedVariance
-            # InvestigationPanel.jsx reads these directly off `latest`.
-            # None (not 0) when no session had a priceable line.
+            # Stock-count variance RATE, 2026-10-16, revised same day after
+            # review: TWO denominators, kept distinct -- see stock_counts.
+            # COMPLETED_SESSION_LINES_SQL's own comment for why "vs counted"
+            # alone understates exactly the worst shortages. InventoryCase
+            # View.jsx and caseTemplates.js read these directly off
+            # `latest`. None (not 0) when no session had a priceable line.
             "counted_value_rs": latest_snapshot.get("counted_value_rs"),
-            "variance_rate_pct": latest_snapshot.get("variance_rate_pct"),
+            "system_value_rs": latest_snapshot.get("system_value_rs"),
+            "variance_rate_vs_counted_pct": latest_snapshot.get("variance_rate_vs_counted_pct"),
+            "variance_rate_vs_system_pct": latest_snapshot.get("variance_rate_vs_system_pct"),
             # Case Detail V3 bug fix: ControlsInvestigationPanel.jsx and
             # IncidentInvestigationPanel.jsx both read these directly off
             # `latest`, but they were never added to this whitelist -- so
