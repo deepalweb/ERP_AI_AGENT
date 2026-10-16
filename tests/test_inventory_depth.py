@@ -141,3 +141,67 @@ async def test_get_inventory_depth_handles_no_rows(monkeypatch):
     assert result["segments"] == []
     assert result["aging_bands"] == []
     assert result["potential_dead_stock_items"] == []
+
+
+# ---------------------------------------------------------------------------
+# get_inventory_turnover -- InventoryTurnover = COGS / current inventory
+# value (annualized); DaysInventoryOutstanding = 365 / turnover. COGS
+# reuses margin.get_gross_margin(); current inventory value reuses
+# get_inventory_depth() -- both monkeypatched directly here rather than
+# re-mocking their own SQL, which each already has its own test coverage.
+
+def _fake_margin(cogs, coverage_pct=95.0, period="Last 90 days (2026-07-18 to 2026-10-16)"):
+    return lambda period_arg=None, start_date=None, end_date=None: {
+        "period": period, "cost_of_goods_sold": cogs, "cost_data_coverage_pct": coverage_pct,
+    }
+
+
+async def test_get_inventory_turnover_computes_annualized_turnover_and_dio(monkeypatch):
+    monkeypatch.setattr(inventory.margin, "get_gross_margin", _fake_margin(5_000_000.0))
+    monkeypatch.setattr(inventory, "_period_bounds", lambda *a, **k: ("2026-07-18", "2026-10-16"))
+
+    async def fake_get_inventory_depth():
+        return {"segments": [{"value": 1_000_000.0}, {"value": 500_000.0}]}
+
+    monkeypatch.setattr(inventory, "get_inventory_depth", fake_get_inventory_depth)
+
+    result = await inventory.get_inventory_turnover(period="90d")
+    assert result["cost_of_goods_sold"] == 5_000_000.0
+    assert result["current_inventory_value"] == 1_500_000.0
+    assert result["days_in_window"] == 91  # Jul 18 to Oct 16, inclusive
+    expected_turnover = round((5_000_000.0 / 1_500_000.0) * (365 / 91), 2)
+    assert result["inventory_turnover_annualized"] == expected_turnover
+    assert result["days_inventory_outstanding"] == round(365 / expected_turnover, 1)
+
+
+async def test_get_inventory_turnover_is_none_without_cogs_or_inventory_value(monkeypatch):
+    monkeypatch.setattr(inventory.margin, "get_gross_margin", _fake_margin(0.0, coverage_pct=None))
+    monkeypatch.setattr(inventory, "_period_bounds", lambda *a, **k: ("2026-09-01", "2026-09-30"))
+
+    async def fake_get_inventory_depth():
+        return {"segments": []}
+
+    monkeypatch.setattr(inventory, "get_inventory_depth", fake_get_inventory_depth)
+
+    result = await inventory.get_inventory_turnover(period="2026-09")
+    assert result["inventory_turnover_annualized"] is None
+    assert result["days_inventory_outstanding"] is None
+
+
+async def test_get_inventory_turnover_defaults_to_90d_window_when_nothing_specified(monkeypatch):
+    captured = {}
+
+    def fake_period_bounds(period, start_date, end_date):
+        captured["period"] = period
+        return ("2026-07-18", "2026-10-16")
+
+    monkeypatch.setattr(inventory, "_period_bounds", fake_period_bounds)
+    monkeypatch.setattr(inventory.margin, "get_gross_margin", _fake_margin(0.0, coverage_pct=None))
+
+    async def fake_get_inventory_depth():
+        return {"segments": []}
+
+    monkeypatch.setattr(inventory, "get_inventory_depth", fake_get_inventory_depth)
+
+    await inventory.get_inventory_turnover()
+    assert captured["period"] == inventory.DEFAULT_TURNOVER_WINDOW

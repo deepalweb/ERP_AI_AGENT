@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   fetchInventoryDepth,
   fetchInventoryKpiHistory,
+  fetchInventoryTurnover,
   fetchStockAlerts,
   fetchTopProductStockCoverage,
   fetchStuckStockCounts,
@@ -298,6 +299,7 @@ function CaseRow({ item, onAskCeleste }) {
 export default function Inventory({ onAskCelesteQuestion }) {
   const depth = useQuery({ queryKey: ["inventoryDepth"], queryFn: fetchInventoryDepth });
   const kpiHistory = useQuery({ queryKey: ["inventoryKpiHistory"], queryFn: fetchInventoryKpiHistory });
+  const turnover = useQuery({ queryKey: ["inventoryTurnover"], queryFn: fetchInventoryTurnover });
   const stockAlerts = useQuery({ queryKey: ["stockAlerts"], queryFn: fetchStockAlerts });
   const stockCoverage = useQuery({
     queryKey: ["topProductStockCoverage"],
@@ -558,6 +560,39 @@ export default function Inventory({ onAskCelesteQuestion }) {
             valueKey="count"
             formatValue={(v) => `${formatNumber(v)} SKUs`}
           />
+        )}
+      </Section>
+
+      {/* Inventory efficiency -- turnover / DIO */}
+      <Section title="Inventory efficiency" note={turnover.data?.period}>
+        {turnover.isLoading && <p className="text-sm text-foreground/50">Loading&hellip;</p>}
+        {turnover.data?.status === "error" && <p className="text-sm text-foreground/50">Couldn&rsquo;t load inventory turnover.</p>}
+        {turnover.data?.status === "ok" && (
+          <>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <KpiTile
+                label="Inventory turnover"
+                value={turnover.data.inventory_turnover_annualized != null ? `${turnover.data.inventory_turnover_annualized}x/yr` : "--"}
+                note="Annualized from the trailing window"
+              />
+              <KpiTile
+                label="Days inventory outstanding"
+                value={turnover.data.days_inventory_outstanding != null ? `${turnover.data.days_inventory_outstanding}d` : "--"}
+                note="How long current stock would last at this sell-through rate"
+              />
+              <KpiTile
+                label="Cost of goods sold"
+                value={formatCurrency(turnover.data.cost_of_goods_sold)}
+                note={`Over ${turnover.data.days_in_window} days`}
+              />
+            </div>
+            <p className="mt-3 text-xs text-foreground/50">
+              Uses today&rsquo;s inventory value as a stand-in for the period average (this app doesn&rsquo;t yet
+              track total inventory value historically, only dead-stock/overstock) -- a real approximation, not a
+              true average. Cost data covers {turnover.data.cost_data_coverage_pct ?? "n/a"}% of revenue in this
+              window.
+            </p>
+          </>
         )}
       </Section>
 

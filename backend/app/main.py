@@ -664,6 +664,19 @@ async def inventory_depth():
         return {"status": "error", "detail": "Could not load inventory depth."}
 
 
+@app.get("/inventory/turnover")
+async def inventory_turnover(period: str | None = None, start_date: str | None = None, end_date: str | None = None):
+    """Inventory turnover (annualized) and days inventory outstanding --
+    see backend/app/services/inventory.py get_inventory_turnover() for the
+    honest substitution it makes (today's inventory value stands in for a
+    true period average, which this app doesn't track historically)."""
+    try:
+        return {"status": "ok", **await inventory.get_inventory_turnover(period, start_date, end_date)}
+    except Exception:
+        logger.exception("inventory turnover failed")
+        return {"status": "error", "detail": "Could not load inventory turnover."}
+
+
 @app.get("/inventory/kpi-history")
 async def inventory_kpi_history_route():
     """The Inventory page's KPI strip, plus a delta against the prior day's

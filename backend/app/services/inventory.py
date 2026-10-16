@@ -22,8 +22,12 @@ comfortably separates "genuinely slow" from "too little data to trust a
 rate at all" without being arbitrary.
 """
 
+from datetime import date
+
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
+from backend.app.services import margin
+from mcp_server.tools.sales import _period_bounds
 
 OVERSTOCK_DAYS = 90  # p90 of the days-of-stock distribution across in-stock retail products
 MIN_RELIABLE_UNITS_90D = 5
@@ -284,3 +288,52 @@ async def get_inventory_by_outlet():
         }
         for r in rows
     ]
+
+
+DEFAULT_TURNOVER_WINDOW = "90d"
+
+
+async def get_inventory_turnover(period: str | None = None, start_date: str | None = None, end_date: str | None = None):
+    """InventoryTurnover = COGS / InventoryValue (annualized); DaysInventory
+    Outstanding = 365 / InventoryTurnover -- the classical formulas, with
+    one honest substitution: the textbook denominator is AVERAGE inventory
+    value over the period, but this app has no historical total-inventory-
+    value series to average (inventory_kpi_history.py tracks dead-stock/
+    overstock value daily, not the total) -- so this uses TODAY's snapshot
+    instead, labeled current_inventory_value, never "average", so it's
+    never read as more than it is.
+
+    COGS reuses margin.get_gross_margin() -- the exact figure gross-margin
+    reporting already relies on, not a second definition. Defaults to a
+    trailing 90-day window (DEFAULT_TURNOVER_WINDOW): long enough to
+    smooth day-to-day sales noise, short enough that "today's inventory
+    value" is still a reasonable stand-in for the period's average in a
+    fast-moving grocery business."""
+    if period is None and start_date is None and end_date is None:
+        period = DEFAULT_TURNOVER_WINDOW
+    start, end = _period_bounds(period, start_date, end_date)
+    days_in_window = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+
+    margin_result = margin.get_gross_margin(period, start_date, end_date)
+    depth = await get_inventory_depth()
+
+    cogs = margin_result["cost_of_goods_sold"]
+    current_inventory_value = round(sum(s["value"] for s in depth["segments"]), 2)
+
+    turnover_annualized = None
+    days_inventory_outstanding = None
+    if cogs and current_inventory_value:
+        turnover_annualized = round((cogs / current_inventory_value) * (365 / days_in_window), 2)
+        days_inventory_outstanding = round(365 / turnover_annualized, 1)
+
+    return {
+        "period": margin_result["period"],
+        "start_date": start,
+        "end_date": end,
+        "days_in_window": days_in_window,
+        "cost_of_goods_sold": cogs,
+        "current_inventory_value": current_inventory_value,
+        "inventory_turnover_annualized": turnover_annualized,
+        "days_inventory_outstanding": days_inventory_outstanding,
+        "cost_data_coverage_pct": margin_result["cost_data_coverage_pct"],
+    }

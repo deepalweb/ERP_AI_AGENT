@@ -36,6 +36,12 @@ export async function fetchInventoryDepth() {
   return readResponse(response);
 }
 
+export async function fetchInventoryTurnover() {
+  const response = await apiFetch(`${API_BASE_URL}/inventory/turnover`);
+
+  return readResponse(response);
+}
+
 export async function fetchOrdersByHour() {
   const response = await apiFetch(`${API_BASE_URL}/dashboard/orders-by-hour`);
 
