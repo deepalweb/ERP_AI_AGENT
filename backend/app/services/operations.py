@@ -4,7 +4,7 @@ investigation.py already investigates), a company-wide operational KPI rollup,
 a unified per-branch scorecard, and a fulfillment-stage bottleneck breakdown.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 import anyio
 
@@ -113,6 +113,85 @@ WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS
 GROUP BY 1
 """
 
+# picker_id is a real FK to hr_employee, populated on ~99.9% of orders
+# (verified live, 2026-10-21: 519,519/520,075 all-time). packer_id is the
+# same kind of column but is 0% populated company-wide -- never recorded --
+# so there is no packer-side equivalent of this query.
+PICKER_THROUGHPUT_SQL = f"""
+SELECT COALESCE(rs.name, 'Unknown store') AS outlet, he.name AS picker_name, COUNT(*) AS orders
+FROM sale_order so
+LEFT JOIN res_store rs ON rs.id = so.store_id
+LEFT JOIN hr_employee he ON he.id = so.picker_id
+WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
+  AND so.picker_id IS NOT NULL
+  AND so.date_order >= :start AND so.date_order < :end
+GROUP BY rs.name, he.name
+"""
+
+# No per-item scan timestamp exists anywhere in this schema -- verified
+# live, 2026-10-21: stock_move_line.date is identical across every line of
+# an order (confirmed on 10 sampled orders, 0 exceptions), it's the bulk
+# picking-completion time copied onto every line, not an incremental
+# per-item scan. fresh_scan_log has real per-item timestamps but is a
+# different workflow entirely (produce weighing/packing tied to
+# manufacturing orders, not customer-order picking).
+#
+# So this is a derived estimate, not a measurement: SUM(order duration) /
+# SUM(item count) across MANY orders for one picker -- aggregate ratio, not
+# an average of per-order ratios (same reasoning as the stock-count
+# variance rate: a single order's duration/item-count is noisy -- sampled
+# orders ranged 0.7s/item to 35s/item -- so this is only shown pooled over
+# a picker's whole recent history, never per order.
+#
+# "item" = one order line (one distinct product on the order), not one
+# physical unit -- grabbing 3 units of the same SKU in one motion is
+# modeled as one pick, not three.
+#
+# Two sanity filters, both sized against the real distribution, not a round
+# number (verified live, 2026-10-21, 30-day window, 88,665 qualifying orders):
+#   - Ceiling 30 min: real p99 is 865s (~14.4min); a flat 2h ceiling let 778
+#     orders (0.9%) through -- a picker who leaves one order open for a
+#     phone call/break without logging out would otherwise get that whole
+#     gap added to their total, silently doubling their pace on a handful
+#     of "ghost pause" orders. 30 min is just above 2x the real p99.
+#   - Floor 10s AND >=2s/item: 10,501 orders (11.8%!) complete in under
+#     10s, and 5,330 compute under 2s/item -- almost certainly cancelled-
+#     mid-pick or already-staged orders rushed through, not genuine picks;
+#     large enough a share that leaving them in would materially drag every
+#     picker's average down.
+PICKER_PACE_MAX_DURATION_S = 1800
+PICKER_PACE_MIN_DURATION_S = 10
+PICKER_PACE_MIN_SECONDS_PER_ITEM = 2.0
+
+PICKER_PACE_SQL = f"""
+WITH orders AS (
+    SELECT so.id, so.store_id, so.picker_id,
+           EXTRACT(EPOCH FROM (so.picking_datetime - so.picking_start_datetime)) AS duration_s,
+           COUNT(sol.id) AS item_count
+    FROM sale_order so
+    JOIN sale_order_line sol ON sol.order_id = so.id AND sol.product_uom_qty > 0
+    WHERE so.state IN {SALE_ORDER_LIVE_STATES} AND so.store_id IN {CELESTE_STORE_IDS}
+      AND so.picker_id IS NOT NULL
+      AND so.picking_start_datetime IS NOT NULL AND so.picking_datetime IS NOT NULL
+      AND so.picking_datetime > so.picking_start_datetime
+      AND so.date_order >= :start AND so.date_order < :end
+    GROUP BY so.id, so.store_id, so.picker_id, so.picking_start_datetime, so.picking_datetime
+    HAVING COUNT(sol.id) > 0
+      AND EXTRACT(EPOCH FROM (so.picking_datetime - so.picking_start_datetime))
+          BETWEEN {PICKER_PACE_MIN_DURATION_S} AND {PICKER_PACE_MAX_DURATION_S}
+      AND EXTRACT(EPOCH FROM (so.picking_datetime - so.picking_start_datetime)) / COUNT(sol.id)
+          >= {PICKER_PACE_MIN_SECONDS_PER_ITEM}
+)
+SELECT COALESCE(rs.name, 'Unknown store') AS outlet, he.name AS picker_name,
+       SUM(o.duration_s) AS total_duration_s, SUM(o.item_count) AS total_items, COUNT(*) AS order_count
+FROM orders o
+LEFT JOIN res_store rs ON rs.id = o.store_id
+LEFT JOIN hr_employee he ON he.id = o.picker_id
+GROUP BY rs.name, he.name
+"""
+
+MIN_PACE_ORDERS = 20
+
 STAGE_LABELS = [
     ("Picking", "median_picking_min"),
     ("Handoff to packing", "median_handoff_min"),
@@ -172,6 +251,28 @@ def get_stage_timing_by_store(flagged_stores: list[str], month_key: str):
     }
 
 
+AS_OF_SQL = f"""
+SELECT MAX(date_order) AS as_of FROM sale_order
+WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
+"""
+
+
+def _trailing_window_bounds(days: int):
+    """Trailing N days anchored to the latest real order (not wall-clock
+    "today"), same as_of principle as operation_flow.py's FLOW_SQL -- user
+    asked (2026-10-21) for the Operations page's branch/funnel/picker
+    detail to cover "all days in database" rather than be dropped to the
+    last complete calendar month, which is what _month_bounds gave it."""
+    rows = reporting.run_query(AS_OF_SQL)
+    as_of = rows[0]["as_of"] if rows else None
+    if as_of is None:
+        return None, None, None
+    as_of_date = as_of.date()
+    start = as_of_date - timedelta(days=days - 1)
+    end = as_of_date + timedelta(days=1)
+    return start.isoformat(), end.isoformat(), as_of_date
+
+
 def _month_bounds(month_key: str):
     year, month = map(int, month_key.split("-"))
     start = date(year, month, 1)
@@ -193,6 +294,81 @@ def _headline_from_trend(trend: list[dict]):
     if previous and previous["value"]:
         growth_pct = round((headline["value"] - previous["value"]) / previous["value"] * 100, 2)
     return headline["value"], growth_pct, headline["month"]
+
+
+def _merge_picker_pace(picker_rows: list[dict], pace_rows: list[dict]) -> list[dict]:
+    """Pairs each picker's order count with their avg_seconds_per_item (None
+    below MIN_PACE_ORDERS -- too few orders to trust an average, same
+    reasoning as inventory.py's MIN_RELIABLE_UNITS_90D). Pure/sync so it's
+    testable without mocking the reporting DB."""
+    pace_by_key = {
+        (r["outlet"] or "Unknown store", r["picker_name"] or "Unresolved picker"): r
+        for r in pace_rows
+    }
+    by_outlet: dict[str, list] = {}
+    for r in picker_rows:
+        outlet = r["outlet"] or "Unknown store"
+        name = r["picker_name"] or "Unresolved picker"
+        pace = pace_by_key.get((outlet, name))
+        avg_seconds_per_item = None
+        pace_order_count = int(pace["order_count"] or 0) if pace else 0
+        if pace and pace_order_count >= MIN_PACE_ORDERS:
+            total_items = float(pace["total_items"] or 0)
+            if total_items > 0:
+                avg_seconds_per_item = round(float(pace["total_duration_s"]) / total_items, 1)
+        by_outlet.setdefault(outlet, []).append({
+            "name": name, "orders": int(r["orders"] or 0),
+            "avg_seconds_per_item": avg_seconds_per_item,
+            "pace_order_count": pace_order_count,
+        })
+    return [
+        {"outlet": outlet, "pickers": sorted(rows, key=lambda row: -row["orders"])[:10]}
+        for outlet, rows in sorted(by_outlet.items())
+    ]
+
+
+def _add_performance_scores(outlet_groups: list[dict]) -> list[dict]:
+    """A single relative performance percentage per picker, scored against
+    the best picker in the SAME outlet group that month (not a fixed
+    target -- none exists in the data) -- user asked for this 2026-11-03.
+
+    Volume score: this picker's orders / the group's best order count.
+    Pace score: the group's best (lowest) avg_seconds_per_item / this
+    picker's own -- inverted because lower is better -- scored ONLY
+    against pickers who cleared MIN_PACE_ORDERS in _merge_picker_pace
+    above. Comparing against a pace figure already too noisy to show
+    (avg_seconds_per_item is None) would just move that same problem one
+    step downstream into a false-precision percentage.
+
+    Combined score averages whichever of the two are actually available
+    for this picker. A picker below MIN_PACE_ORDERS has no pace score, so
+    their combined score silently becomes volume-only -- combined_basis
+    says which, so a caller never presents a partial number as if it were
+    the full picture."""
+    for group in outlet_groups:
+        pickers = group["pickers"]
+        best_orders = max((p["orders"] for p in pickers), default=0)
+        reliable_paces = [p["avg_seconds_per_item"] for p in pickers if p["avg_seconds_per_item"] is not None]
+        best_pace = min(reliable_paces) if reliable_paces else None
+        for p in pickers:
+            volume_pct = round(p["orders"] / best_orders * 100, 1) if best_orders else None
+            pace_pct = (
+                round(best_pace / p["avg_seconds_per_item"] * 100, 1)
+                if best_pace is not None and p["avg_seconds_per_item"] is not None
+                else None
+            )
+            p["volume_score_pct"] = volume_pct
+            p["pace_score_pct"] = pace_pct
+            if volume_pct is not None and pace_pct is not None:
+                p["combined_score_pct"] = round((volume_pct + pace_pct) / 2, 1)
+                p["combined_score_basis"] = "volume_and_pace"
+            elif volume_pct is not None:
+                p["combined_score_pct"] = volume_pct
+                p["combined_score_basis"] = "volume_only"
+            else:
+                p["combined_score_pct"] = None
+                p["combined_score_basis"] = None
+    return outlet_groups
 
 
 @reporting.ttl_cache(seconds=300)
@@ -262,8 +438,16 @@ async def get_fulfillment_summary():
     branches = []
     funnel_stages = []
     funnel_wait_times = []
-    if headline_month:
-        start, end = _month_bounds(headline_month)
+    detail_window_start, detail_window_end, detail_window_as_of = _trailing_window_bounds(30)
+    detail_window_label = None
+    detail_orders = 0
+    detail_revenue = 0.0
+    detail_cancellation_rate_pct = 0.0
+    detail_delayed_rate_pct = 0.0
+    detail_delayed_count = 0
+    if detail_window_as_of:
+        start, end = detail_window_start, detail_window_end
+        detail_window_label = f"{date.fromisoformat(start):%b %d} – {detail_window_as_of:%b %d, %Y}"
         sql_results: dict = {}
 
         async def _sql(key, query):
@@ -290,6 +474,15 @@ async def get_fulfillment_summary():
             }
             for r in branch_rows
         ]
+        detail_orders = sum(int(r["orders"] or 0) for r in branch_rows)
+        detail_revenue = round(sum(float(r["revenue"] or 0) for r in branch_rows), 2)
+        total_orders_sum = sum(int(r["total_orders"] or 0) for r in branch_rows)
+        cancelled_sum = sum(int(r["cancelled"] or 0) for r in branch_rows)
+        deliveries_sum = sum(int(r["deliveries"] or 0) for r in branch_rows)
+        delayed_sum = sum(int(r["delayed"] or 0) for r in branch_rows)
+        detail_cancellation_rate_pct = round(cancelled_sum / total_orders_sum * 100, 2) if total_orders_sum else 0.0
+        detail_delayed_rate_pct = round(delayed_sum / deliveries_sum * 100, 2) if deliveries_sum else 0.0
+        detail_delayed_count = delayed_sum
 
         funnel_rows = sql_results["funnel"]
         f = funnel_rows[0] if funnel_rows else {}
@@ -330,4 +523,58 @@ async def get_fulfillment_summary():
         "branches": branches,
         "funnel_stages": funnel_stages,
         "funnel_wait_times": funnel_wait_times,
+        "detail_window_start": detail_window_start,
+        "detail_window_end": detail_window_end,
+        "detail_window_label": detail_window_label,
+        "detail_orders": detail_orders,
+        "detail_revenue": detail_revenue,
+        "detail_cancellation_rate_pct": detail_cancellation_rate_pct,
+        "detail_delayed_rate_pct": detail_delayed_rate_pct,
+        "detail_delayed_count": detail_delayed_count,
+    }
+
+
+async def get_picker_summary(month: str | None = None) -> dict:
+    """Picker order volume & pace, one calendar month (1st through its last
+    day) at a time -- decoupled from get_fulfillment_summary()'s own 30-day
+    trailing window (branches/funnel/median) so switching months here never
+    re-runs those other five queries.
+
+    month defaults to the month containing the LATEST available order, not
+    wall-clock "today" -- same as_of principle every other window in this
+    file already uses, and the one genuinely confirmed live this session
+    (2026-10-31): the reporting mirror can lag the real calendar by days,
+    so a wall-clock default could silently default to a month with zero
+    data in it yet."""
+    as_of_rows = reporting.run_query(AS_OF_SQL)
+    as_of = as_of_rows[0]["as_of"] if as_of_rows else None
+    if as_of is None:
+        return {"month": month, "window_label": None, "is_current_month": False, "pickers_by_outlet": []}
+
+    as_of_date = as_of.date()
+    month = month or as_of_date.strftime("%Y-%m")
+    start, end = _month_bounds(month)
+    month_date = date.fromisoformat(start)
+    is_current_month = as_of_date < date.fromisoformat(end)
+    last_included_day = min(as_of_date, date.fromisoformat(end) - timedelta(days=1))
+    window_label = (
+        f"{month_date:%b %Y} (through {last_included_day.day})" if is_current_month else f"{month_date:%b %Y}"
+    )
+
+    sql_results: dict = {}
+
+    async def _sql(key, query):
+        sql_results[key] = await reporting.fetch_report(query, {"start": start, "end": end})
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(_sql, "pickers", PICKER_THROUGHPUT_SQL)
+        tg.start_soon(_sql, "picker_pace", PICKER_PACE_SQL)
+
+    return {
+        "month": month,
+        "window_label": window_label,
+        "is_current_month": is_current_month,
+        "pickers_by_outlet": _add_performance_scores(
+            _merge_picker_pace(sql_results["pickers"], sql_results["picker_pace"])
+        ),
     }

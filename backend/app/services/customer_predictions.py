@@ -19,7 +19,7 @@ from sqlalchemy import text
 from backend.app.db import appdb, reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from backend.app.services.order_history import customer_order_query
-from mcp_server.tools import intelligence
+from mcp_server.tools import intelligence, measurement
 
 MIN_ORDER_COUNT = 3
 HIGH_CONFIDENCE_ORDER_COUNT = 10
@@ -294,8 +294,7 @@ def record_predictions(predictions: list[dict]) -> None:
     connections for a table this size)."""
     _ensure_schema()
     generated_at = datetime.utcnow().isoformat()
-    engine = appdb.get_engine()
-    with engine.begin() as conn:
+    with appdb.connection_for_bulk_write() as conn:
         conn.execute(text("DELETE FROM customer_predictions_v2"))
         if predictions:
             conn.execute(
@@ -1396,8 +1395,7 @@ def record_lifecycle_snapshot(rows: list[dict]) -> None:
     )
     if existing[0]["n"]:
         return
-    engine = appdb.get_engine()
-    with engine.begin() as conn:
+    with appdb.connection_for_bulk_write() as conn:
         conn.execute(
             text("""
                 INSERT INTO customer_lifecycle_snapshots (partner_id, as_of_date, category, value_tier, revenue)
@@ -1544,7 +1542,7 @@ def get_second_order_intelligence() -> dict | None:
     }
 
 
-def build_second_order_decline_finding() -> list[dict]:
+def _second_order_decline_finding():
     """Second-order conversion by acquisition cohort, run through the SAME
     anomaly rule intelligence.detect_anomaly() applies to every registered
     trend metric -- reused directly rather than inventing a new threshold,
@@ -1557,12 +1555,20 @@ def build_second_order_decline_finding() -> list[dict]:
     to treat as historical fact even while the order feed is stale).
     Checked live, 2026-10-13: 8 mature cohorts, a real, substantial decline
     from 69.1% (2026-03) to 28.6% (2026-09) -- this is not a theoretical
-    detector, it has something to catch today. Returns a plain list (empty,
-    or one finding) for brain.py's measurement.combine([...]) -- the same
-    shape every other state_findings.py builder returns."""
+    detector, it has something to catch today."""
     result = get_second_order_intelligence()
     if result is None:
-        return []
+        measurement.source_unavailable("No mature acquisition cohorts are available yet.")
+        return None
+    # The cohort table and the anomaly check both rerun live, right now, off
+    # already-historical order data -- so "today" genuinely is this
+    # measurement's freshness, independent of whether the live order feed
+    # itself is current. Without this, a month where conversion stays
+    # normal can never be verified: run_snapshot() leaves freshness
+    # "unknown" by default, which measurement.healthy() never accepts, so
+    # this case would stay open forever once opened (same bug class as
+    # state_findings.py's _cost_coverage_control_finding).
+    measurement.source_as_of(date.today().isoformat())
 
     trend = [
         {
@@ -1574,14 +1580,14 @@ def build_second_order_decline_finding() -> list[dict]:
     ]
     anomaly = intelligence.detect_anomaly(trend, "higher_is_good")
     if anomaly["category"] not in ("critical", "opportunity"):
-        return []
+        return None
 
     cohort = next(c for c in result["cohorts"] if c["month"] == anomaly["latest_month"])
     window = cohort["windows"]["30"]
     moved = "fallen" if anomaly["category"] == "critical" else "risen"
     persistence = intelligence.classify_persistence(trend, "higher_is_good")
 
-    return [{
+    return {
         "id": f"second_order_conversion_decline-{anomaly['latest_month']}",
         "metric_id": "second_order_conversion_rate_30d",
         "domain": "order_customer",
@@ -1623,7 +1629,13 @@ def build_second_order_decline_finding() -> list[dict]:
         },
         "recommendations": [],
         "status": "completed",
-    }]
+    }
+
+
+def build_second_order_decline_finding() -> measurement.FindingBatch:
+    return measurement.combine([
+        measurement.run_snapshot("second_order_conversion_rate_30d", _second_order_decline_finding),
+    ])
 
 
 _LIFECYCLE_SCHEMA_READY = False

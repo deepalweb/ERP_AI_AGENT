@@ -287,10 +287,22 @@ def _completed_variance_result(session_count, gross, net, sessions=None, store_b
     return {
         "period": "Last 7 days (2026-09-09 to 2026-09-15)",
         "start_date": "2026-09-09", "end_date": "2026-09-15",
+        "outlet_scope": "All Celeste outlets",
+        "calculated_at": "2026-09-15T12:00:00",
         "session_count": session_count,
         "sessions": sessions or [],
         "net_variance_value_rs": net,
         "gross_abs_variance_value_rs": gross,
+        "counted_value_rs": 100_000.0,
+        "system_value_rs": 120_000.0,
+        "variance_rate_vs_counted_pct": round(gross / 100_000 * 100, 2) if gross else None,
+        "variance_rate_vs_system_pct": round(gross / 120_000 * 100, 2) if gross else None,
+        "valuation_coverage": {
+            "total_lines": 10, "priced_lines": 7, "source_cost_lines": 5,
+            "catalog_estimate_lines": 2, "no_cost_lines": 3, "line_coverage_pct": 70.0,
+            "variance_value_covered_rs": gross * 0.8,
+            "variance_value_coverage_pct": 80.0 if gross else None,
+        },
         "breakdowns": [
             {"dimension": "store", "label": "x", "mode": "contribution", "baseline_month": None,
              "total": gross, "top_contributors": store_breakdown or []},
@@ -335,7 +347,10 @@ def test_completed_variance_finding_fires_above_threshold_with_real_priority_tie
     )
     monkeypatch.setattr(sf.stock_counts, "get_completed_stock_count_variance", lambda period: result)
 
-    finding = sf._completed_stock_count_variance_finding()
+    batch = sf.measurement.run_snapshot(
+        "completed_stock_count_variance", sf._completed_stock_count_variance_finding
+    )
+    finding = batch[0]
     assert finding is not None
     assert finding["priority"] == "critical"  # clears COMPLETED_VARIANCE_CRITICAL_SESSION_RS
     assert finding["metric_id"] == "completed_stock_count_variance"
@@ -344,6 +359,9 @@ def test_completed_variance_finding_fires_above_threshold_with_real_priority_tie
     assert any(c["source"] == "shrinkage_loss_damage" for c in finding["root_cause"]["checks"])
     assert finding["root_cause"]["summary"]["possible_contributor"] == ["shrinkage_loss_damage"]
     assert finding["sessions"] == [session]
+    assert batch.measurements[0]["measurement_status"] == "measured_actionable"
+    assert batch.measurements[0]["freshness"] == "unknown"
+    assert finding["measurement"]["freshness"] == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +435,18 @@ def test_build_completed_stock_count_variance_finding_uses_the_given_metric_id_a
     finding = sf.build_completed_stock_count_variance_finding(result, "completed_stock_count_variance-all-2026-06-01_2026-09-15")
     assert finding["metric_id"] == "completed_stock_count_variance-all-2026-06-01_2026-09-15"
     assert finding["priority"] == "medium"
+    assert finding["observation_window"] == {
+        "start_date": "2026-09-09",
+        "end_date": "2026-09-15",
+        "period": "Last 7 days (2026-09-09 to 2026-09-15)",
+        "outlet_scope": "All Celeste outlets",
+    }
+    assert finding["calculated_at"] == "2026-09-15T12:00:00"
+    assert finding["impact"]["financial_impact_rs"] == 5_000
+    assert finding["impact"]["net_variance_value_rs"] == 5_000
+    assert finding["valuation_coverage"]["line_coverage_pct"] == 70.0
+    assert "Gross absolute variance" in finding["impact"]["detail"]
+    assert "signed net" in finding["impact"]["detail"]
 
 
 # ---------------------------------------------------------------------------

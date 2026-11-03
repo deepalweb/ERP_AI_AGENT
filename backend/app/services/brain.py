@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS pattern tracking.py already uses.
 """
 
 import json
+import os
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import anyio
 
@@ -20,6 +22,7 @@ from backend.app.services import (
     action_outcomes,
     case_engine,
     customer_predictions,
+    finding_actions,
     health,
     inventory,
     inventory_kpi_history,
@@ -31,7 +34,22 @@ from backend.app.services import (
     tracking,
     weekly_streaks,
 )
-from mcp_server.tools import dispatch_overage, dispatch_pattern, extreme_event, incident_engine, investigation, measurement, state_findings, transfer_discrepancy
+from mcp_server.tools import (
+    delivery_partner_failures,
+    dispatch_overage,
+    dispatch_pattern,
+    extreme_event,
+    fresh_production,
+    incident_engine,
+    investigation,
+    measurement,
+    mwh_inventory_mismatch,
+    operation_flow,
+    price_intelligence,
+    state_findings,
+    stock_reconciliation,
+    transfer_discrepancy,
+)
 
 STALE_AFTER = timedelta(hours=24)
 
@@ -189,6 +207,30 @@ def _data_freshness():
     }
 
 
+def _apply_data_freshness(measurements, freshness):
+    """Carry the broader order-data warning without attributing it to the
+    wrong source. Transfer measurements have no ingest watermark, so their
+    event timestamps cannot prove how current the mirror is."""
+    if freshness.get("status") == "fresh":
+        return
+    transfer_metrics = ("transfer_discrepancy_", "extreme_event_", "operation_flow_")
+    for record in measurements:
+        metric_id = record.get("metric_id", "")
+        transfer_source = (
+            metric_id.startswith(transfer_metrics)
+            or metric_id in {"dispatch_pattern", "dispatch_sent_above_plan"}
+        )
+        record.update(
+            freshness="unknown",
+            reason=(
+                "Inventory-transfer source refresh time is unavailable; event timestamps alone cannot confirm the reporting mirror is current."
+                if metric_id.startswith("operation_flow_")
+                else "Inventory-transfer source refresh time is unavailable; event timestamps alone cannot confirm the reporting mirror is current."
+                if transfer_source else "Order source freshness is not established."
+            ),
+        )
+
+
 def _previous_brief_findings():
     """The immediately prior daily_brief row's three finding lists, for
     notifications.diff_new_critical_findings to compare THIS scan against —
@@ -241,6 +283,35 @@ def _compute_daily_brief():
         extreme_event.build_extreme_event_findings(),
         dispatch_overage.build_dispatch_overage_findings(),
         dispatch_pattern.build_dispatch_pattern_findings(),
+        operation_flow.build_operation_flow_findings(),
+        # Price Intelligence Phase 1, 2026-10-22: per-product purchase
+        # price deviation against each product's own history (see
+        # mcp_server/tools/price_intelligence.py's module docstring for
+        # why this replaces a flat threshold).
+        price_intelligence.build_price_intelligence_findings(),
+        # Outlet inventory mismatch, 2026-10-24: confirmed sales with no
+        # stock deduction at all, clustered by episode (see
+        # mcp_server/tools/stock_reconciliation.py's module docstring for
+        # why this is cluster-based rather than a flat per-line rate).
+        stock_reconciliation.build_stock_reconciliation_findings(),
+        # MWH inventory mismatch, 2026-11-03: active sellers with zero
+        # on-hand quantity in BOTH MWH's and every outlet's own primary
+        # stock location -- see mcp_server/tools/mwh_inventory_mismatch.py's
+        # module docstring for the verified product/unit/value numbers and
+        # why fresh-production items are excluded.
+        mwh_inventory_mismatch.build_mwh_inventory_mismatch_findings(),
+        # Fresh production (central warehouse), 2026-10-31: missed rounds
+        # (scheduled, never confirmed) and output shortfall on rounds that
+        # do complete -- see mcp_server/tools/fresh_production.py's module
+        # docstring for the verified completion-rate and deviation numbers.
+        fresh_production.build_fresh_production_findings(),
+        # Delivery partner failures, 2026-11-03: reuses intelligence.py's
+        # already-registered uber_failure_rate/pickme_cancellation_rate
+        # MetricDefs and their existing trend/anomaly machinery -- those
+        # were previously only reachable through scan_attention() (Ask
+        # Celeste chat), never the daily Investigate scan. See
+        # mcp_server/tools/delivery_partner_failures.py's module docstring.
+        delivery_partner_failures.build_delivery_partner_failure_findings(),
         # Customer module review, 2026-10-13: the first customer-domain
         # signal wired into the case system -- a pure function of already-
         # historical cohort data, so (unlike lifecycle/predictions below)
@@ -248,9 +319,7 @@ def _compute_daily_brief():
         customer_predictions.build_second_order_decline_finding(),
     ])
     data_freshness = _data_freshness()
-    if data_freshness.get("status") != "fresh":
-        for record in state.measurements:
-            record.update(freshness="unknown", reason="Order source freshness is not established.")
+    _apply_data_freshness(state.measurements, data_freshness)
     state_tracking.record_new_findings(state)
     state_tracking.check_outcomes(state, measurements=state.measurements)
     state_tracking_history = state_tracking.get_tracking_history()
@@ -407,6 +476,24 @@ def _fresh_cached_brief(*, allow_stale=False):
     }
 
 
+def _prepare_scan_schemas():
+    """Run app-state schema creation and migrations before opening the scan transaction."""
+    for ensure in (
+        _ensure_schema,
+        state_tracking._ensure_schema,
+        weekly_streaks._ensure_schema,
+        case_engine._ensure_schema,
+        finding_actions._ensure_schema,
+        tracking._ensure_schema,
+        notifications._ensure_schema,
+        customer_predictions._ensure_schema,
+        customer_predictions._ensure_lifecycle_schema,
+        customer_predictions._ensure_lifecycle_snapshot_schema,
+        inventory_kpi_history._ensure_schema,
+    ):
+        ensure()
+
+
 def run_daily_scan(*, force: bool = True):
     """Serialize every scan, including scheduled jobs, across threads/processes.
 
@@ -421,7 +508,9 @@ def run_daily_scan(*, force: bool = True):
             not force or datetime.fromisoformat(brief["generated_at"]) >= requested_at
         ):
             return brief
-        return _compute_daily_brief()
+        _prepare_scan_schemas()
+        with appdb.transaction():
+            return _compute_daily_brief()
 
 
 def get_latest_brief():
@@ -436,3 +525,29 @@ def get_latest_brief():
         if brief is not None:
             return brief
     return run_daily_scan(force=False)
+
+
+def catch_up_missed_scan():
+    """The 5am cron (main.py's start_scheduler) only fires if this process
+    is alive at that exact moment -- BackgroundScheduler doesn't queue or
+    retry a fire it missed. A dev-environment backend that gets restarted
+    through the morning (observed live, 2026-10-21->22: no scan ran at all
+    on the 22nd, leaving Investigate showing the 21st's cases as if nothing
+    had been checked) silently loses the whole day's scan otherwise, with
+    no error anywhere to notice by.
+
+    Runs the scan in the background (same non-blocking path as the manual
+    /brief/refresh button) if today's calendar date (APP_TIMEZONE) has no
+    daily_brief row yet -- intentionally calendar-day-based, not the 24h
+    STALE_AFTER window _fresh_cached_brief() uses, since a scan from 11pm
+    yesterday is "fresh" by that window but still isn't today's data.
+    Call once, at process startup; cheap (one read) when already caught up."""
+    tz = ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Colombo"))
+    today = datetime.now(tz).date()
+    rows = appdb.run_query("SELECT generated_at FROM daily_brief ORDER BY generated_at DESC LIMIT 1")
+    if rows:
+        last_generated = datetime.fromisoformat(rows[0]["generated_at"]).replace(tzinfo=ZoneInfo("UTC"))
+        if last_generated.astimezone(tz).date() >= today:
+            return
+    from backend.app.services import home_briefing
+    home_briefing.request_refresh(retry=True)  # already backgrounds itself; non-blocking

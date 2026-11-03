@@ -72,6 +72,11 @@ def start_scheduler():
     if os.getenv("ENABLE_SCHEDULER", "true").lower() == "true":
         scheduler.add_job(brain.run_daily_scan, "cron", hour=5, minute=0, id="daily_brief_scan")
         scheduler.start()
+        # BackgroundScheduler doesn't catch up a 5am fire it missed because
+        # the process wasn't running at that moment -- see
+        # brain.catch_up_missed_scan's own docstring for why this matters
+        # in a dev environment that restarts through the morning.
+        brain.catch_up_missed_scan()
 
 
 @app.on_event("shutdown")
@@ -266,6 +271,19 @@ async def operations_summary():
         return {"status": "error", "detail": "Could not load operations data."}
 
 
+@app.get("/operations/pickers")
+async def operations_pickers(month: str | None = None):
+    """Picker order volume & pace for one calendar month (YYYY-MM; defaults
+    to the latest available data's month). Decoupled from /operations/summary
+    so picking a different month doesn't re-run that endpoint's other
+    queries. See operations.get_picker_summary."""
+    try:
+        return {"status": "ok", **await operations.get_picker_summary(month)}
+    except Exception:
+        logger.exception("operations pickers failed")
+        return {"status": "error", "detail": "Could not load picker data."}
+
+
 @app.get("/customers/intelligence")
 async def customers_intelligence():
     """Repeat-purchase segmentation, at-risk customers, and the retention trend —
@@ -438,18 +456,25 @@ async def save_completed_stock_count_variance_case(
     client-supplied finding/evidence/impact blob): a saved case must be
     exactly what the server actually measured, not whatever numbers a
     client claims it saw. metric_id is scoped to store_id + the resolved
-    date range so re-investigating the same scope updates the same case,
-    while a different scope opens a genuinely new one -- see
-    case_engine.save_ad_hoc_case's own docstring."""
+    date     range so re-investigating the same scope updates the same case. Existing
+    active completed-count cases are additionally matched by their actual
+    session IDs: exact evidence reuses one canonical case and links the
+    duplicate; partial evidence overlap is recorded without combining totals."""
     try:
         result = await anyio.to_thread.run_sync(
             stock_counts.get_completed_stock_count_variance, period, start_date, end_date, store_id
         )
         if not result["sessions"]:
             return {"status": "error", "detail": "No completed stock counts found for that period/store — nothing to save."}
-        metric_id = f"completed_stock_count_variance-{store_id or 'all'}-{result['start_date']}_{result['end_date']}"
+        metric_id = f"completed_stock_count_variance-{store_id if store_id is not None else 'all'}-{result['start_date']}_{result['end_date']}"
         finding = state_findings.build_completed_stock_count_variance_finding(result, metric_id)
-        case_id = await anyio.to_thread.run_sync(case_engine.save_ad_hoc_case, finding)
+        case_id = await anyio.to_thread.run_sync(
+            case_engine.save_ad_hoc_case,
+            finding,
+            "sessions",
+            "id",
+            "completed_stock_count_variance",
+        )
         return {"status": "ok", "case_id": case_id}
     except Exception:
         logger.exception("save completed stock count variance as case failed")

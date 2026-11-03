@@ -359,6 +359,44 @@ def test_get_completed_stock_count_variance_normalizes_variance_by_counted_value
     assert outlet_a["variance_rate_vs_counted_pct"] == 0.5
 
 
+def test_get_completed_stock_count_variance_reports_valuation_coverage_and_gross_net_semantics(monkeypatch):
+    session_rows = [
+        _completed_session_row(1, "SC-A", 1, "Outlet A", datetime(2026, 9, 1), 3, 20.0, 50.0),
+    ]
+    line_rows = [
+        {"count_id": 1, "counted_qty": 2, "onhand_qty": 3, "avg_cost": 10.0, "cost": 0.0, "list_price": 0.0,
+         "variance_value": 10.0},
+        {"count_id": 1, "counted_qty": 1, "onhand_qty": 2, "avg_cost": 0.0, "cost": 5.0, "list_price": 0.0,
+         "variance_value": -20.0},
+        {"count_id": 1, "counted_qty": 1, "onhand_qty": 1, "avg_cost": 0.0, "cost": 0.0, "list_price": 0.0,
+         "variance_value": 20.0},
+    ]
+    monkeypatch.setattr(
+        stock_counts.reporting, "run_query",
+        _fake_completed_variance_run_query(session_rows, [], line_rows),
+    )
+
+    result = stock_counts.get_completed_stock_count_variance(start_date="2026-06-01", end_date="2026-09-15")
+
+    assert result["gross_abs_variance_value_rs"] == 50.0
+    assert result["net_variance_value_rs"] == 20.0
+    assert result["counted_value_rs"] == 25.0
+    assert result["system_value_rs"] == 40.0
+    assert result["variance_rate_vs_counted_pct"] == 200.0
+    assert result["variance_rate_vs_system_pct"] == 125.0
+    assert result["valuation_coverage"] == {
+        "total_lines": 3,
+        "priced_lines": 2,
+        "source_cost_lines": 1,
+        "catalog_estimate_lines": 1,
+        "no_cost_lines": 1,
+        "line_coverage_pct": 66.67,
+        "variance_value_covered_rs": 30.0,
+        "variance_value_coverage_pct": 60.0,
+    }
+    assert result["sessions"][0]["valuation_coverage"]["no_cost_lines"] == 1
+
+
 def test_get_completed_stock_count_variance_rate_is_none_without_priceable_lines(monkeypatch):
     session_rows = [_completed_session_row(1, "SC-A", 1, "Outlet A", datetime(2026, 9, 1), 100, 0.0, 500_000.0)]
     # No usable cost anywhere (avg_cost 0, catalog cost 0) -- both

@@ -602,8 +602,8 @@ def test_notifications_flag_a_genuinely_new_case_as_new(appdb_reset, monkeypatch
 # Ask Celeste "save as case" action create/update a case OUTSIDE the daily
 # scan. Reuses _ingest_finding exactly as sync_cases() does.
 
-def _adhoc_finding(metric_id, current=100, impact=50.0):
-    return {
+def _adhoc_finding(metric_id, current=100, impact=50.0, sessions=None):
+    finding = {
         "id": f"{metric_id}-2026-09-15",
         "metric_id": metric_id,
         "domain": "inventory",
@@ -613,6 +613,9 @@ def _adhoc_finding(metric_id, current=100, impact=50.0):
         "confirm": {"period": "2026-09-15", "current": current},
         "root_cause": {"checks": []},
     }
+    if sessions is not None:
+        finding["sessions"] = sessions
+    return finding
 
 
 def test_save_ad_hoc_case_creates_a_new_open_snapshot_case(appdb_reset, monkeypatch):
@@ -643,6 +646,70 @@ def test_save_ad_hoc_case_with_a_different_scope_opens_a_different_case(appdb_re
     case_id_colombo = case_engine.save_ad_hoc_case(_adhoc_finding("completed_stock_count_variance-1-2026-06_2026-09"))
     case_id_attidiya = case_engine.save_ad_hoc_case(_adhoc_finding("completed_stock_count_variance-3-2026-06_2026-09"))
     assert case_id_colombo != case_id_attidiya
+
+
+def test_save_ad_hoc_case_reuses_exact_evidence_and_links_existing_duplicate(appdb_reset, monkeypatch):
+    monkeypatch.setattr(
+        case_engine, "_business_today",
+        _fake_date_sequence([date(2026, 9, 15), date(2026, 9, 15), date(2026, 9, 15)]),
+    )
+    sessions = [{"id": 10}, {"id": 11}]
+    generic_id = case_engine.save_ad_hoc_case(
+        _adhoc_finding("completed_stock_count_variance", sessions=sessions)
+    )
+    duplicate_id = case_engine.save_ad_hoc_case(
+        _adhoc_finding("completed_stock_count_variance-all-2026-06_2026-09", sessions=sessions)
+    )
+
+    matching_finding = _adhoc_finding(
+        "completed_stock_count_variance-all-2026-06_2026-09", sessions=sessions
+    )
+    matching_finding.update({
+        "calculated_at": "2026-09-15T12:00:00+00:00",
+        "observation_window": {"start_date": "2026-06-01", "end_date": "2026-09-15"},
+        "net_variance_value_rs": 25.0,
+        "valuation_coverage": {"line_coverage_pct": 70.0},
+    })
+    reused_id = case_engine.save_ad_hoc_case(
+        matching_finding,
+        evidence_collection_key="sessions",
+        metric_id_prefix="completed_stock_count_variance",
+    )
+
+    assert reused_id == generic_id
+    assert case_engine.get_case(generic_id)["metric_id"] == "completed_stock_count_variance"
+    relationship = case_engine.get_case_relationships(duplicate_id)[0]
+    assert relationship["case_id"] == duplicate_id
+    assert relationship["related_case_id"] == generic_id
+    assert relationship["relationship_type"] == "duplicate_of"
+    latest = case_engine.get_case_detail(generic_id)["latest"]
+    assert latest["calculated_at"] == matching_finding["calculated_at"]
+    assert latest["observation_window"] == matching_finding["observation_window"]
+    assert latest["net_variance_value_rs"] == 25.0
+    assert latest["valuation_coverage"]["line_coverage_pct"] == 70.0
+
+
+def test_save_ad_hoc_case_links_partial_evidence_overlap_without_merging_cases(appdb_reset, monkeypatch):
+    monkeypatch.setattr(
+        case_engine, "_business_today",
+        _fake_date_sequence([date(2026, 9, 15), date(2026, 9, 15)]),
+    )
+    existing_id = case_engine.save_ad_hoc_case(
+        _adhoc_finding("completed_stock_count_variance", sessions=[{"id": 10}, {"id": 11}])
+    )
+
+    new_id = case_engine.save_ad_hoc_case(
+        _adhoc_finding("completed_stock_count_variance-all-2026-07_2026-09", sessions=[{"id": 11}, {"id": 12}]),
+        evidence_collection_key="sessions",
+        metric_id_prefix="completed_stock_count_variance",
+    )
+
+    assert new_id != existing_id
+    assert case_engine.get_case(new_id)["status"] == "open"
+    relationship = case_engine.get_case_relationships(new_id)[0]
+    assert relationship["relationship_type"] == "overlaps"
+    assert relationship["case_id"] == new_id
+    assert relationship["related_case_id"] == existing_id
 
 
 def test_save_ad_hoc_case_requires_a_metric_id(appdb_reset, monkeypatch):

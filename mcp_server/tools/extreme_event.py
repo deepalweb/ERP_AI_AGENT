@@ -130,17 +130,22 @@ def _breakdown(lines, key_fn, label, dimension):
     }
 
 
-def build_extreme_event_findings() -> list[dict]:
+def _extreme_event_finding():
     rows = reporting.run_query(EXTREME_EVENT_SQL, {
         "stores": list(CELESTE_STORE_IDS), "window_days": WINDOW_DAYS,
         "min_lines": MIN_PRODUCT_LINES, "min_units": MIN_UNITS, "ratio": RATIO_TO_PRODUCT_MEDIAN,
         "thin_units": THIN_HISTORY_UNITS,
     })
     if not rows:
-        return []
+        # Zero rows is the clean/healthy result here (the SQL already filters
+        # to the threshold), not "can't tell" -- the query ran, live, right
+        # now, so today genuinely is this measurement's freshness.
+        measurement.source_as_of(date.today().isoformat())
+        return None
 
     lines = [_line_row(r) for r in rows]
     as_of_date = max(line["date"] for line in lines)
+    measurement.source_as_of(as_of_date)
     total_units = sum(line["recorded_qty"] for line in lines)
     outlets = {line["outlet"] for line in lines}
     products = {line["sku"] or line["product"] for line in lines}
@@ -171,6 +176,7 @@ def build_extreme_event_findings() -> list[dict]:
         "count": len(lines),
         "units_affected": total_units,
         "distinct_products": len(products),
+        "window_days": WINDOW_DAYS,
         "line_rate": None,
         "unit_rate": None,
         "confidence": impact_engine.CONFIDENCE_ESTIMATED,
@@ -225,8 +231,8 @@ def build_extreme_event_findings() -> list[dict]:
         "reason": "Missing Item",
         "extreme_rows": lines,
     }
-    finding["measurement"] = measurement.observation(
-        ISSUE_METRIC_ID, "snapshot", "measured_actionable",
-        scope=ISSUE_METRIC_ID, period=as_of_date, freshness="fresh", value=len(lines),
-    )
-    return [finding]
+    return finding
+
+
+def build_extreme_event_findings() -> measurement.FindingBatch:
+    return measurement.combine([measurement.run_snapshot(ISSUE_METRIC_ID, _extreme_event_finding)])

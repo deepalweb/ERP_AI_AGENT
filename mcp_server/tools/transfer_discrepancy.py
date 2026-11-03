@@ -43,6 +43,10 @@ _SCOPE_JOINS = f"""
             FROM stock_move m WHERE m.picking_id = op.id AND m.product_id = sms.product_id
         ) out_m ON TRUE
         LEFT JOIN LATERAL (
+            SELECT SUM(q.quantity) AS on_hand_qty, SUM(q.reserved_quantity) AS reserved_qty
+            FROM stock_quant q WHERE q.location_id = sl.id AND q.product_id = sms.product_id
+        ) git ON sl.usage = 'transit'
+        LEFT JOIN LATERAL (
             SELECT u.login FROM mail_message m
             JOIN mail_tracking_value tv ON tv.mail_message_id = m.id
             JOIN ir_model_fields f ON f.id = tv.field_id AND f.name = 'state' AND f.model = 'stock.picking'
@@ -65,14 +69,17 @@ _SCOPE_JOINS = f"""
 """
 
 TRANSFER_LINES_SQL = f"""
-    SELECT rs.id AS store_id, rs.name AS outlet, sr.name AS reason,
+    SELECT rs.id AS store_id, rs.name AS outlet, sr.name AS reason, sr.reason_type AS reason_type,
            pt.name->>'en_US' AS product_name, pt.default_code AS sku,
+           sms.product_id AS product_id, sms.stock_move_id AS receipt_move_id, sp.id AS receipt_id,
+           sl.id AS source_location_id, sl.complete_name AS source_location, sl.usage AS source_location_usage,
+           git.on_hand_qty AS git_on_hand_qty, git.reserved_qty AS git_reserved_qty,
            sms.id AS shortage_id, sms.quantity AS qty, sms.expected_qty AS expected_qty, sms.received_qty AS received_qty,
            sp.date_done AS receipt_done_at, sp.create_date AS receipt_created_at,
            rcu.login AS receipt_created_by, rwu.login AS receipt_last_edited_by, scu.login AS recorded_by,
            out_done.login AS out_completed_by, in_done.login AS receipt_completed_by,
            out_m.plan_qty AS plan_qty, out_m.sent_qty AS sent_qty,
-           op.name AS transfer_out, op.state AS out_state, op.date_done AS out_done_at,
+           op.id AS transfer_out_id, op.name AS transfer_out, op.state AS out_state, op.date_done AS out_done_at,
            ocu.login AS out_created_by, owu.login AS out_last_edited_by,
            sms.create_date AS recorded_at,
            pt.celeste_cost_price_ex_vat AS unit_cost, sp.name AS receipt, sp.state AS receipt_state,
@@ -114,6 +121,7 @@ OUTLET_VOLUME_SQL = f"""
 _REASON_PHRASING = {
     "Extra Quantity": "Extra items recorded at outlet receiving",
     "Missing Item": "Missing items recorded at outlet receiving",
+    "Product Damage": "Damaged items recorded on transfers",
 }
 
 _PROCESS_ORIGIN_UNKNOWN = {
@@ -182,12 +190,92 @@ def _sum_or_none(values):
     return sum(present) if present else None
 
 
+def _unique_lines(lines, key_fn):
+    """Count each underlying movement once while retaining every reason row."""
+    unique = {}
+    for line in lines:
+        key = key_fn(line)
+        if key is not None:
+            unique.setdefault(key, line)
+    return list(unique.values())
+
+
+def _transfer_movements(lines):
+    # Outbound plan/sent is the transfer picking's product total, repeated on
+    # each incoming move and shortage reason row.
+    outbound = _unique_lines(
+        lines,
+        lambda line: (line.get("transfer_out_id"), line.get("product_id"))
+        if line.get("transfer_out_id") is not None else None,
+    )
+    # Receipt quantities are specific to stock.move; multiple shortage reason
+    # rows can reference the same move and repeat its expected/received values.
+    inbound = _unique_lines(
+        lines,
+        lambda line: line.get("receipt_move_id")
+        if line.get("receipt_move_id") is not None else (line.get("receipt_id"), line.get("product_id")),
+    )
+    return outbound, inbound
+
+
+def _git_rows(lines):
+    unique = _unique_lines(
+        [line for line in lines if line.get("source_location_usage") == "transit"],
+        lambda line: (line.get("source_location_id"), line.get("product_id")),
+    )
+    return [{
+        "location": line.get("source_location"),
+        "product": line.get("product_name"),
+        "sku": line.get("sku"),
+        "on_hand_units": float(line["git_on_hand_qty"] or 0),
+        "reserved_units": float(line["git_reserved_qty"] or 0),
+    } for line in unique]
+
+
+def _source_location_rows(lines):
+    movements = _unique_lines(
+        lines,
+        lambda line: (line.get("source_location_id"), line.get("product_id")),
+    )
+    grouped = defaultdict(list)
+    for line in movements:
+        grouped[(line.get("source_location"), line.get("source_location_usage"))].append(line)
+    return [{
+        "location": location,
+        "usage": usage,
+        "affected_products": len(rows),
+        "current_on_hand_units": (sum(float(row.get("git_on_hand_qty") or 0) for row in rows)
+                                  if usage == "transit" else None),
+        "current_reserved_units": (sum(float(row.get("git_reserved_qty") or 0) for row in rows)
+                                    if usage == "transit" else None),
+    } for (location, usage), rows in sorted(grouped.items())]
+
+
+def _related_transfer_outcomes(reason, case_lines, all_lines):
+    affected = {(line.get("receipt_id"), line.get("product_id")) for line in case_lines}
+    related = [line for line in all_lines
+               if line["reason"] != reason
+               and (line.get("receipt_id"), line.get("product_id")) in affected
+               and line.get("receipt_state") == "done"]
+    grouped = defaultdict(list)
+    for line in related:
+        grouped[(line["reason"], line.get("reason_type"))].append(line)
+    return [{
+        "reason": name,
+        "reason_type": reason_type,
+        "records": len(rows),
+        "units": sum(float(row["qty"] or 0) for row in rows),
+        "receipt_product_pairs": len({(row.get("receipt_id"), row.get("product_id")) for row in rows}),
+    } for (name, reason_type), rows in sorted(grouped.items())]
+
+
 def _outlet_rows(lines, outlet_volume):
     by_outlet = defaultdict(list)
     for line in lines:
         by_outlet[(line["store_id"], line["outlet"])].append(line)
     rows = []
     for (store_id, outlet), outlet_lines in by_outlet.items():
+        outbound, inbound = _transfer_movements(outlet_lines)
         volume = outlet_volume.get(store_id, {})
         units = sum(float(l["qty"]) for l in outlet_lines)
         basis_ok = _unit_basis_ok(outlet_lines, volume)
@@ -197,9 +285,10 @@ def _outlet_rows(lines, outlet_volume):
             "units": units,
             "received_units": volume.get("qty"),
             "received_lines": volume.get("lines"),
-            "plan_units": _sum_or_none(l.get("plan_qty") for l in outlet_lines),
-            "sent_units": _sum_or_none(l.get("sent_qty") for l in outlet_lines),
-            "line_received_units": sum(float(l["received_qty"] or 0) for l in outlet_lines),
+            "plan_units": _sum_or_none(l.get("plan_qty") for l in outbound),
+            "sent_units": _sum_or_none(l.get("sent_qty") for l in outbound),
+            "line_received_units": sum(float(l["received_qty"] or 0) for l in inbound),
+            "physical_gap_units": sum(float(l["sent_qty"] or 0) for l in outbound) - sum(float(l["received_qty"] or 0) for l in inbound),
             "days": len({l["recorded_at"].date() for l in outlet_lines}),
             "line_rate": _rate(len(outlet_lines), volume.get("lines")),
             "unit_rate": _rate(units, volume.get("qty")) if basis_ok else None,
@@ -214,6 +303,7 @@ def _transfer_rows(lines):
         grouped[(line["outlet"], line["sku"] or line["product_name"], line["product_name"])].append(line)
     rows = []
     for (outlet, sku, product), product_lines in grouped.items():
+        outbound, inbound = _transfer_movements(product_lines)
         last = max(l["recorded_at"] for l in product_lines)
         rows.append({
             "id": f"{outlet}|{sku}",
@@ -222,8 +312,10 @@ def _transfer_rows(lines):
             "sku": sku,
             "lines": len(product_lines),
             "units": sum(float(l["qty"]) for l in product_lines),
-            "expected_units": sum(float(l["expected_qty"] or 0) for l in product_lines),
-            "received_units": sum(float(l["received_qty"] or 0) for l in product_lines),
+            "expected_units": sum(float(l["expected_qty"] or 0) for l in inbound),
+            "received_units": sum(float(l["received_qty"] or 0) for l in inbound),
+            "plan_units": _sum_or_none(l.get("plan_qty") for l in outbound),
+            "sent_units": _sum_or_none(l.get("sent_qty") for l in outbound),
             "days": len({l["recorded_at"].date() for l in product_lines}),
             "last_seen": last.date().isoformat(),
             "value_rs": round(sum(float(l["qty"]) * float(l["unit_cost"] or 0) for l in product_lines), 2),
@@ -243,11 +335,20 @@ def _trace_rows(lines):
     for line in lines:
         rows.append({
             "id": line["shortage_id"],
+            "transfer_out_id": line.get("transfer_out_id"),
+            "product_id": line.get("product_id"),
+            "receipt_id": line.get("receipt_id"),
+            "receipt_move_id": line.get("receipt_move_id"),
+            "source_location": line.get("source_location"),
+            "source_location_usage": line.get("source_location_usage"),
+            "git_on_hand_qty": float(line["git_on_hand_qty"]) if line.get("git_on_hand_qty") is not None else None,
+            "git_reserved_qty": float(line["git_reserved_qty"]) if line.get("git_reserved_qty") is not None else None,
             "transfer_out": line["transfer_out"],
             "out_sent_on": _iso(line["out_done_at"]),
             "planned_by": line["out_created_by"],
             "out_sent_by": line["out_completed_by"],
             "receipt": line["receipt"],
+            "receipt_state": line.get("receipt_state"),
             "received_on": _iso(line["receipt_done_at"]),
             "receipt_completed_by": line["receipt_completed_by"],
             "outlet": line["outlet"],
@@ -311,7 +412,14 @@ def build_transfer_discrepancy_findings() -> measurement.FindingBatch:
         by_reason[line["reason"]].append(line)
 
     findings, records = [], []
-    for reason, reason_lines in by_reason.items():
+    # Every known reason, not just the ones with lines THIS scan -- a reason
+    # that drops to zero incidents (e.g. "Product Damage" going quiet) must
+    # still get a measured_healthy record below, or its open case can never
+    # see a fresh measurement again and gets stuck forever (confirmed live,
+    # 2026-11-03: transfer_discrepancy_product_damage's case hadn't been
+    # touched since 2026-10-13 for exactly this reason).
+    for reason in set(_REASON_PHRASING) | set(by_reason):
+        reason_lines = by_reason.get(reason, [])
         # Only lines on received receipts count toward the headline. A cancelled
         # or not-yet-received receipt can carry a shortage record without any
         # goods having gone missing, so those are reported separately.
@@ -346,9 +454,10 @@ def build_transfer_discrepancy_findings() -> measurement.FindingBatch:
                 "not yet received are excluded from the figures above. Confirm whether the goods arrived.",
             })
         priority = _priority_for(days_appeared)
-        plan_total = _sum_or_none(l.get("plan_qty") for l in reason_lines)
-        sent_total = _sum_or_none(l.get("sent_qty") for l in reason_lines)
-        received_on_lines = sum(float(l["received_qty"] or 0) for l in reason_lines)
+        outbound_movements, inbound_movements = _transfer_movements(reason_lines)
+        plan_total = _sum_or_none(l.get("plan_qty") for l in outbound_movements)
+        sent_total = _sum_or_none(l.get("sent_qty") for l in outbound_movements)
+        received_on_lines = sum(float(l["received_qty"] or 0) for l in inbound_movements)
         impact = {
             "kind": "transfer_discrepancy",
             "plan_units": plan_total,
@@ -364,6 +473,10 @@ def build_transfer_discrepancy_findings() -> measurement.FindingBatch:
             "line_rate": _rate(incidents, total_volume_lines),
             "unit_rate": _rate(units, total_volume_qty) if all(
                 _unit_basis_ok(reason_lines, v) for v in outlet_volume.values()) else None,
+            "unit_rate_numerator_units": round(units, 3),
+            "unit_rate_denominator_units": round(total_volume_qty, 3),
+            "unit_rate_denominator_label": f"all Celeste outlet transfer receipts in the {WINDOW_DAYS}-day window",
+            "window_days": WINDOW_DAYS,
             "unit_rate_coverage_pct": round(
                 sum(float(l["qty"]) for l in reason_lines if l["uom_matches_base"]) / units * 100, 1
             ) if units else None,
@@ -375,7 +488,7 @@ def build_transfer_discrepancy_findings() -> measurement.FindingBatch:
             "excluded_lines": len(excluded),
             "excluded_units": excluded_units,
             "detail": (
-                f"{incidents} received-receipt lines ({units:g} units) across {len(outlets)} outlet(s) in the "
+                f"{incidents} received-receipt reason records ({units:g} units recorded under this reason) across {len(outlets)} outlet(s) in the "
                 f"{WINDOW_DAYS}-day window"
                 + (f". Estimated Rs. {financial_impact:,.0f} at today's catalog cost; {len(priced)} of {incidents} "
                    "lines have a usable catalog cost, so this total is a lower bound." if financial_impact
@@ -393,6 +506,7 @@ def build_transfer_discrepancy_findings() -> measurement.FindingBatch:
             "domain": "inventory",
             "title": f"{phrase} on warehouse transfers, across {len(outlets)} outlet(s)",
             "excluded_rows": _excluded_rows(excluded),
+            "excluded_trace_rows": _trace_rows(excluded),
             "category": "critical",
             "severity": priority,
             "priority": priority,
@@ -421,6 +535,9 @@ def build_transfer_discrepancy_findings() -> measurement.FindingBatch:
             "outlet_rows": _outlet_rows(reason_lines, outlet_volume),
             "transfer_rows": _transfer_rows(reason_lines),
             "trace_rows": _trace_rows(reason_lines),
+            "git_rows": _git_rows(reason_lines),
+            "source_location_rows": _source_location_rows(reason_lines),
+            "related_transfer_outcomes": _related_transfer_outcomes(reason, reason_lines, lines),
         })
     for finding in findings:
         finding["measurement"] = next(m for m in records if m["metric_id"] == finding["metric_id"])

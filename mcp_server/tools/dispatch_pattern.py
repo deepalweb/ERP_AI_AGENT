@@ -46,8 +46,8 @@ def _number(value) -> float:
 def _pairs(rows, recurring_keys):
     overall = defaultdict(lambda: [0.0, 0.0])  # dispatcher -> [expected, missing]
     pair = defaultdict(lambda: {"product": None, "sku": None, "expected": 0.0, "missing": 0.0,
-                                "lines": 0, "outlets": set()})
-    for row in rows:
+                                "lines": 0, "outlets": set(), "source_records": []})
+    for row_index, row in enumerate(rows):
         who = row["dispatch_completed_by"]
         if not who:
             continue
@@ -64,6 +64,19 @@ def _pairs(rows, recurring_keys):
         if missing > 0:
             p["lines"] += 1
             p["outlets"].add(row["store_id"])
+            done_at = row.get("done_at")
+            if hasattr(done_at, "isoformat"):
+                done_at = done_at.isoformat()
+            p["source_records"].append({
+                "id": row.get("move_id") or f"{row.get('receipt_id', row.get('store_id', 'row'))}:{row_index}",
+                "receipt": row.get("receipt"),
+                "transfer_out": row.get("transfer_out"),
+                "outlet": row.get("outlet"),
+                "date": done_at,
+                "expected_units": round(expected),
+                "received_units": round(_number(row.get("received"))),
+                "missing_units": round(missing),
+            })
 
     flagged = []
     for (who, prod_key), p in pair.items():
@@ -72,8 +85,16 @@ def _pairs(rows, recurring_keys):
         pair_rate = p["missing"] / p["expected"] * 100
         if pair_rate < PAIR_RATE_MIN:
             continue
-        own_expected, own_missing = overall[who]
-        own_rate = own_missing / own_expected * 100 if own_expected else 0.0
+        # Compare this product with the dispatcher's other handled products.
+        # Including the focal pair in its own baseline dilutes the contrast and
+        # makes the published "everything else" explanation inaccurate.
+        own_expected = overall[who][0] - p["expected"]
+        own_missing = overall[who][1] - p["missing"]
+        # A rate comparison is not possible when this is the only product they
+        # handled in the window; do not treat a missing baseline as a zero rate.
+        if own_expected <= 0:
+            continue
+        own_rate = own_missing / own_expected * 100
         if own_rate > 0 and pair_rate / own_rate < RATIO_MIN:
             continue
         flagged.append({
@@ -84,9 +105,12 @@ def _pairs(rows, recurring_keys):
             "missing_units": round(p["missing"]),
             "rate_pct": round(pair_rate, 1),
             "own_rate_pct": round(own_rate, 2),
+            "other_products_expected_units": round(own_expected),
+            "other_products_missing_units": round(own_missing),
             "ratio": round(pair_rate / own_rate, 1) if own_rate > 0 else None,
             "short_lines": p["lines"],
             "outlets": len(p["outlets"]),
+            "source_records": p["source_records"],
         })
     return sorted(flagged, key=lambda r: -r["rate_pct"])
 
@@ -106,16 +130,17 @@ def _breakdown(flagged, key_fn, label, dimension):
     }
 
 
-def build_dispatch_pattern_findings() -> list[dict]:
+def _dispatch_pattern_finding():
     raw = _raw_rows()
     if not raw:
-        return []
+        measurement.source_unavailable("No dispatch records are available for the analysis window.")
+        return None
     recurring_keys = _recurring_keys(raw)
     flagged = _pairs(raw, recurring_keys)
-    if not flagged:
-        return []
-
     as_of_date = date.today().isoformat()
+    measurement.source_as_of(as_of_date)
+    if not flagged:
+        return None
     total_missing = sum(r["missing_units"] for r in flagged)
     dispatchers = {r["dispatcher"] for r in flagged}
     products = {r["sku"] or r["product"] for r in flagged}
@@ -123,8 +148,8 @@ def build_dispatch_pattern_findings() -> list[dict]:
     checks = [
         {"source": "pattern_magnitude", "verdict": "confirmed",
          "detail": f"{len(flagged)} dispatcher/product pair(s) in the last {WINDOW_DAYS} days have a miss rate of "
-                   f"at least {PAIR_RATE_MIN:.0f}% on a product that is recurring overall, at least {RATIO_MIN:.0f}x "
-                   "that dispatcher's own rate across everything else they handle -- not the routine spread."},
+                   f"at least {PAIR_RATE_MIN:.0f}% on a product that is recurring overall, and at least {RATIO_MIN:.0f}x "
+                   "the dispatcher's rate on other products, or no recorded shortages on those other products."},
         {"source": "attribution", "verdict": "unknown",
          "detail": "Not established: whether the gap is at dispatch, in transit, or at receiving for these lines. "
                    "This flags a pattern tied to who marked the outbound note done, not a finding of fault."},
@@ -139,9 +164,10 @@ def build_dispatch_pattern_findings() -> list[dict]:
         "count": len(flagged),
         "units_affected": round(total_missing),
         "distinct_products": len(products),
+        "window_days": WINDOW_DAYS,
         "confidence": impact_engine.CONFIDENCE_ESTIMATED,
         "month": as_of_date,
-        "detail": f"{len(flagged)} dispatcher/product pattern(s), {round(total_missing):g} missing units, "
+        "detail": f"{len(flagged)} dispatcher/product pattern(s), {round(total_missing):g} shortage units in the associated records, "
                   f"across {len(dispatchers)} dispatcher(s) and {len(products)} product(s) in the last {WINDOW_DAYS} days.",
     }
 
@@ -185,8 +211,8 @@ def build_dispatch_pattern_findings() -> list[dict]:
         "reason": "Dispatcher pattern",
         "pattern_rows": flagged,
     }
-    finding["measurement"] = measurement.observation(
-        ISSUE_METRIC_ID, "snapshot", "measured_actionable",
-        scope=ISSUE_METRIC_ID, period=as_of_date, freshness="fresh", value=len(flagged),
-    )
-    return [finding]
+    return finding
+
+
+def build_dispatch_pattern_findings() -> measurement.FindingBatch:
+    return measurement.combine([measurement.run_snapshot(ISSUE_METRIC_ID, _dispatch_pattern_finding)])

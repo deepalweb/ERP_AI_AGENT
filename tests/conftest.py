@@ -5,9 +5,29 @@ leak state between tests."""
 import pytest
 
 from backend.app.db import appdb
-from backend.app.services import case_engine, finding_actions, state_tracking, tracking, weekly_streaks
+from backend.app.services import (
+    brain,
+    case_engine,
+    customer_predictions,
+    finding_actions,
+    inventory_kpi_history,
+    notifications,
+    state_tracking,
+    tracking,
+    weekly_streaks,
+)
 
-_SCHEMA_FLAG_MODULES = [finding_actions, tracking, state_tracking, weekly_streaks, case_engine]
+_SCHEMA_FLAG_MODULES = [
+    brain,
+    finding_actions,
+    tracking,
+    state_tracking,
+    weekly_streaks,
+    case_engine,
+    customer_predictions,
+    inventory_kpi_history,
+    notifications,
+]
 
 
 @pytest.fixture
@@ -17,7 +37,11 @@ def appdb_reset(tmp_path, monkeypatch):
     appdb.get_engine.cache_clear()
     for module in _SCHEMA_FLAG_MODULES:
         module._SCHEMA_READY = False
+    customer_predictions._LIFECYCLE_SCHEMA_READY = False
+    customer_predictions._LIFECYCLE_SNAPSHOT_SCHEMA_READY = False
     yield
     appdb.get_engine.cache_clear()
     for module in _SCHEMA_FLAG_MODULES:
         module._SCHEMA_READY = False
+    customer_predictions._LIFECYCLE_SCHEMA_READY = False
+    customer_predictions._LIFECYCLE_SNAPSHOT_SCHEMA_READY = False

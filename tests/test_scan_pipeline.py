@@ -37,12 +37,37 @@ def _stub_sources(monkeypatch):
         "dispatch_overage": [],
         # Same reasoning again, for the dispatcher/product pattern detector added 2026-10-07.
         "dispatch_pattern": [],
+        # The timestamp-based operation-flow detector reads the reporting DB;
+        # keep scan and lock tests isolated from external business data.
+        "operation_flow": [],
+        # Same reasoning again, for the per-product purchase-price-deviation
+        # detector added 2026-10-22 -- it reads purchase_order_line, which
+        # this test DB has real (and sometimes genuinely flaggable) history
+        # for.
+        "price_intelligence": [],
+        # Same reasoning again, for the missing-stock-deduction cluster
+        # detector added 2026-10-24 -- it reads sale_order_line/stock_move,
+        # which this test DB has real (and sometimes genuinely flaggable)
+        # history for.
+        "stock_reconciliation": [],
+        # Same reasoning again, for the fresh-production detector added
+        # 2026-10-31 -- it reads mrp_production, which this test DB has
+        # real (and heavily flaggable) history for.
+        "fresh_production": [],
         # Same reasoning again, for the second-order-conversion-decline
         # finding added 2026-10-13 -- without this it falls through to the
         # real function, hits the live reporting DB, and (since this test
         # DB's real cohort data genuinely has a flagged decline) adds an
         # unexpected 4th state_findings entry to these tests' fixed counts.
         "customer_second_order_decline": [],
+        # Same reasoning again, for the MWH/outlet primary-stock mismatch
+        # detector added 2026-11-03 -- it reads stock_quant/sale_order_line,
+        # which this test DB has real (and genuinely flaggable) history for.
+        "mwh_inventory_mismatch": [],
+        # Same reasoning again, for the delivery-partner failure-rate
+        # detector added 2026-11-03 -- it reads uber_order/pickme_order,
+        # which this test DB has real (and genuinely flaggable) history for.
+        "delivery_partner_failures": [],
     }
     monkeypatch.setattr(brain.state_findings, "build_inventory_findings", lambda: sources["inventory"])
     monkeypatch.setattr(brain.state_findings, "build_operational_findings", lambda: sources["operations"])
@@ -52,6 +77,12 @@ def _stub_sources(monkeypatch):
     monkeypatch.setattr(brain.extreme_event, "build_extreme_event_findings", lambda: sources["extreme_event"])
     monkeypatch.setattr(brain.dispatch_overage, "build_dispatch_overage_findings", lambda: sources["dispatch_overage"])
     monkeypatch.setattr(brain.dispatch_pattern, "build_dispatch_pattern_findings", lambda: sources["dispatch_pattern"])
+    monkeypatch.setattr(brain.operation_flow, "build_operation_flow_findings", lambda: sources["operation_flow"])
+    monkeypatch.setattr(brain.price_intelligence, "build_price_intelligence_findings", lambda: sources["price_intelligence"])
+    monkeypatch.setattr(brain.stock_reconciliation, "build_stock_reconciliation_findings", lambda: sources["stock_reconciliation"])
+    monkeypatch.setattr(brain.fresh_production, "build_fresh_production_findings", lambda: sources["fresh_production"])
+    monkeypatch.setattr(brain.mwh_inventory_mismatch, "build_mwh_inventory_mismatch_findings", lambda: sources["mwh_inventory_mismatch"])
+    monkeypatch.setattr(brain.delivery_partner_failures, "build_delivery_partner_failure_findings", lambda: sources["delivery_partner_failures"])
     monkeypatch.setattr(
         brain.customer_predictions, "build_second_order_decline_finding",
         lambda: sources["customer_second_order_decline"],
@@ -71,6 +102,19 @@ def _stub_sources(monkeypatch):
     monkeypatch.setattr(predictions, "record_lifecycle_snapshot", lambda _: None)
     monkeypatch.setattr(brain, "_record_inventory_kpi_snapshot", lambda: None)
     return sources
+
+
+def test_stale_order_watermark_does_not_mislabel_transfer_source_reason():
+    measurements = [
+        {"metric_id": "transfer_discrepancy_missing_item", "freshness": "fresh"},
+        {"metric_id": "revenue", "freshness": "fresh"},
+    ]
+
+    brain._apply_data_freshness(measurements, {"status": "stale"})
+
+    assert measurements[0]["freshness"] == "unknown"
+    assert "Inventory-transfer source refresh time" in measurements[0]["reason"]
+    assert measurements[1]["reason"] == "Order source freshness is not established."
 
 
 @pytest.fixture
@@ -103,6 +147,35 @@ async def test_failed_state_source_does_not_resolve_existing_findings(scan_sourc
 
     assert response["status"] == "error"
     assert state_tracking.get_tracking_history()[0]["status"] == "open"
+
+
+def test_failed_scan_rolls_back_all_app_state_changes(scan_sources, monkeypatch):
+    original_inventory = scan_sources["inventory"]
+    prior_result = brain.run_daily_scan()
+    prior_generated_at = prior_result["generated_at"]
+    scan_sources["inventory"] = [{
+        "id": "new-stock-finding",
+        "metric_id": "new_stock_finding",
+        "category": "critical",
+        "confirm": {"current": 7},
+    }]
+
+    def fail_after_case_sync():
+        raise RuntimeError("Health snapshot unavailable")
+
+    monkeypatch.setattr(brain, "_snapshot_health", fail_after_case_sync)
+    with pytest.raises(RuntimeError, match="Health snapshot unavailable"):
+        brain.run_daily_scan()
+
+    assert brain._fresh_cached_brief()["generated_at"] == prior_generated_at
+    assert "new_stock_finding" not in {
+        row["metric_id"] for row in state_tracking.get_tracking_history()
+    }
+    assert not brain.appdb.run_query(
+        "SELECT case_id FROM business_cases WHERE metric_id=:metric_id",
+        {"metric_id": "new_stock_finding"},
+    )
+    scan_sources["inventory"] = original_inventory
 
 
 def test_scheduled_and_stale_cache_requests_share_one_scan(scan_sources, monkeypatch):

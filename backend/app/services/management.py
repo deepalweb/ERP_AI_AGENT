@@ -180,14 +180,23 @@ FAMILY_LABELS = {
     "warehouse_transfer_shortages": "Warehouse transfer shortages",
     "warehouse_transfer_overages": "Warehouse transfer overages",
     "warehouse_dispatch_overage": "Warehouse dispatch overage",
-    "transfer_damage": "Transfer damage",
     "stock_availability": "Stock availability",
     "stock_count_controls": "Stock-count controls",
-    "damage_writeoff": "Damage write-offs",
+    "damage_and_writeoffs": "Damage and write-off events",
     "inventory_health": "Inventory health",
     "inventory_opportunities": "Inventory opportunities",
 }
 FAMILY_ORDER = list(FAMILY_LABELS)
+FAMILY_DOMAIN_KEYS = {
+    "warehouse_transfer_shortages": "stock_movement",
+    "warehouse_transfer_overages": "stock_movement",
+    "warehouse_dispatch_overage": "stock_movement",
+    "stock_availability": "stock_availability_risk",
+    "stock_count_controls": "stock_record_controls",
+    "damage_and_writeoffs": "damage_writeoff_losses",
+    "inventory_health": "inventory_performance",
+    "inventory_opportunities": "inventory_performance",
+}
 
 
 def family_for(item):
@@ -201,17 +210,20 @@ def family_for(item):
         if metric_id.endswith("_extra_quantity"):
             return "warehouse_transfer_overages"
         if metric_id.endswith("_product_damage"):
-            return "transfer_damage"
+            return "damage_and_writeoffs"
     if metric_id == "dispatch_sent_above_plan":
         return "warehouse_dispatch_overage"
     if metric_id == "dispatch_pattern":
         return "warehouse_transfer_shortages"
     if metric_id in ("stock_availability", "top_seller_stock"):
         return "stock_availability"
-    if metric_id in ("stuck_stock_count", "completed_stock_count_variance"):
+    if (
+        metric_id in ("stuck_stock_count", "completed_stock_count_variance")
+        or metric_id.startswith("completed_stock_count_variance-")
+    ):
         return "stock_count_controls"
     if metric_id == "damage_writeoff":
-        return "damage_writeoff"
+        return "damage_and_writeoffs"
     if metric_id == "dead_overstock_value":
         return "inventory_health"
     if item.get("domain") == "inventory" and item.get("category") == "opportunity":
@@ -223,12 +235,22 @@ def _impact(item):
     return ((item.get("latest") or {}).get("impact_summary") or {})
 
 
-def families_from_cases(items):
+def families_from_cases(items, relationships=None):
     groups = {key: [] for key in FAMILY_ORDER}
     for item in items:
         key = family_for(item)
         if key:
             groups[key].append(item)
+    cases_by_id = {item["case_id"]: item for item in items}
+    linked_evidence = {}
+    for relationship in relationships or []:
+        relation_type = relationship.get("relationship_type")
+        if relation_type not in ("duplicate_of", "overlaps"):
+            continue
+        left, right = relationship.get("case_id"), relationship.get("related_case_id")
+        if left and right:
+            linked_evidence.setdefault(left, []).append((right, relation_type, relation_type == "duplicate_of"))
+            linked_evidence.setdefault(right, []).append((left, relation_type, False))
     families = []
     for key in FAMILY_ORDER:
         children = groups[key]
@@ -240,6 +262,7 @@ def families_from_cases(items):
         families.append({
             "key": key,
             "label": FAMILY_LABELS[key],
+            "domain_key": FAMILY_DOMAIN_KEYS[key],
             "priority": driver.get("priority"),
             "driving_case_id": driver["case_id"],
             "driving_title": (driver.get("latest") or {}).get("title") or driver["metric_id"],
@@ -253,6 +276,16 @@ def families_from_cases(items):
                     "priority": c.get("priority"), "last_seen_at": c.get("last_seen_at"),
                     "title": (c.get("latest") or {}).get("title") or c["metric_id"],
                     "impact_summary": (c.get("latest") or {}).get("impact_summary"),
+                    "related_evidence": [
+                        {
+                            "case_id": related_id,
+                            "title": (cases_by_id.get(related_id, {}).get("latest") or {}).get("title")
+                                or cases_by_id.get(related_id, {}).get("metric_id"),
+                            "relationship_type": relation_type,
+                            "is_duplicate_of": is_duplicate_of,
+                        }
+                        for related_id, relation_type, is_duplicate_of in linked_evidence.get(c["case_id"], [])
+                    ],
                 }
                 for c in children
             ],
@@ -263,7 +296,11 @@ def families_from_cases(items):
 def families():
     _ready()
     listing = case_engine.list_cases(status="active", limit=200)
-    return families_from_cases(listing["items"])
+    relationships = appdb.run_query(
+        "SELECT case_id, related_case_id, relationship_type FROM case_relationships "
+        "WHERE relationship_type IN ('duplicate_of', 'overlaps')"
+    )
+    return families_from_cases(listing["items"], relationships)
 
 
 def sync_status():

@@ -44,6 +44,8 @@ def test_elevated_rate_fires_and_matches_the_dispatcher_own_baseline(monkeypatch
     assert row["rate_pct"] == 15.0
     assert row["own_rate_pct"] < 2.0  # well below the 15% pair rate, not contaminated by it
     assert row["ratio"] >= dp.RATIO_MIN
+    assert len(row["source_records"]) == 3
+    assert all(source["missing_units"] == 30 for source in row["source_records"])
 
 
 def test_below_the_volume_floor_does_not_fire(monkeypatch):

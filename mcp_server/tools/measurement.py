@@ -41,7 +41,7 @@ def source_unavailable(reason):
                        freshness="unknown", reason=reason)
 
 
-def source_as_of(value, *, verifies_source=True):
+def source_as_of(value, *, verifies_source=True, unknown_reason=None):
     if not value:
         source_unavailable("Source has no observation timestamp.")
         return
@@ -50,7 +50,10 @@ def source_as_of(value, *, verifies_source=True):
     if current is not None:
         current["period"] = observed.isoformat()
         if not verifies_source:
-            current.update(freshness="unknown", reason="Sales recency does not establish inventory refresh coverage.")
+            current.update(
+                freshness="unknown",
+                reason=unknown_reason or "Sales recency does not establish inventory refresh coverage.",
+            )
             return
         current["freshness"] = "fresh"
         current["reason"] = None
@@ -58,7 +61,7 @@ def source_as_of(value, *, verifies_source=True):
             current.update(freshness="stale", reason="Source observation is stale.")
 
 
-def run_snapshot(metric_id, detector):
+def run_snapshot(metric_id, detector, *, unknown_freshness_is_measured=False):
     record = observation(metric_id, "snapshot", "measured_healthy", period=datetime.now(UTC).date().isoformat(),
                          freshness="unknown", reason="The source supplies no freshness watermark.")
     token = _coverage.set(record)
@@ -67,7 +70,11 @@ def run_snapshot(metric_id, detector):
         if finding:
             record.update(measurement_status="measured_actionable", value=finding["confirm"]["current"])
             finding["measurement"] = record.copy()
-        elif record["freshness"] != "fresh":
+        elif record["freshness"] != "fresh" and not (
+            unknown_freshness_is_measured
+            and record["coverage"] == "complete"
+            and record["period"] is not None
+        ):
             record["measurement_status"] = "measurement_unavailable"
         return FindingBatch([finding] if finding else [], [record])
     except Exception:

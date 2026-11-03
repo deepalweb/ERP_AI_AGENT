@@ -116,13 +116,18 @@ def _breakdown(lines, key_fn, label, dimension):
     }
 
 
-def build_dispatch_overage_findings() -> list[dict]:
+def _dispatch_overage_finding():
     rows = reporting.run_query(DISPATCH_OVERAGE_SQL)
     if not rows:
-        return []
+        # Zero rows is the clean/healthy result here (the SQL already filters
+        # to the threshold), not "can't tell" -- the query ran, live, right
+        # now, so today genuinely is this measurement's freshness.
+        measurement.source_as_of(date.today().isoformat())
+        return None
 
     lines = [_line_row(r) for r in rows]
     as_of_date = max((l["date"] for l in lines if l["date"]), default=date.today().isoformat())
+    measurement.source_as_of(as_of_date)
     total_over = sum(l["over_qty"] for l in lines)
     outlets = {l["outlet"] for l in lines}
     products = {l["sku"] or l["product"] for l in lines}
@@ -150,6 +155,7 @@ def build_dispatch_overage_findings() -> list[dict]:
         "count": len(lines),
         "units_affected": total_over,
         "distinct_products": len(products),
+        "window_days": WINDOW_DAYS,
         "valued_units_pct": round(valued_units / total_over * 100, 1) if total_over else None,
         "confidence": impact_engine.CONFIDENCE_ESTIMATED,
         "month": as_of_date,
@@ -202,8 +208,8 @@ def build_dispatch_overage_findings() -> list[dict]:
         "reason": "Sent above plan",
         "dispatch_rows": lines,
     }
-    finding["measurement"] = measurement.observation(
-        ISSUE_METRIC_ID, "snapshot", "measured_actionable",
-        scope=ISSUE_METRIC_ID, period=as_of_date, freshness="fresh", value=len(lines),
-    )
-    return [finding]
+    return finding
+
+
+def build_dispatch_overage_findings() -> measurement.FindingBatch:
+    return measurement.combine([measurement.run_snapshot(ISSUE_METRIC_ID, _dispatch_overage_finding)])

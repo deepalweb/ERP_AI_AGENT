@@ -1,7 +1,7 @@
 """One default for chat, investigation recommendations, and incident narration."""
 import os
 
-DEFAULT_MODEL = "moonshotai/kimi-k3"
+DEFAULT_MODEL = "meta/muse-glimmer-30b"
 
 
 def model_name():

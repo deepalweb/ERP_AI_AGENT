@@ -5,13 +5,20 @@ investigation findings), so it gets its own engine and its own file.
 """
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
 import anyio
 from filelock import FileLock
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
+
+_transaction_connection: ContextVar[Connection | None] = ContextVar(
+    "appdb_transaction_connection", default=None
+)
 
 
 @lru_cache()
@@ -21,27 +28,57 @@ def get_engine() -> Engine:
     Falls back to a local SQLite file for development.
     """
     db_url = os.getenv("APP_DATABASE_URL") or "sqlite:///./app.db"
-    return create_engine(db_url, future=True)
+    # SQLite allows only one writer at a time; without a busy timeout, a
+    # second connection trying to write while the scan's own transaction
+    # (brain._compute_daily_brief, several minutes long) is open fails
+    # immediately with "database is locked" instead of waiting briefly for
+    # it to clear -- observed live, 2026-10-21, colliding with
+    # notifications.acknowledge() on Home page load.
+    connect_args = {"timeout": 30} if db_url.startswith("sqlite") else {}
+    return create_engine(db_url, future=True, connect_args=connect_args)
 
 
 def case_store_lock(timeout: float = 600) -> FileLock:
-    """A cross-process lock shared by everything that mutates the
-    business_cases / case_observations / finding_actions tables as a unit:
-    brain.run_daily_scan() holds this for a whole scan's duration (its
-    original name here was _scan_lock, moved from brain.py so
-    case_engine.py's action-save path can take the exact same lock rather
-    than inventing a second one), and case_engine.
-    save_action_with_verification() takes it too, with a much shorter
-    timeout, around its evidence-version check + write -- closing the gap
-    where a scan could land between the check and the save (see Phase 2e
-    Task 1). Deliberately a separate file from the SQLite database itself,
-    so a scan doesn't hold a DB write transaction open while waiting on
-    reporting queries or the model."""
+    """A cross-process lock shared by scans and case/action mutations.
+
+    Scans also use an application-database transaction so all their state
+    changes publish together; the file lock still coordinates that work
+    with action saves across processes.
+    """
     configured = os.getenv("APP_SCAN_LOCK_PATH")
     database = get_engine().url.database or "app.db"
     path = Path(configured or f"{database}.scan.lock").resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     return FileLock(str(path), timeout=timeout)
+
+
+@contextmanager
+def transaction() -> Iterator[Connection]:
+    """Route implicit run_query calls through one commit-or-rollback unit."""
+    if _transaction_connection.get() is not None:
+        raise RuntimeError("An appdb transaction is already active in this context.")
+    with get_engine().begin() as conn:
+        token = _transaction_connection.set(conn)
+        try:
+            yield conn
+        finally:
+            _transaction_connection.reset(token)
+
+
+@contextmanager
+def connection_for_bulk_write() -> Iterator[Connection]:
+    """A writable connection for a bulk statement (executemany-style list of
+    params) -- run_query only takes one params dict, not a list, so a bulk
+    insert/delete can't go through it. Joins the enclosing appdb.transaction()
+    if one is active, the same ambient connection run_query already joins, so
+    it can't deadlock against it; opens and commits its own otherwise, same
+    as run_query does when called outside a transaction."""
+    ambient = _transaction_connection.get()
+    if ambient is not None:
+        yield ambient
+    else:
+        with get_engine().begin() as conn:
+            yield conn
 
 
 def run_query(query: str, params: dict | None = None, conn=None):
@@ -56,6 +93,8 @@ def run_query(query: str, params: dict | None = None, conn=None):
     partway through the sequence left whatever had already committed in
     place -- a real partial-failure risk (Phase 2e post-acceptance audit,
     Task 1 point 1), not a hypothetical one."""
+    if conn is None:
+        conn = _transaction_connection.get()
     if conn is not None:
         result = conn.execute(text(query), params or {})
         if not result.returns_rows:

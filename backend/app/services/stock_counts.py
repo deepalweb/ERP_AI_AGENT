@@ -21,7 +21,7 @@ data: even a comparably huge 7,487-line count at this outlet finished in
 well under a day).
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from backend.app.db import reporting
 from backend.app.db.store_scope import CELESTE_STORE_IDS
@@ -420,14 +420,14 @@ COMPLETED_SESSIONS_SQL = f"""
 # completed session's lines carry avg_cost IS NULL/0, same gap already
 # documented for stuck sessions above).
 COMPLETED_SESSION_LINES_SQL = f"""
-    SELECT scl.count_id, scl.counted_qty, scl.onhand_qty, scl.avg_cost,
+    SELECT scl.count_id, scl.counted_qty, scl.onhand_qty, scl.avg_cost, scl.variance_value,
            pt.celeste_cost_price_ex_vat AS cost, pt.list_price
     FROM stock_count sc
     JOIN stock_location sl ON sl.id = sc.location_id
     JOIN res_store rs ON rs.warehouse_id = sl.warehouse_id
     JOIN stock_count_line scl ON scl.count_id = sc.id
-    JOIN product_product pp ON pp.id = scl.product_id
-    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    LEFT JOIN product_product pp ON pp.id = scl.product_id
+    LEFT JOIN product_template pt ON pt.id = pp.product_tmpl_id
     WHERE rs.id IN {CELESTE_STORE_IDS}
       AND sc.state = 'done'
       AND sc.completed_datetime >= :start AND sc.completed_datetime <= :end
@@ -476,17 +476,30 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
 
     counted_value_by_session: dict[int, float] = {}
     system_value_by_session: dict[int, float] = {}
+    source_cost_line_count_by_session: dict[int, int] = {}
+    catalog_cost_line_count_by_session: dict[int, int] = {}
+    priced_variance_by_session: dict[int, float] = {}
+    session_ids = {r["id"] for r in session_rows}
     for line in reporting.run_query(COMPLETED_SESSION_LINES_SQL, params):
+        count_id = line["count_id"]
+        if count_id not in session_ids:
+            continue
         avg_cost = float(line["avg_cost"] or 0)
         usable_cost = avg_cost if avg_cost > 0 else _usable_cost(line["cost"], line["list_price"])
         if usable_cost is None:
             continue
-        count_id = line["count_id"]
+        if avg_cost > 0:
+            source_cost_line_count_by_session[count_id] = source_cost_line_count_by_session.get(count_id, 0) + 1
+        else:
+            catalog_cost_line_count_by_session[count_id] = catalog_cost_line_count_by_session.get(count_id, 0) + 1
         counted_value_by_session[count_id] = (
             counted_value_by_session.get(count_id, 0.0) + float(line["counted_qty"] or 0) * usable_cost
         )
         system_value_by_session[count_id] = (
             system_value_by_session.get(count_id, 0.0) + float(line["onhand_qty"] or 0) * usable_cost
+        )
+        priced_variance_by_session[count_id] = (
+            priced_variance_by_session.get(count_id, 0.0) + abs(float(line.get("variance_value") or 0))
         )
 
     def _variance_rate(gross_abs_value: float, denominator: float) -> float | None:
@@ -514,6 +527,17 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
         "variance_rate_vs_system_pct": _variance_rate(
             float(r["gross_abs_variance_value"] or 0), system_value_by_session.get(r["id"], 0.0)
         ),
+        "valuation_coverage": {
+            "total_lines": int(r["lines"] or 0),
+            "priced_lines": source_cost_line_count_by_session.get(r["id"], 0)
+            + catalog_cost_line_count_by_session.get(r["id"], 0),
+            "source_cost_lines": source_cost_line_count_by_session.get(r["id"], 0),
+            "catalog_estimate_lines": catalog_cost_line_count_by_session.get(r["id"], 0),
+            "no_cost_lines": max(0, int(r["lines"] or 0)
+                                 - source_cost_line_count_by_session.get(r["id"], 0)
+                                 - catalog_cost_line_count_by_session.get(r["id"], 0)),
+            "variance_value_covered_rs": round(priced_variance_by_session.get(r["id"], 0.0), 2),
+        },
     } for r in session_rows]
 
     by_outlet = {}
@@ -555,6 +579,22 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
     total_net = round(sum(s["net_variance_value_rs"] for s in sessions), 2)
     total_counted_value = round(sum(s["counted_value_rs"] for s in sessions), 2)
     total_system_value = round(sum(s["system_value_rs"] for s in sessions), 2)
+    total_lines = sum(s["valuation_coverage"]["total_lines"] for s in sessions)
+    priced_lines = sum(s["valuation_coverage"]["priced_lines"] for s in sessions)
+    source_cost_lines = sum(s["valuation_coverage"]["source_cost_lines"] for s in sessions)
+    catalog_estimate_lines = sum(s["valuation_coverage"]["catalog_estimate_lines"] for s in sessions)
+    no_cost_lines = sum(s["valuation_coverage"]["no_cost_lines"] for s in sessions)
+    priced_variance_value = round(sum(s["valuation_coverage"]["variance_value_covered_rs"] for s in sessions), 2)
+    valuation_coverage = {
+        "total_lines": total_lines,
+        "priced_lines": priced_lines,
+        "source_cost_lines": source_cost_lines,
+        "catalog_estimate_lines": catalog_estimate_lines,
+        "no_cost_lines": no_cost_lines,
+        "line_coverage_pct": round(priced_lines / total_lines * 100, 2) if total_lines else None,
+        "variance_value_covered_rs": priced_variance_value,
+        "variance_value_coverage_pct": round(priced_variance_value / total_gross * 100, 2) if total_gross else None,
+    }
 
     breakdowns = [{
         "dimension": "store", "label": "Estimated completed-count variance by outlet",
@@ -576,6 +616,13 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
         # over the EXACT same window, not its own "last month" default.
         "start_date": start,
         "end_date": end,
+        "store_id": store_id,
+        "outlet_scope": (
+            sessions[0]["outlet"] if store_id is not None and sessions
+            else f"Store ID {store_id}" if store_id is not None
+            else "All Celeste outlets"
+        ),
+        "calculated_at": datetime.now(timezone.utc).isoformat(),
         "session_count": len(sessions),
         "sessions": sorted(sessions, key=lambda s: s["gross_abs_variance_value_rs"], reverse=True),
         "net_variance_value_rs": total_net,
@@ -584,5 +631,6 @@ def get_completed_stock_count_variance(period: str | None = None, start_date: st
         "system_value_rs": total_system_value,
         "variance_rate_vs_counted_pct": _variance_rate(total_gross, total_counted_value),
         "variance_rate_vs_system_pct": _variance_rate(total_gross, total_system_value),
+        "valuation_coverage": valuation_coverage,
         "breakdowns": breakdowns,
     }

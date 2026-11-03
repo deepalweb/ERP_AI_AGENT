@@ -16,7 +16,7 @@ judgment call — so a low score is always traceable to specific `drivers`.
 import anyio
 
 from backend.app.db import reporting
-from backend.app.db.store_scope import SALE_ORDER_LIVE_STATES
+from backend.app.db.store_scope import CELESTE_STORE_IDS, SALE_ORDER_LIVE_STATES
 from backend.app.services import dashboard, inventory as inventory_service
 from mcp_server.tools import intelligence
 
@@ -27,7 +27,17 @@ CUSTOMER_CONCENTRATION_THRESHOLD_PCT = 40
 DEAD_STOCK_VALUE_SHARE_THRESHOLD_PCT = 5
 OVERSTOCK_VALUE_SHARE_THRESHOLD_PCT = 25
 
-ALL_TIME_REVENUE_SQL = f"SELECT SUM(amount_total) AS revenue FROM sale_order WHERE state IN {SALE_ORDER_LIVE_STATES}"
+# Denominator for top-3 customer concentration -- must match the numerator's
+# scope (dashboard.get_top_customers(), CELESTE_STORE_IDS-filtered) or it
+# silently includes non-Celeste channels (SPAR, Budget Kade, Red Bull,
+# Nestle, ...) that share this same sale_order table. Verified live: the
+# unscoped version overstates revenue by 19% (Rs 1.53B vs the correct Rs
+# 1.24B) -- same "denominator scope" bug class already fixed once this
+# session in stock-count variance rate.
+ALL_TIME_REVENUE_SQL = f"""
+    SELECT SUM(amount_total) AS revenue FROM sale_order
+    WHERE state IN {SALE_ORDER_LIVE_STATES} AND store_id IN {CELESTE_STORE_IDS}
+"""
 
 
 def _status_for(score: float) -> str:

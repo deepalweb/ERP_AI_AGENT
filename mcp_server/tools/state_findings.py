@@ -577,14 +577,17 @@ def build_completed_stock_count_variance_finding(result: dict, metric_id: str):
     )
     impact = {
         "kind": "completed_stock_count_variance",
+        "window_days": COMPLETED_VARIANCE_WINDOW_DAYS,
         "financial_impact_rs": round(result["gross_abs_variance_value_rs"], 2),
+        "net_variance_value_rs": round(result["net_variance_value_rs"], 2),
         "count": result["session_count"],
         "avg_order_value_used": None,
         "confidence": "measured",
         "month": date.today().isoformat(),
-        "detail": f"Rs. {result['gross_abs_variance_value_rs']:,.0f} of variance across "
+        "detail": f"Gross absolute variance Rs. {result['gross_abs_variance_value_rs']:,.0f} "
+        f"(signed net Rs. {result['net_variance_value_rs']:,.0f}) across "
         f"{result['session_count']} completed stock count{'s' if plural else ''} "
-        f"({result['period']}){product_type_clause}.",
+        f"({result['period']}; {result['outlet_scope']}){product_type_clause}.",
     }
     recommendations = [
         {
@@ -619,6 +622,13 @@ def build_completed_stock_count_variance_finding(result: dict, metric_id: str):
             "pct_change": None,
             "unit": "count",
         },
+        "observation_window": {
+            "start_date": result["start_date"],
+            "end_date": result["end_date"],
+            "period": result["period"],
+            "outlet_scope": result["outlet_scope"],
+        },
+        "calculated_at": result["calculated_at"],
         "breakdowns": result["breakdowns"],
         "impact": impact,
         "how": None,
@@ -639,6 +649,7 @@ def build_completed_stock_count_variance_finding(result: dict, metric_id: str):
         "system_value_rs": result.get("system_value_rs"),
         "variance_rate_vs_counted_pct": result.get("variance_rate_vs_counted_pct"),
         "variance_rate_vs_system_pct": result.get("variance_rate_vs_system_pct"),
+        "valuation_coverage": result.get("valuation_coverage"),
         "status": "completed",
     }
 
@@ -652,16 +663,10 @@ def _completed_stock_count_variance_finding():
     large just happened" one. See build_completed_stock_count_variance_
     finding for the finding itself, shared with the ad-hoc save path."""
     result = stock_counts.get_completed_stock_count_variance(period=f"{COMPLETED_VARIANCE_WINDOW_DAYS}d")
-    # A live query against Odoo, run right now -- "today" is the correct
-    # watermark for THIS freshness question ("did we just read current data,"
-    # the same thing _stuck_stock_count_finding/_negative_stock_control_
-    # finding/_cost_coverage_control_finding mark fresh). result["end_date"]
-    # is deliberately NOT used here: it's the trailing window's end, anchored
-    # to the latest SALES order (borrowed from sales.py's shared period-bounds
-    # helper for window sizing) -- a stock count can complete on any day
-    # regardless of whether orders are flowing, so sales recency doesn't
-    # establish whether this specific query itself is current.
-    measurement.source_as_of(date.today().isoformat())
+    # Query time is recorded separately as calculated_at. Neither it nor
+    # the trailing window's end date is a source-refresh watermark, so this
+    # detector must not claim fresh data or let absence prove recovery.
+    measurement.source_as_of(result["end_date"], verifies_source=False)
     if not result["sessions"] or result["sessions"][0]["gross_abs_variance_value_rs"] < COMPLETED_VARIANCE_HIGH_SESSION_RS:
         return None
     return build_completed_stock_count_variance_finding(result, "completed_stock_count_variance")
@@ -715,6 +720,7 @@ def _damage_writeoff_finding():
         "kind": "damage_writeoff",
         "financial_impact_rs": result["total_value_rs"],
         "count": result["order_count"],
+        "window_days": result["window_days"],
         "valuation_coverage": coverage,
         "avg_order_value_used": None,
         "confidence": "measured",
@@ -1018,11 +1024,20 @@ def _top_seller_stock_finding():
     real, comparatively rare signal; the rest of the "short" list is kept
     as supporting context on the finding, not what triggers it."""
     coverage = get_top_product_stock_coverage()
-    measurement.source_as_of(coverage.get("as_of_date"), verifies_source=False)
     if not coverage.get("products"):
         measurement.source_unavailable("No top-product coverage.")
     if not coverage.get("as_of_date"):
         return None
+    # current_stock comes from stock_quant, queried live just now -- unlike
+    # coverage["as_of_date"] (sales recency, used only to pick the top-N and
+    # label the period), the stock check itself genuinely is current as of
+    # today. Without this, a cycle where every top seller restocks can never
+    # be verified: run_snapshot() leaves freshness "unknown" by default,
+    # which measurement.healthy() never accepts, so this case would stay
+    # open forever no matter how many clean days follow (same bug class
+    # already caught and fixed once on completed_stock_count_variance --
+    # see _cost_coverage_control_finding's comment).
+    measurement.source_as_of(date.today().isoformat())
 
     out_of_stock = [p for p in coverage["products"] if p["current_stock"] <= 0]
     if not out_of_stock:

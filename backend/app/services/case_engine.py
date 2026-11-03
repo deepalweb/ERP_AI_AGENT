@@ -1012,7 +1012,12 @@ def _ingest_finding(finding: dict, horizon: str, scan_run_id: str, today: date) 
     return case_id
 
 
-def save_ad_hoc_case(finding: dict) -> str:
+def save_ad_hoc_case(
+    finding: dict,
+    evidence_collection_key: str | None = None,
+    evidence_id_key: str = "id",
+    metric_id_prefix: str | None = None,
+) -> str:
     """Completed Stock-Count Variance & Shrinkage Investigation: lets an
     on-demand Ask Celeste investigation become a persistent, trackable
     case OUTSIDE the daily scan -- the one genuinely new case-creation path
@@ -1032,17 +1037,83 @@ def save_ad_hoc_case(finding: dict) -> str:
     finding['metric_id'] is the only hard requirement (KeyError otherwise,
     same as sync_cases()) -- the caller is responsible for it being scoped
     to what the manager actually investigated (e.g. embedding store/period),
-    never a single shared id for every ad-hoc save."""
+    never a single shared id for every ad-hoc save. Optional evidence
+    matching lets a caller reuse an active case for an identical evidence
+    set and link partial overlaps, without merging their snapshots or totals."""
     _ensure_schema()
     today = _business_today()
     scan_run_id = today.isoformat()
     horizon = finding.get("horizon") or "snapshot"
     with _case_write_lock():
+        evidence_ids = None
+        matching_cases = []
+        if evidence_collection_key and metric_id_prefix:
+            evidence_ids = {
+                str(item[evidence_id_key])
+                for item in finding.get(evidence_collection_key, [])
+                if isinstance(item, dict) and item.get(evidence_id_key) is not None
+            }
+            cases = appdb.run_query(
+                f"SELECT * FROM business_cases WHERE domain=:domain "
+                f"AND (metric_id=:prefix OR substr(metric_id, 1, :prefix_length)=:prefix || '-') "
+                f"AND status IN {_ACTIVE_STATUSES_SQL} ORDER BY opened_at, case_id",
+                {
+                    "domain": finding.get("domain") or "unclassified",
+                    "prefix": metric_id_prefix,
+                    "prefix_length": len(metric_id_prefix) + 1,
+                },
+            )
+            latest_by_case = _latest_observations_for([case["case_id"] for case in cases])
+            for case in cases:
+                latest = latest_by_case.get(case["case_id"])
+                if not latest:
+                    continue
+                snapshot = json.loads(latest["snapshot"])
+                prior_ids = {
+                    str(item[evidence_id_key])
+                    for item in snapshot.get(evidence_collection_key, [])
+                    if isinstance(item, dict) and item.get(evidence_id_key) is not None
+                }
+                overlap = evidence_ids & prior_ids
+                if overlap:
+                    matching_cases.append({
+                        "case": case,
+                        "evidence_ids": prior_ids,
+                    })
+
+            exact_matches = [item for item in matching_cases if item["evidence_ids"] == evidence_ids]
+            if exact_matches:
+                canonical = next(
+                    (item for item in exact_matches if item["case"]["metric_id"] == metric_id_prefix),
+                    exact_matches[0],
+                )
+                finding["metric_id"] = canonical["case"]["metric_id"]
+                finding["id"] = f"{finding['metric_id']}-{today.isoformat()}"
+
         case_id = _ingest_finding(finding, horizon, scan_run_id, today)
         _record_measurement(case_id, measurement.observation(
             finding["metric_id"], horizon, "measured_actionable", scope=finding["metric_id"],
             period=scan_run_id, reason="Manually measured scope; requires explicit remeasurement.",
         ))
+        for match in matching_cases:
+            related_case_id = match["case"]["case_id"]
+            if related_case_id == case_id:
+                continue
+            relationship = (
+                "duplicate_of" if match["evidence_ids"] == evidence_ids
+                else "overlaps"
+            )
+            if relationship == "duplicate_of":
+                link_case_id, related_id = related_case_id, case_id
+            else:
+                link_case_id, related_id = case_id, related_case_id
+            existing = appdb.run_query(
+                "SELECT 1 FROM case_relationships "
+                "WHERE case_id=:c AND related_case_id=:r AND relationship_type=:t LIMIT 1",
+                {"c": link_case_id, "r": related_id, "t": relationship},
+            )
+            if not existing:
+                _link_relationship(link_case_id, related_id, relationship)
         return case_id
 
 
@@ -1396,6 +1467,13 @@ def _summarize_snapshot(snapshot: dict) -> dict:
          "units_affected": impact.get("units_affected"), "valued_units_pct": impact.get("valued_units_pct"),
          "plan_units": impact.get("plan_units"), "sent_units": impact.get("sent_units"), "line_received_units": impact.get("line_received_units"),
          "planning_gap_units": impact.get("planning_gap_units"), "transit_gap_units": impact.get("transit_gap_units"), "total_gap_units": impact.get("total_gap_units"),
+         "line_rate": impact.get("line_rate"), "unit_rate": impact.get("unit_rate"),
+         "unit_rate_numerator_units": impact.get("unit_rate_numerator_units"),
+         "unit_rate_denominator_units": impact.get("unit_rate_denominator_units"),
+         "unit_rate_denominator_label": impact.get("unit_rate_denominator_label"),
+         "unit_rate_coverage_pct": impact.get("unit_rate_coverage_pct"), "window_days": impact.get("window_days"),
+         "lines_total": impact.get("lines_total"), "lines_priced": impact.get("lines_priced"),
+         "excluded_lines": impact.get("excluded_lines"), "excluded_units": impact.get("excluded_units"),
          "kind": impact.get("kind"),
          # Small, curated numbers the case-list title builder needs (Investigate.jsx's
          # standardTitleFor) -- the list's "latest" only ever gets this summary, never
@@ -1580,6 +1658,10 @@ def get_case_detail(case_id: str) -> dict | None:
             "system_value_rs": latest_snapshot.get("system_value_rs"),
             "variance_rate_vs_counted_pct": latest_snapshot.get("variance_rate_vs_counted_pct"),
             "variance_rate_vs_system_pct": latest_snapshot.get("variance_rate_vs_system_pct"),
+            "net_variance_value_rs": latest_snapshot.get("net_variance_value_rs"),
+            "observation_window": latest_snapshot.get("observation_window"),
+            "calculated_at": latest_snapshot.get("calculated_at"),
+            "valuation_coverage": latest_snapshot.get("valuation_coverage"),
             # Case Detail V3 bug fix: ControlsInvestigationPanel.jsx and
             # IncidentInvestigationPanel.jsx both read these directly off
             # `latest`, but they were never added to this whitelist -- so
@@ -1633,8 +1715,19 @@ def get_case_detail(case_id: str) -> dict | None:
             "outlet_rows": latest_snapshot.get("outlet_rows"),
             "transfer_rows": latest_snapshot.get("transfer_rows"),
             "trace_rows": latest_snapshot.get("trace_rows"),
+            "excluded_rows": latest_snapshot.get("excluded_rows"),
+            "excluded_trace_rows": latest_snapshot.get("excluded_trace_rows"),
+            "git_rows": latest_snapshot.get("git_rows"),
+            "source_location_rows": latest_snapshot.get("source_location_rows"),
+            "related_transfer_outcomes": latest_snapshot.get("related_transfer_outcomes"),
             "dispatch_rows": latest_snapshot.get("dispatch_rows"),
             "pattern_rows": latest_snapshot.get("pattern_rows"),
+            "operation_flow_rows": latest_snapshot.get("operation_flow_rows"),
+            "po_price_deviation_rows": latest_snapshot.get("po_price_deviation_rows"),
+            "stock_move_missing_episodes": latest_snapshot.get("stock_move_missing_episodes"),
+            "fresh_production_missed_rows": latest_snapshot.get("fresh_production_missed_rows"),
+            "fresh_production_shortfall_rows": latest_snapshot.get("fresh_production_shortfall_rows"),
+            "fresh_production_cycle_time_rows": latest_snapshot.get("fresh_production_cycle_time_rows"),
             # _damage_writeoff_finding's own per-product breakdown (reuses
             # "by_outlet" above, which is already whitelisted) -- a
             # different shape than "products" (negative_stock_control's
@@ -1655,6 +1748,14 @@ def get_case_detail(case_id: str) -> dict | None:
             category=latest.get("category"), pct_change=confirm.get("pct_change"),
         )
 
+    # Local import: management.py imports case_engine at module level, so a
+    # top-level import here would be circular. sync_status() is the same
+    # function Investigate's DataSyncBar already uses -- reused rather than
+    # recomputed, so a case viewed alone can't silently look more current
+    # than the list it came from (verified live, 2026-10-31: the reporting
+    # mirror had received no new orders in 5 days, and this page had no way
+    # to show that).
+    from backend.app.services import management
     return {
         "case": case,
         "resolution_policy": {"name": _RESOLUTION_POLICY_NAME.get(case["category"], "problem_recovery"), "verification_window": VERIFICATION_WINDOW},
@@ -1667,6 +1768,7 @@ def get_case_detail(case_id: str) -> dict | None:
         "relationships": get_case_relationships(case_id),
         "related_signals": related,
         "history": get_case_history(case_id),
+        "sync": management.sync_status(),
     }
 
 

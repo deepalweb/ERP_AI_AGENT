@@ -483,6 +483,30 @@ async def test_case_detail_exposes_a_richer_latest_summary_including_evidence(tw
     assert detail["latest"]["recommendations"] is None or detail["latest"]["recommendations"] == []
 
 
+async def test_transfer_case_detail_preserves_rate_basis_and_excluded_receipt_evidence(appdb_reset):
+    finding = _monthly_finding("transfer_discrepancy_missing_item", "inventory", "2026-10-15")
+    finding["horizon"] = "snapshot"
+    finding["impact"] = {
+        "kind": "transfer_discrepancy", "financial_impact_rs": 10.0,
+        "unit_rate": 0.29, "unit_rate_numerator_units": 1039.0,
+        "unit_rate_denominator_units": 364529.0,
+        "unit_rate_denominator_label": "all Celeste outlet transfer receipts in the 14-day window",
+        "window_days": 14, "excluded_lines": 1, "excluded_units": 500.0,
+    }
+    finding["excluded_rows"] = [{"outlet": "Attidiya", "lines": 1, "units": 500.0, "states": ["cancel"]}]
+    finding["excluded_trace_rows"] = [{
+        "id": 99, "receipt": "CLSAD/IN/09999", "receipt_state": "cancel",
+        "outlet": "Attidiya", "product": "Example product", "missing_qty": 500.0,
+    }]
+    case_engine.sync_cases([], [finding], [])
+
+    detail = await main.get_case_detail(finding["case_id"])
+    assert detail["latest"]["impact"]["unit_rate_denominator_units"] == 364529.0
+    assert detail["latest"]["impact"]["unit_rate_denominator_label"].startswith("all Celeste outlet")
+    assert detail["latest"]["excluded_rows"][0]["units"] == 500.0
+    assert detail["latest"]["excluded_trace_rows"][0]["receipt_state"] == "cancel"
+
+
 async def test_case_detail_exposes_the_metrics_trend_series(appdb_reset, monkeypatch):
     # Celeste Investigate Phase 3 (revenue investigation): the trend series
     # is already computed and stored in every monthly finding's snapshot,
