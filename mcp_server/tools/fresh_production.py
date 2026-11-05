@@ -60,6 +60,7 @@ and it isn't mapped to any single outlet's res_store), so there is no
 outlet breakdown here, only product and round (morning/evening).
 """
 
+import re
 from collections import defaultdict
 from datetime import date
 
@@ -454,6 +455,130 @@ def _cycle_time_snapshot():
     rows = reporting.run_query(CYCLE_TIME_SQL)
     measurement.source_as_of(date.today().isoformat())
     return _cycle_time_finding(rows)
+
+
+AVERAGE_WEIGHT_SQL = f"""
+    WITH bounds AS (SELECT MAX(scan_time) AS as_of FROM fresh_scan_log)
+    SELECT pt.id AS product_tmpl_id, pt.name->>'en_US' AS product, pt.default_code AS sku,
+           COUNT(*) AS scan_count,
+           AVG(fsl.scanned_weight_g) AS avg_weight_g,
+           MIN(fsl.scanned_weight_g) AS min_weight_g,
+           MAX(fsl.scanned_weight_g) AS max_weight_g
+    FROM fresh_scan_log fsl
+    JOIN bounds b ON true
+    JOIN product_product pp ON pp.id = fsl.product_id
+    JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    WHERE fsl.scanned_weight_g > 0
+      AND fsl.scan_time >= b.as_of - INTERVAL '{WINDOW_DAYS} days'
+    GROUP BY pt.id, pt.name, pt.default_code
+    ORDER BY scan_count DESC
+"""
+
+# The promised weight range ("Common Beans 200G - 250G") exists nowhere as a
+# structured field -- product_template.fresh_min/max_weight_g is populated
+# for 0 products, and fresh_scan_log's own min_weight_g/max_weight_g columns
+# are always 0 across all 721K rows (verified live, 2026-11-05). This is the
+# ONLY place the promised range exists, so it's parsed from the name text.
+# Verified against the 112 distinct fresh-production product names live:
+# 95 parse to a real two-sided range, a handful ("Green Grapes 250G") state
+# a single weight with no range, and a few ("Rambutan (10 Fruits)", a
+# packaging SKU) have no weight at all -- those last two groups get no band
+# below (None), never an invented one.
+_WEIGHT_RANGE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(kg|g)?\s*-\s*(\d+(?:\.\d+)?)\s*(kg|g)\b", re.IGNORECASE)
+
+
+def _parse_weight_band_g(name: str) -> tuple[float, float] | None:
+    if not name:
+        return None
+    m = _WEIGHT_RANGE_RE.search(name)
+    if not m:
+        return None
+    v1, u1, v2, u2 = m.groups()
+    u1 = u1 or u2
+    g1 = float(v1) * (1000 if u1.lower() == "kg" else 1)
+    g2 = float(v2) * (1000 if u2.lower() == "kg" else 1)
+    return (min(g1, g2), max(g1, g2))
+
+
+def _band_compliance_sql(bands: list[tuple[int, float, float]]) -> str:
+    # Values here are our own parsed (int id, float, float) tuples, never
+    # user input, so inlining them as a literal VALUES list is safe and
+    # avoids array-parameter binding -- same posture as this module's other
+    # SQL constants embedding fixed internal constants via f-string.
+    values_sql = ", ".join(f"({pid}, {lo}, {hi})" for pid, lo, hi in bands)
+    return f"""
+        WITH bounds AS (SELECT MAX(scan_time) AS as_of FROM fresh_scan_log),
+        bandtbl(product_tmpl_id, min_g, max_g) AS (VALUES {values_sql})
+        SELECT pt.id AS product_tmpl_id,
+               COUNT(*) FILTER (WHERE fsl.scanned_weight_g < b.min_g) AS below,
+               COUNT(*) FILTER (WHERE fsl.scanned_weight_g > b.max_g) AS above,
+               COUNT(*) FILTER (WHERE fsl.scanned_weight_g BETWEEN b.min_g AND b.max_g) AS correct
+        FROM fresh_scan_log fsl
+        JOIN bounds bd ON true
+        JOIN product_product pp ON pp.id = fsl.product_id
+        JOIN product_template pt ON pt.id = pp.product_tmpl_id
+        JOIN bandtbl b ON b.product_tmpl_id = pt.id
+        WHERE fsl.scanned_weight_g > 0
+          AND fsl.scan_time >= bd.as_of - INTERVAL '{WINDOW_DAYS} days'
+        GROUP BY pt.id
+    """
+
+
+def get_average_weight_by_product() -> dict:
+    """Average scanned pack weight per product, straight from the scale/
+    barcode scan log (fresh_scan_log) -- requested by Operations, 2026-11-05.
+    This is the real per-pack weight the production team's scale captures at
+    scan time, not mrp_production's unit count: product_template.weight is
+    unpopulated for virtually every product (835 of 52,024 production rows
+    have a nonzero value), and mrp_production itself tracks quantity in
+    "Units", never kg -- verified live the same day.
+
+    Also classifies each product's scans against its own promised weight
+    band (correct_pct/below_pct/above_pct), parsed from the product name --
+    see _parse_weight_band_g's comment for why that's the only source. A
+    product with no parsable band gets `band_g: None` and no percentages,
+    never an invented 0%. Pushed into SQL as a second query (not pulled into
+    Python row-by-row) because a raw per-scan pull of this window measured
+    ~6s live, 2026-11-05 -- too slow for an on-demand page load; the
+    aggregated query runs in under a second.
+
+    A live read, not a finding -- there's no threshold or anomaly here, just
+    the plain average/compliance rate the scan log already has full history
+    for."""
+    rows = reporting.run_query(AVERAGE_WEIGHT_SQL)
+    products = [
+        {
+            "product_tmpl_id": r["product_tmpl_id"],
+            "product": r["product"],
+            "sku": r["sku"],
+            "scan_count": r["scan_count"],
+            "avg_weight_g": round(float(r["avg_weight_g"]), 1),
+            "min_weight_g": round(float(r["min_weight_g"]), 1),
+            "max_weight_g": round(float(r["max_weight_g"]), 1),
+            "band_g": _parse_weight_band_g(r["product"]),
+            "correct_pct": None,
+            "below_pct": None,
+            "above_pct": None,
+        }
+        for r in rows
+    ]
+
+    bands = [(p["product_tmpl_id"], *p["band_g"]) for p in products if p["band_g"]]
+    if bands:
+        compliance = {r["product_tmpl_id"]: r for r in reporting.run_query(_band_compliance_sql(bands))}
+        for p in products:
+            c = compliance.get(p["product_tmpl_id"])
+            if not c:
+                continue
+            total = c["below"] + c["above"] + c["correct"]
+            if total:
+                p["below_pct"] = round(c["below"] / total * 100, 1)
+                p["above_pct"] = round(c["above"] / total * 100, 1)
+                p["correct_pct"] = round(c["correct"] / total * 100, 1)
+
+    for p in products:
+        del p["product_tmpl_id"]
+    return {"window_days": WINDOW_DAYS, "products": products}
 
 
 def build_fresh_production_findings() -> measurement.FindingBatch:

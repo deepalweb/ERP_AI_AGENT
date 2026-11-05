@@ -132,3 +132,63 @@ def test_cycle_time_finding_carries_each_rounds_own_cutoff():
     assert row["cycle_hours"] == 20.0
     assert row["round_cutoff_hours"] == 13.6
     assert row["document"] == "FWH/MO/1"
+
+
+def _router(average_rows, compliance_rows):
+    def run_query(sql):
+        return compliance_rows if "bandtbl" in sql else average_rows
+    return run_query
+
+
+def test_get_average_weight_by_product_rounds_and_shapes_the_result(monkeypatch):
+    monkeypatch.setattr(fp.reporting, "run_query", _router(
+        average_rows=[{"product_tmpl_id": 1, "product": "Common Beans 200G - 250G", "sku": "004917",
+                        "scan_count": 10, "avg_weight_g": 231.456, "min_weight_g": 198.0, "max_weight_g": 261.0}],
+        compliance_rows=[{"product_tmpl_id": 1, "below": 1, "above": 1, "correct": 8}],
+    ))
+
+    result = fp.get_average_weight_by_product()
+
+    assert result["window_days"] == fp.WINDOW_DAYS
+    assert result["products"] == [
+        {"product": "Common Beans 200G - 250G", "sku": "004917", "scan_count": 10,
+         "avg_weight_g": 231.5, "min_weight_g": 198.0, "max_weight_g": 261.0,
+         "band_g": (200.0, 250.0), "correct_pct": 80.0, "below_pct": 10.0, "above_pct": 10.0},
+    ]
+
+
+def test_get_average_weight_by_product_handles_no_scans(monkeypatch):
+    monkeypatch.setattr(fp.reporting, "run_query", _router(average_rows=[], compliance_rows=[]))
+
+    result = fp.get_average_weight_by_product()
+
+    assert result["products"] == []
+
+
+def test_get_average_weight_by_product_leaves_unparseable_names_without_a_band(monkeypatch):
+    # No weight at all in the name -- never a compliance query, never an invented band.
+    calls = []
+
+    def run_query(sql):
+        calls.append(sql)
+        return [{"product_tmpl_id": 1, "product": "Rambutan (10 Fruits)", "sku": "002032",
+                  "scan_count": 5, "avg_weight_g": 1200.0, "min_weight_g": 1100.0, "max_weight_g": 1300.0}]
+
+    monkeypatch.setattr(fp.reporting, "run_query", run_query)
+
+    result = fp.get_average_weight_by_product()
+
+    assert result["products"][0]["band_g"] is None
+    assert result["products"][0]["correct_pct"] is None
+    assert len(calls) == 1  # only the average query -- no products had a band, so no compliance query ran
+
+
+def test_parse_weight_band_g_handles_the_real_name_format_variations():
+    assert fp._parse_weight_band_g("Common Beans 200G - 250G - Celeste Daily - SKU 004917") == (200.0, 250.0)
+    assert fp._parse_weight_band_g("Jama Narang (Local Mandarin) 250 - 300G - SKU 000066") == (250.0, 300.0)
+    assert fp._parse_weight_band_g("Tjc Mango 500G-700G - Nelna - SKU 002915") == (500.0, 700.0)
+    assert fp._parse_weight_band_g("Ambun Banana 1 - 1.2Kg - Celeste Daily - SKU 002096") == (1000.0, 1200.0)
+    assert fp._parse_weight_band_g("Tanin Papaya 600G - 1.1Kg - Celeste Daily - SKU 006502") == (600.0, 1100.0)
+    assert fp._parse_weight_band_g("Green Grapes 250G - Celeste Daily - Sku 001507") is None  # single value, no range
+    assert fp._parse_weight_band_g("Rambutan (10 Fruits) - Celeste Daily - SKU 002032") is None
+    assert fp._parse_weight_band_g("") is None

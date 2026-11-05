@@ -24,6 +24,19 @@ export async function fetchOperationsSummary() {
   return readResponse(response);
 }
 
+export async function fetchOperationsPickers(month) {
+  const query = month ? `?month=${encodeURIComponent(month)}` : "";
+  const response = await apiFetch(`${API_BASE_URL}/operations/pickers${query}`);
+
+  return readResponse(response);
+}
+
+export async function fetchFreshProductionAverageWeight() {
+  const response = await apiFetch(`${API_BASE_URL}/operations/fresh-production/average-weight`);
+
+  return readResponse(response);
+}
+
 export async function fetchCustomerIntelligence() {
   const response = await apiFetch(`${API_BASE_URL}/customers/intelligence`);
 
@@ -59,6 +72,12 @@ export async function fetchChannelBreakdown(period) {
 
 export async function fetchForwardLook() {
   const response = await apiFetch(`${API_BASE_URL}/forecast/forward-look`);
+
+  return readResponse(response);
+}
+
+export async function fetchTimesFmOutletForecast() {
+  const response = await apiFetch(`${API_BASE_URL}/forecast/outlet-orders`);
 
   return readResponse(response);
 }

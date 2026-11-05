@@ -4,15 +4,22 @@ import os
 
 import anyio
 from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from dotenv import load_dotenv
 from pydantic import BaseModel
 
 load_dotenv()
 
-from mcp_server.tools import current_period, intelligence, state_findings, transfer_accountability
+from mcp_server.tools import (
+    current_period,
+    fresh_production,
+    intelligence,
+    state_findings,
+    transfer_accountability,
+)
+
 from .core.access import AccessControlMiddleware, auth_mode
 from .db import reporting
 from .db.store_scope import CELESTE_STORE_NAMES
@@ -282,6 +289,19 @@ async def operations_pickers(month: str | None = None):
     except Exception:
         logger.exception("operations pickers failed")
         return {"status": "error", "detail": "Could not load picker data."}
+
+
+@app.get("/operations/fresh-production/average-weight")
+async def fresh_production_average_weight():
+    """Average scanned pack weight per product, from the production team's
+    scale/barcode scan log. See mcp_server/tools/fresh_production.py's
+    get_average_weight_by_product()."""
+    try:
+        result = await anyio.to_thread.run_sync(fresh_production.get_average_weight_by_product)
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("fresh production average weight failed")
+        return {"status": "error", "detail": "Could not load average weight data."}
 
 
 @app.get("/customers/intelligence")
@@ -725,6 +745,23 @@ async def forward_look():
     except Exception:
         logger.exception("forward look failed")
         return {"status": "error", "detail": "Could not compute the forward look."}
+
+
+@app.get("/forecast/outlet-orders")
+async def outlet_order_forecast():
+    """TimesFM 2.5 outlet order-count forecast -- see
+    backend/app/services/forecast.py's get_outlet_order_forecast() and
+    docs/outlet-forecast-evaluation.md for how this differs from
+    /forecast/forward-look (a real ML forecast, not a trend projection,
+    but also not guaranteed fresh -- check `source.is_stale`)."""
+    try:
+        result = await anyio.to_thread.run_sync(forecast.get_outlet_order_forecast)
+        if result is None:
+            return {"status": "unavailable", "detail": "No outlet order forecast has been generated yet."}
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("outlet order forecast failed")
+        return {"status": "error", "detail": "Could not load the outlet order forecast."}
 
 
 @app.get("/operations/loss-and-damage")
