@@ -709,6 +709,84 @@ METRICS: dict[str, MetricDef] = {
         notes="Scoped to Celeste's 5 own outlets, same as every other metric here — see "
         "uber_failure_rate's notes for why the wider partner-brand outlet network is excluded.",
     ),
+    "return_rate": MetricDef(
+        id="return_rate",
+        independence_reviewed=True,
+        label="Internal return rate",
+        unit="percent",
+        direction="higher_is_bad",
+        is_rate=True,
+        # Not "lost_orders" -- unlike a cancellation, a returned order DID
+        # complete; there is no honest unit to translate an "excess return"
+        # into here, so impact estimation is deliberately skipped (None).
+        impact_kind=None,
+        # Confirmed Odoo return_order states only -- same two-tier split
+        # loss_and_damage.py's DAMAGE_CONFIRMED_STATES already uses:
+        # 'draft'/'approval'/'to_dispatch'/'confirm' are not yet resolved;
+        # 'done'/'refunded' are. is_supplier_return=false scopes this to
+        # internal/customer returns, not supplier returns (out of scope,
+        # same hold loss_and_damage.py's module docstring already applies).
+        # Checked live (2026-11-03): return RATE (not just count) has
+        # climbed roughly 33x from April (11 returns / 62,670 orders,
+        # 0.018%) to October (520 / 88,337, 0.59%) -- genuinely
+        # disproportionate to the ~1.4x order-volume growth over the same
+        # months, not just "the business got bigger."
+        trend_sql=f"""
+            WITH returns AS (
+                SELECT date_trunc('month', ro.date) AS month, COUNT(DISTINCT ro.id) AS n
+                FROM return_order ro
+                JOIN stock_picking_type spt ON spt.id = ro.operation_type_id
+                JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+                WHERE rs.id IN {CELESTE_STORE_IDS} AND ro.state IN ('done', 'refunded')
+                  AND ro.is_supplier_return = false
+                GROUP BY 1
+            ),
+            orders AS (
+                SELECT date_trunc('month', date_order) AS month, COUNT(*) AS n
+                FROM sale_order WHERE store_id IN {CELESTE_STORE_IDS} AND state IN {SALE_ORDER_LIVE_STATES}
+                GROUP BY 1
+            )
+            SELECT o.month AS month, COALESCE(r.n, 0) AS numerator, o.n AS denominator
+            FROM orders o LEFT JOIN returns r ON r.month = o.month
+            ORDER BY o.month
+        """,
+        dimensions=[
+            Dimension(
+                id="store", label="Outlet", mode="contribution",
+                sql=f"""
+                    SELECT rs.name AS name, COUNT(DISTINCT ro.id) AS value
+                    FROM return_order ro
+                    JOIN stock_picking_type spt ON spt.id = ro.operation_type_id
+                    JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+                    WHERE rs.id IN {CELESTE_STORE_IDS} AND ro.state IN ('done', 'refunded')
+                      AND ro.is_supplier_return = false
+                      AND ro.date >= :start AND ro.date < :end
+                    GROUP BY rs.name
+                """,
+            ),
+            Dimension(
+                # Role-wise accountability review, 2026-11-03: return_order.
+                # responsible_id is real, individually-identifiable staff
+                # (same people already found on damaged_order/stock_picking),
+                # not a shared device login -- checked before adding this.
+                id="person", label="Responsible", mode="contribution",
+                sql=f"""
+                    SELECT COALESCE(ru.login, 'Unassigned') AS name, COUNT(DISTINCT ro.id) AS value
+                    FROM return_order ro
+                    JOIN stock_picking_type spt ON spt.id = ro.operation_type_id
+                    JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
+                    LEFT JOIN res_users ru ON ru.id = ro.responsible_id
+                    WHERE rs.id IN {CELESTE_STORE_IDS} AND ro.state IN ('done', 'refunded')
+                      AND ro.is_supplier_return = false
+                      AND ro.date >= :start AND ro.date < :end
+                    GROUP BY COALESCE(ru.login, 'Unassigned')
+                """,
+            ),
+        ],
+        notes="Internal/customer returns only (is_supplier_return=false) -- supplier returns are a "
+        "purchasing-side signal, out of scope here per loss_and_damage.py's existing hold. Scoped to "
+        "Celeste's 4 real outlets, same as every other metric here.",
+    ),
     "customer_retention_rate": MetricDef(
         id="customer_retention_rate",
         independence_reviewed=True,
