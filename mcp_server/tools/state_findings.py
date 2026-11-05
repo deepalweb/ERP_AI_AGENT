@@ -706,6 +706,11 @@ def _damage_writeoff_finding():
         "mode": "contribution", "baseline_month": None,
         "total": result["total_value_rs"],
         "top_contributors": [{"name": p["name"], "current": p["value_rs"], "delta": p["value_rs"]} for p in result["top_products"]],
+    }, {
+        "dimension": "person", "label": "Damage write-off value by responsible person",
+        "mode": "contribution", "baseline_month": None,
+        "total": result["total_value_rs"],
+        "top_contributors": [{"name": p["responsible"], "current": p["value_rs"], "delta": p["value_rs"]} for p in result["by_person"]],
     }]
     evidence = evidence_engine.build_snapshot_evidence(breakdowns, result["as_of"])
 
@@ -767,6 +772,7 @@ def _damage_writeoff_finding():
         # per-outlet/per-product table instead of only the breakdown.
         "by_outlet": result["by_outlet"],
         "top_products": result["top_products"],
+        "by_person": result["by_person"],
         "status": "completed",
     }
 

@@ -8,10 +8,11 @@ from backend.app.services import loss_and_damage
 
 
 def _line(order_id=1, order_name="DMG/1", outlet="Celeste Daily Colombo 6", product="Carrot", sku="000083",
-          qty=10.0, cost=15.0, list_price=20.0, state="scrapped"):
+          qty=10.0, cost=15.0, list_price=20.0, state="scrapped", responsible="dasuni@celeste.lk"):
     return {
         "order_id": order_id, "order_name": order_name, "order_date": "2026-10-01", "state": state,
         "outlet": outlet, "product": product, "sku": sku, "qty": qty, "cost": cost, "list_price": list_price,
+        "responsible": responsible,
     }
 
 
@@ -58,6 +59,21 @@ def test_aggregates_by_outlet_and_by_product_sorted_by_value(monkeypatch):
     assert result["by_outlet"][0] == {"outlet": "Celeste Daily Colombo 6", "orders": 2, "qty": 15.0, "value_rs": 150.0}
     assert result["by_outlet"][1] == {"outlet": "Celeste Daily - Attidiya", "orders": 1, "qty": 1.0, "value_rs": 5.0}
     assert result["top_products"][0] == {"name": "Carrot", "sku": "A", "lines": 2, "qty": 15.0, "value_rs": 150.0}
+
+
+def test_aggregates_by_responsible_person_sorted_by_value(monkeypatch):
+    rows = [
+        _line(order_id=1, responsible="rajitha@celeste.lk", qty=10.0, cost=10.0, list_price=20.0),
+        _line(order_id=2, responsible="rajitha@celeste.lk", qty=5.0, cost=10.0, list_price=20.0),
+        _line(order_id=3, responsible="sandya@celeste.lk", qty=1.0, cost=5.0, list_price=10.0),
+        _line(order_id=4, responsible=None, qty=1.0, cost=5.0, list_price=10.0),
+    ]
+    monkeypatch.setattr(loss_and_damage.reporting, "run_query", _fake_run_query(rows))
+    result = loss_and_damage.get_damage_writeoff()
+
+    assert result["by_person"][0] == {"responsible": "rajitha@celeste.lk", "orders": 2, "qty": 15.0, "value_rs": 150.0}
+    assert result["by_person"][1] == {"responsible": "sandya@celeste.lk", "orders": 1, "qty": 1.0, "value_rs": 5.0}
+    assert result["by_person"][2] == {"responsible": "Unassigned", "orders": 1, "qty": 1.0, "value_rs": 5.0}
 
 
 def test_window_days_controls_the_query_range(monkeypatch):

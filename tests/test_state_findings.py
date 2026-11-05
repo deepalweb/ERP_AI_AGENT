@@ -369,7 +369,7 @@ def test_completed_variance_finding_fires_above_threshold_with_real_priority_tie
 # damaged_order document), always-fires posture (see DAMAGE_WRITEOFF_*
 # constants' docstring for why -- the condition is chronic, not anomalous).
 
-def _damage_result(order_count, total_value, line_count=None, by_outlet=None, top_products=None, as_of="2026-10-08"):
+def _damage_result(order_count, total_value, line_count=None, by_outlet=None, top_products=None, by_person=None, as_of="2026-10-08"):
     return {
         "as_of": as_of, "window_days": 14, "start_date": "2026-09-25", "end_date": as_of,
         "order_count": order_count, "line_count": line_count if line_count is not None else order_count,
@@ -377,6 +377,7 @@ def _damage_result(order_count, total_value, line_count=None, by_outlet=None, to
         "valuation_coverage": {"total_lines": order_count, "catalog_estimate_lines": order_count, "no_cost_data_lines": 0},
         "by_outlet": by_outlet or [],
         "top_products": top_products or [],
+        "by_person": by_person or [],
     }
 
 

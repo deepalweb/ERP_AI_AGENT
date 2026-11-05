@@ -37,13 +37,15 @@ DAMAGE_CONFIRMED_STATES = ("scrapped", "record_wastage", "done")
 DAMAGE_WRITEOFF_LINES_SQL = f"""
 SELECT do_.id AS order_id, do_.name AS order_name, do_.date AS order_date, do_.state AS state,
        rs.name AS outlet, pt.name->>'en_US' AS product, pt.default_code AS sku,
-       dol.initial_demand AS qty, pt.celeste_cost_price_ex_vat AS cost, pt.list_price AS list_price
+       dol.initial_demand AS qty, pt.celeste_cost_price_ex_vat AS cost, pt.list_price AS list_price,
+       ru.login AS responsible
 FROM damaged_order_line dol
 JOIN damaged_order do_ ON do_.id = dol.order_id
 JOIN stock_picking_type spt ON spt.id = do_.operation_type_id
 JOIN res_store rs ON rs.warehouse_id = spt.warehouse_id
 JOIN product_product pp ON pp.id = dol.product_id
 JOIN product_template pt ON pt.id = pp.product_tmpl_id
+LEFT JOIN res_users ru ON ru.id = do_.responsible_id
 WHERE rs.id IN {CELESTE_STORE_IDS} AND do_.state IN {DAMAGE_CONFIRMED_STATES}
   AND do_.date >= :start AND do_.date <= :end
 """
@@ -226,6 +228,7 @@ def get_damage_writeoff(window_days: int = 14):
 
     by_outlet: dict[str, dict] = {}
     by_product: dict[tuple, dict] = {}
+    by_person: dict[str, dict] = {}
     coverage = {"total_lines": 0, "catalog_estimate_lines": 0, "no_cost_data_lines": 0}
     total_qty = 0.0
     total_value = 0.0
@@ -251,6 +254,17 @@ def get_damage_writeoff(window_days: int = 14):
         p["qty"] += qty
         p["value_rs"] += value
 
+        # Who's responsible for the write-off, not just which outlet/product --
+        # the role-wise accountability review, 2026-11-03, found this is real,
+        # individually-identifiable data (damaged_order.responsible_id, never a
+        # shared device login here, unlike sale_order.user_id or
+        # stock_verification.completed_by), just never broken out before.
+        person = r["responsible"] or "Unassigned"
+        pr = by_person.setdefault(person, {"responsible": person, "orders": set(), "qty": 0.0, "value_rs": 0.0})
+        pr["orders"].add(r["order_id"])
+        pr["qty"] += qty
+        pr["value_rs"] += value
+
     outlet_rows = sorted(
         [{"outlet": o["outlet"], "orders": len(o["orders"]), "qty": round(o["qty"], 2), "value_rs": round(o["value_rs"], 2)}
          for o in by_outlet.values()],
@@ -259,6 +273,11 @@ def get_damage_writeoff(window_days: int = 14):
     product_rows = sorted(
         [{"name": p["name"], "sku": p["sku"], "lines": p["lines"], "qty": round(p["qty"], 2), "value_rs": round(p["value_rs"], 2)}
          for p in by_product.values()],
+        key=lambda r: r["value_rs"], reverse=True,
+    )
+    person_rows = sorted(
+        [{"responsible": pr["responsible"], "orders": len(pr["orders"]), "qty": round(pr["qty"], 2), "value_rs": round(pr["value_rs"], 2)}
+         for pr in by_person.values()],
         key=lambda r: r["value_rs"], reverse=True,
     )
 
@@ -274,4 +293,5 @@ def get_damage_writeoff(window_days: int = 14):
         "valuation_coverage": coverage,
         "by_outlet": outlet_rows,
         "top_products": product_rows[:TOP_N],
+        "by_person": person_rows,
     }
