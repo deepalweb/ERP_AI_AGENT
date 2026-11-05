@@ -68,6 +68,14 @@ def _stub_sources(monkeypatch):
         # detector added 2026-11-03 -- it reads uber_order/pickme_order,
         # which this test DB has real (and genuinely flaggable) history for.
         "delivery_partner_failures": [],
+        # Same reasoning again, for the returns-rate detector added
+        # 2026-11-03 -- it reads return_order/sale_order, which this test DB
+        # has real (and genuinely flaggable) history for.
+        "returns_intelligence": [],
+        # Same reasoning again, for the promotion-discount-outlier detector
+        # added 2026-11-03 -- it reads store_promotion/store_promotion_line,
+        # which this test DB has real (and genuinely flaggable) history for.
+        "promotion_intelligence": [],
     }
     monkeypatch.setattr(brain.state_findings, "build_inventory_findings", lambda: sources["inventory"])
     monkeypatch.setattr(brain.state_findings, "build_operational_findings", lambda: sources["operations"])
@@ -83,6 +91,8 @@ def _stub_sources(monkeypatch):
     monkeypatch.setattr(brain.fresh_production, "build_fresh_production_findings", lambda: sources["fresh_production"])
     monkeypatch.setattr(brain.mwh_inventory_mismatch, "build_mwh_inventory_mismatch_findings", lambda: sources["mwh_inventory_mismatch"])
     monkeypatch.setattr(brain.delivery_partner_failures, "build_delivery_partner_failure_findings", lambda: sources["delivery_partner_failures"])
+    monkeypatch.setattr(brain.returns_intelligence, "build_returns_intelligence_findings", lambda: sources["returns_intelligence"])
+    monkeypatch.setattr(brain.promotion_intelligence, "build_promotion_intelligence_findings", lambda: sources["promotion_intelligence"])
     monkeypatch.setattr(
         brain.customer_predictions, "build_second_order_decline_finding",
         lambda: sources["customer_second_order_decline"],
@@ -101,6 +111,12 @@ def _stub_sources(monkeypatch):
     monkeypatch.setattr(predictions, "compute_lifecycle_snapshot_rows", list)
     monkeypatch.setattr(predictions, "record_lifecycle_snapshot", lambda _: None)
     monkeypatch.setattr(brain, "_record_inventory_kpi_snapshot", lambda: None)
+    # Outlet order-forecast outcome tracking added 2026-11-05 -- without this,
+    # get_outlet_order_forecast() reads the real forecasting artifact (if one
+    # exists on disk) and record_actuals() can reach the live reporting DB.
+    monkeypatch.setattr(brain.forecast, "get_outlet_order_forecast", lambda: None)
+    monkeypatch.setattr(brain.forecast_outcomes, "record_predictions", lambda _: None)
+    monkeypatch.setattr(brain.forecast_outcomes, "record_actuals", lambda: None)
     return sources
 
 

@@ -1,57 +1,126 @@
-import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { fetchPerformanceSummary, fetchInventoryDepth } from "../api";
+import { fetchForwardLook, fetchTimesFmOutletForecast } from "../api";
 import Section from "../design/Card";
+import OrderForecastChart from "../charts/OrderForecastChart";
 import { formatCurrency, formatNumber, monthLabel } from "../format";
 
-function RevenueBars({ rows }) {
-  const max = Math.max(1, ...rows.map((row) => Math.abs(row.revenue)));
-  return <figure aria-label="Revenue ranking" className="space-y-4">{rows.map((row, index) => <div key={row.id ?? `${row.name}-${index}`}>
-    <div className="mb-1 flex justify-between gap-3 text-xs"><span className="min-w-0 break-words">{row.name}</span><span className="shrink-0 tabular-nums">{formatCurrency(row.revenue)}</span></div>
-    <div className="h-2 rounded bg-background" aria-hidden="true"><div className="h-full rounded" style={{ width: `${Math.abs(row.revenue) / max * 100}%`, background: row.revenue < 0 ? "var(--status-critical)" : "var(--accent)" }} /></div>
-  </div>)}</figure>;
+function outletForecastSeries(outlet) {
+  const rows = outlet.history_tail.dates.map((date, i) => ({ date, actual_orders: outlet.history_tail.values[i] }));
+  if (rows.length) rows[rows.length - 1].predicted_orders = rows[rows.length - 1].actual_orders;
+  outlet.forecast_dates.forEach((date, i) => rows.push({ date, predicted_orders: Math.round(outlet.point[i]) }));
+  return rows;
+}
+
+// Naive sum of each outlet's own point/q10/q90 -- an indicative company-wide
+// range, not a statistically joint interval (summing independent intervals
+// overstates confidence if outlets' errors move together, which weekday
+// effects suggest they do). Labeled "indicative" in the UI for that reason.
+function totalAcrossOutlets(outlets) {
+  const days = outlets[0]?.forecast_dates.length || 0;
+  let point = 0, q10 = 0, q90 = 0;
+  for (const outlet of outlets) {
+    for (let i = 0; i < days; i++) {
+      point += outlet.point[i] || 0;
+      q10 += outlet.q10[i] || 0;
+      q90 += outlet.q90[i] || 0;
+    }
+  }
+  return { point: Math.round(point), q10: Math.round(q10), q90: Math.round(q90) };
+}
+
+/** A minimal inline trend line for the last few months behind a single
+ * projected number -- "Rs 207.5M" alone doesn't say whether that's a climb,
+ * a plateau, or a dip. Plain SVG, not Recharts: a handful of points in an
+ * inline strip doesn't need axes, a tooltip, or a container. */
+function Sparkline({ values }) {
+  if (!values || values.length < 2) return null;
+  const w = 72, h = 22, pad = 2;
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = max - min || 1;
+  const points = values
+    .map((v, i) => `${(i / (values.length - 1)) * (w - 2 * pad) + pad},${h - pad - ((v - min) / range) * (h - 2 * pad)}`)
+    .join(" ");
+  return (
+    <svg width={w} height={h} className="inline-block align-middle" role="img" aria-label="Recent monthly trend">
+      <polyline points={points} fill="none" stroke="var(--chart-ink-muted)" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ForwardLookRow({ label, projection, history, formatValue }) {
+  if (!projection) return null;
+  const { based_on_month, based_on_value, recent_growth_rates_pct, projected_low, projected_high } = projection;
+  return (
+    <div className="flex flex-wrap items-baseline justify-between gap-2 border-t border-border py-3 first:border-t-0 first:pt-0">
+      <span className="text-sm font-medium text-foreground-strong">{label}</span>
+      <Sparkline values={history?.map((row) => row.value)} />
+      <span className="text-sm tabular-nums">
+        {formatValue(based_on_value)} ({monthLabel(based_on_month)}) &rarr; {formatValue(projected_low)}&ndash;{formatValue(projected_high)} next month
+      </span>
+      <span className="text-xs text-foreground/60">
+        recent growth: {Math.min(...recent_growth_rates_pct)}%&ndash;{Math.max(...recent_growth_rates_pct)}%
+      </span>
+    </div>
+  );
 }
 
 export default function Dashboard() {
-  const [month, setMonth] = useState("");
-  const [store, setStore] = useState("");
-  const performance = useQuery({ queryKey: ["performanceSummary", month, store], queryFn: () => fetchPerformanceSummary(month, store), retry: false });
-  const inventory = useQuery({ queryKey: ["inventoryDepth"], queryFn: fetchInventoryDepth, retry: false });
-  const data = performance.data?.status === "ok" ? performance.data : null;
-  const [months, setMonths] = useState([]);
-  const [stores, setStores] = useState([]);
-  useEffect(() => { if (data) { setMonths(data.months); setStores(data.stores); } }, [data]);
-  const note = `${month ? monthLabel(month) : "All available history"} · ${store ? "Selected outlet" : "All Celeste outlets"}`;
-  const maxHour = Math.max(1, ...(data?.hours ?? []).map((r) => r.orders));
+  const forwardLook = useQuery({ queryKey: ["forwardLook"], queryFn: fetchForwardLook, retry: false });
+  const forwardLookData = forwardLook.data?.status === "ok" ? forwardLook.data : null;
+  const forecast = useQuery({ queryKey: ["timesFmOutletForecast"], queryFn: fetchTimesFmOutletForecast, retry: false });
+  const forecastData = forecast.data?.status === "ok" ? forecast.data : null;
+
   return <div className="px-6 py-6">
     <h1 className="text-xl font-semibold text-foreground-strong">Business Performance</h1>
-    <p className="mt-1 text-sm text-foreground/60">Compare outlets, product sales and ordering patterns over the same period.</p>
-    <div className="mt-5 flex flex-wrap items-end gap-3 rounded-xl border border-border bg-chart-surface p-4">
-      <label className="text-xs text-foreground/70">Sales period<select aria-label="Sales period" value={month} onChange={(e) => setMonth(e.target.value)} className="mt-1 block rounded-lg border border-border bg-background p-2 text-sm text-foreground-strong"><option value="">All available history</option>{months.map((m) => <option key={m} value={m}>{monthLabel(m)}{m === months.at(-1) ? " (may be partial)" : ""}</option>)}</select></label>
-      <label className="text-xs text-foreground/70">Outlet<select aria-label="Outlet" value={store} onChange={(e) => setStore(e.target.value)} className="mt-1 block rounded-lg border border-border bg-background p-2 text-sm text-foreground-strong"><option value="">All Celeste outlets</option>{stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label>
-      <button type="button" onClick={() => performance.refetch()} disabled={performance.isFetching} className="rounded-lg border border-border px-3 py-2 text-sm disabled:opacity-50">Reload comparisons</button>
-    </div>
-    {performance.isFetching && <p role="status" className="mt-4 text-sm">Loading comparisons…</p>}
-    {!performance.isFetching && !data && <p role="alert" className="mt-4 text-sm text-warning">Could not load performance comparisons. Use Reload comparisons to try again.</p>}
-    {data && <>
-      <p className="mt-3 text-xs text-foreground/60">Selected orders: {data.start?.replace("T", " ") ?? "No orders"} to {data.end?.replace("T", " ") ?? "—"} · Asia/Colombo. Source through {data.source_through?.replace("T", " ") ?? "unavailable"}.{data.latest_month_included && " Latest source month may be incomplete."}</p>
-      <Section title="Outlet comparison" note={note}>
-        {data.outlets.length ? <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-xs text-foreground/60">{["Outlet", "Confirmed orders", "Revenue", "Cancellation rate"].map((h) => <th key={h} className="p-2">{h}</th>)}</tr></thead><tbody>{data.outlets.map((r) => <tr key={r.id} className="border-t border-border"><td className="p-2">{r.name}</td><td className="p-2">{formatNumber(r.orders)}</td><td className="p-2">{formatCurrency(r.revenue)}</td><td className="p-2">{r.cancellation_rate_pct == null ? "Unavailable" : `${r.cancellation_rate_pct}%`}</td></tr>)}</tbody></table></div> : <p className="text-sm">No orders in this selection.</p>}
-        <p className="mt-3 text-xs text-foreground/60">Revenue uses confirmed order totals. Cancellation rate = cancelled ÷ confirmed and cancelled orders.</p>
-      </Section>
-      <div className="grid gap-x-4 xl:grid-cols-2">
-        <Section title="Revenue by department" note={note}>{data.departments.length ? <RevenueBars rows={data.departments} /> : <p className="text-sm">No department sales in this selection.</p>}</Section>
-        <Section title="Top products by revenue" note={note}>{data.products.length ? <RevenueBars rows={data.products} /> : <p className="text-sm">No product sales in this selection.</p>}</Section>
-      </div>
-      <p className="mt-2 text-xs text-foreground/60">Product and department revenue use order-line subtotals, which can differ from order totals because of taxes. Unlinked means no department is assigned.</p>
-      <Section title="Orders by hour" note={note}>
-        <figure aria-label="Confirmed orders by local hour"><div className="flex h-40 items-end gap-1">{data.hours.map((r) => <div key={r.hour} className="flex h-full min-w-0 flex-1 flex-col justify-end" title={`${r.hour}:00 · ${r.orders} orders`}><div className="bg-accent" style={{height: `${r.orders / maxHour * 85}%`}} /><span className="h-4 text-[10px] text-foreground/60">{r.hour % 3 === 0 ? r.hour : ""}</span></div>)}</div><figcaption className="mt-3 text-xs text-foreground/60">Confirmed orders by Asia/Colombo hour. Cancelled orders are excluded.</figcaption></figure>
-        <details className="mt-3 text-xs"><summary className="cursor-pointer">Hourly values</summary><div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-6">{data.hours.map((r) => <span key={r.hour}>{r.hour}:00 · {formatNumber(r.orders)}</span>)}</div></details>
-      </Section>
-    </>}
-    <Section title="Inventory value — separate stock snapshot">
-      <p className="mb-3 text-xs text-foreground/60">Shared internal inventory; sales period and outlet filters above do not apply. Valuation is estimated. Sales-velocity reference date: {inventory.data?.as_of_date ?? "unavailable"}; this is not a historical stock snapshot date.</p>
-      {inventory.isLoading ? <p className="text-sm">Loading inventory…</p> : inventory.data?.status === "ok" ? <div className="grid gap-3 sm:grid-cols-3">{inventory.data.segments.map((r) => <div key={r.id} className="rounded-lg border border-border p-3"><div className="text-lg font-semibold">{r.value == null ? "Unavailable" : formatCurrency(r.value)}</div><div className="text-sm">{r.label}</div><div className="text-xs text-foreground/60">{formatNumber(r.count)} products · {formatNumber(r.units)} units</div></div>)}</div> : <p className="text-sm text-warning">Inventory unavailable.</p>}
+    <p className="mt-1 text-sm text-foreground/60">Forward-looking views only: a simple trend projection, and a per-outlet machine-learning order forecast.</p>
+
+    <Section title="Forward Look — if the recent pace holds">
+      {forwardLook.isLoading && <p role="status" className="text-sm">Loading…</p>}
+      {!forwardLook.isLoading && !forwardLookData && <p role="alert" className="text-sm text-warning">Could not load the forward look.</p>}
+      {forwardLookData && (forwardLookData.revenue || forwardLookData.orders) ? <>
+        <ForwardLookRow label="Revenue" projection={forwardLookData.revenue} history={forwardLookData.revenue_history} formatValue={formatCurrency} />
+        <ForwardLookRow label="Orders" projection={forwardLookData.orders} history={forwardLookData.orders_history} formatValue={formatNumber} />
+        <p className="mt-3 text-xs text-warning">⚠ {forwardLookData.note}</p>
+      </> : forwardLookData && <p className="text-sm text-foreground/60">Not enough stable month-over-month history yet for a projection.</p>}
+    </Section>
+
+    <Section title="Order forecast — next 7 days per outlet" note="TimesFM 2.5, zero-shot">
+      {forecast.isLoading && <p role="status" className="text-sm">Loading forecast…</p>}
+      {forecastData && <>
+        {forecastData.source.is_stale && <p role="alert" className="mb-4 rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+          Source data is {forecastData.source.source_age_days} day{forecastData.source.source_age_days === 1 ? "" : "s"} old (through {forecastData.source.end_exclusive}) — this is a forecast made from that older data, not a live prediction for today. Treat it as historical, not current.
+        </p>}
+        {(() => {
+          const total = totalAcrossOutlets(forecastData.outlets);
+          return (
+            <p className="mb-4 text-sm">
+              <span className="font-medium text-foreground-strong">All outlets, next 7 days: ~{formatNumber(total.point)} orders</span>
+              <span className="text-foreground/60"> (indicative range {formatNumber(total.q10)}&ndash;{formatNumber(total.q90)})</span>
+            </p>
+          );
+        })()}
+        <div className="grid gap-4 sm:grid-cols-2">
+          {forecastData.outlets.map((outlet) => <div key={outlet.store_id}>
+            <h3 className="mb-1 text-sm font-medium text-foreground-strong">{outlet.outlet}</h3>
+            <OrderForecastChart
+              data={outletForecastSeries(outlet)}
+              asOfDate={forecastData.source.is_stale ? undefined : forecastData.source.end_exclusive}
+              formatOrders={formatNumber}
+              formatX={(d) => d?.slice(5)}
+            />
+            {outlet.accuracy && <p className="mt-1 text-xs text-foreground/50">
+              Measured error at this outlet: {outlet.accuracy.wape_pct}% WAPE, {outlet.accuracy.bias_pct < 0 ? "tends to underpredict" : "tends to overpredict"} by ~{Math.abs(outlet.accuracy.bias_pct)}%
+            </p>}
+          </div>)}
+        </div>
+        <p className="mt-3 text-xs text-foreground/60">
+          Model: {forecastData.model.checkpoint} · Generated {forecastData.generated_at?.replace("T", " ").slice(0, 16)} UTC · Dashed line is the forecast, shading not shown is the model's 10th-90th percentile range.
+          {forecastData.accuracy && <> Measured on a holdout evaluation ({forecastData.accuracy.evaluated_at}): overall {forecastData.accuracy.overall.wape_pct}% WAPE, {forecastData.accuracy.overall.coverage_80_pct}% of actuals fell inside the 80% band.</>}
+          {forecastData.accuracy?.live_track_record && <> Live so far ({forecastData.accuracy.live_track_record.earliest_date} to {forecastData.accuracy.live_track_record.latest_date}, {forecastData.accuracy.live_track_record.graded_predictions} graded predictions): {forecastData.accuracy.live_track_record.wape_pct}% WAPE.</>}
+          {" "}Full breakdown: docs/outlet-forecast-evaluation.md.
+        </p>
+      </>}
+      {!forecast.isLoading && !forecastData && <p className="text-sm text-foreground/60">No outlet order forecast has been generated yet.</p>}
     </Section>
   </div>;
 }

@@ -23,6 +23,8 @@ from backend.app.services import (
     case_engine,
     customer_predictions,
     finding_actions,
+    forecast,
+    forecast_outcomes,
     health,
     inventory,
     inventory_kpi_history,
@@ -46,6 +48,8 @@ from mcp_server.tools import (
     mwh_inventory_mismatch,
     operation_flow,
     price_intelligence,
+    promotion_intelligence,
+    returns_intelligence,
     state_findings,
     stock_reconciliation,
     transfer_discrepancy,
@@ -289,6 +293,12 @@ def _compute_daily_brief():
         # mcp_server/tools/price_intelligence.py's module docstring for
         # why this replaces a flat threshold).
         price_intelligence.build_price_intelligence_findings(),
+        # Price Intelligence Phase 2, 2026-11-03: active promotions whose
+        # discount rate is a cross-sectional outlier against every other
+        # approved promotion's rate -- see
+        # mcp_server/tools/promotion_intelligence.py's module docstring for
+        # why this isn't a per-promotion time-series check.
+        promotion_intelligence.build_promotion_intelligence_findings(),
         # Outlet inventory mismatch, 2026-10-24: confirmed sales with no
         # stock deduction at all, clustered by episode (see
         # mcp_server/tools/stock_reconciliation.py's module docstring for
@@ -312,6 +322,12 @@ def _compute_daily_brief():
         # Celeste chat), never the daily Investigate scan. See
         # mcp_server/tools/delivery_partner_failures.py's module docstring.
         delivery_partner_failures.build_delivery_partner_failure_findings(),
+        # Returns, 2026-11-03: reuses intelligence.py's return_rate MetricDef
+        # (same trend/anomaly reuse pattern as delivery_partner_failures.py)
+        # -- the raw return count grows with order volume, but the RATE has
+        # climbed ~33x disproportionately; see returns_intelligence.py's
+        # module docstring for the verified numbers.
+        returns_intelligence.build_returns_intelligence_findings(),
         # Customer module review, 2026-10-13: the first customer-domain
         # signal wired into the case system -- a pure function of already-
         # historical cohort data, so (unlike lifecycle/predictions below)
@@ -393,6 +409,12 @@ def _compute_daily_brief():
     # Inventory KPI strip history -- same reasoning as the customer lifecycle
     # snapshot above, just for the Inventory page's 6 headline numbers.
     _record_inventory_kpi_snapshot()
+
+    # Outlet order-forecast outcome tracking, 2026-11-05: records today's
+    # TimesFM predictions, then grades any earlier prediction whose date has
+    # fully passed -- see forecast_outcomes.py's module docstring.
+    forecast_outcomes.record_predictions(forecast.get_outlet_order_forecast())
+    forecast_outcomes.record_actuals()
 
     generated_at = datetime.utcnow().isoformat()
     appdb.run_query(
