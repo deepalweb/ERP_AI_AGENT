@@ -1,15 +1,14 @@
 import { Bar, BarChart, CartesianGrid, LabelList, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatNumber } from "../format";
 
-/** Three views of the same transfer lines, one per step of the flow, on one shared
- * unit scale so the outlets compare across charts:
- *   Plan vs Sent, Sent vs Received (Received + Missing = Sent), Plan vs Received.
- * Plan is drawn as an outline (a target, not a moved quantity). Blue is what moved,
- * red is the missing quantity. Scope: only the lines that had a shortage. */
+/** Three views of affected transfer movements: Plan vs Sent, Sent vs Received,
+ * and Plan vs Received. Plan is an outline; the other bars show Odoo quantities.
+ * The physical variance is reported as a signed difference, not stacked as if
+ * the shortage reason quantity must equal sent minus received. */
 
 const PLAN_STYLE = { fill: "transparent", stroke: "var(--text-subtle)", strokeWidth: 1.5 };
 const MOVED = "var(--series-1)";
-const MISSING = "var(--status-critical)";
+const RECEIVED = "var(--series-2)";
 
 const shortOutlet = (name) => (name ?? "").replace("Celeste Daily", "").replace(/^[\s-]+/, "").trim() || name;
 
@@ -51,11 +50,11 @@ export default function TransferFlowCharts({ outlets }) {
     plan: o.plan_units ?? 0,
     sent: o.sent_units ?? 0,
     received: o.line_received_units ?? 0,
-    missing: o.units ?? 0,
+    physicalGap: o.physical_gap_units ?? ((o.sent_units ?? 0) - (o.line_received_units ?? 0)),
   })).sort((a, b) => b.plan - a.plan);
   if (!rows.length) return null;
 
-  const domain = [0, niceMax(rows.flatMap((r) => [r.plan, r.sent]))];
+  const domain = [0, niceMax(rows.flatMap((r) => [r.plan, r.sent, r.received]))];
   const axisProps = { stroke: "var(--chart-ink-muted)", fontSize: 12, tickLine: false };
   const height = Math.max(rows.length * 56, 160);
   const gap = (a, b) => rows.map((r) => `${r.name} ${formatNumber(r[a] - r[b])}`).join(" · ");
@@ -63,12 +62,12 @@ export default function TransferFlowCharts({ outlets }) {
 
   return (
     <div>
-    <p className="mb-3 text-xs text-foreground-subtle">Scope: only the lines that had a shortage, not every transfer to these outlets. All three charts use the same unit scale.</p>
+    <p className="mb-3 text-xs text-foreground-subtle">Scope: transfer movements tied to source records for this finding’s reason; unaffected transfers are excluded. All three charts use the same unit scale.</p>
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
       <Panel
         title="Plan vs sent"
         legend={[{ label: "Planned (outline)", outline: true }, { label: "Sent (marked done)", color: MOVED }]}
-        caption={`Planning gap, units planned but not sent: ${gap("plan", "sent")}.`}
+        caption={`Plan minus sent (positive = planned but not sent): ${gap("plan", "sent")}.`}
       >
         <ResponsiveContainer width="100%" height={height}>
           <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 48, bottom: 4, left: 4 }} barGap={2}>
@@ -88,19 +87,19 @@ export default function TransferFlowCharts({ outlets }) {
 
       <Panel
         title="Sent vs received"
-        legend={[{ label: "Received (marked done)", color: MOVED }, { label: "Missing (sent, not received)", color: MISSING }]}
-        caption={`Each bar totals what was sent. Missing is the transit and receiving gap: ${rows.map((r) => `${r.name} ${formatNumber(r.missing)}`).join(" · ")} units.`}
+        legend={[{ label: "Sent (marked done)", color: MOVED }, { label: "Received (marked done)", color: RECEIVED }]}
+        caption={`Sent minus received, in units (positive = fewer received; negative = more received): ${rows.map((r) => `${r.name} ${formatNumber(r.physicalGap)}`).join(" · ")}.`}
       >
         <ResponsiveContainer width="100%" height={height}>
-          <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 48, bottom: 4, left: 4 }}>
+          <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 48, bottom: 4, left: 4 }} barGap={2}>
             <XAxis type="number" domain={domain} hide />
             <YAxis type="category" dataKey="name" width={130} {...axisProps} />
-            <Tooltip formatter={(v, n) => `${formatNumber(v)} ${plural(v)} ${n === "received" ? "received" : "missing"}`} />
-            <Bar dataKey="received" name="received" stackId="s" fill={MOVED}>
-              <LabelList dataKey="received" position="insideRight" formatter={(v) => (v ? formatNumber(v) : "")} fontSize={11} fill="#ffffff" />
+            <Tooltip formatter={(v) => `${formatNumber(v)} ${plural(v)}`} />
+            <Bar dataKey="sent" name="Sent" fill={MOVED} radius={[0, 3, 3, 0]}>
+              <LabelList dataKey="sent" position="right" formatter={(v) => formatNumber(v)} fontSize={11} fill="var(--text)" />
             </Bar>
-            <Bar dataKey="missing" name="missing" stackId="s" fill={MISSING} radius={[0, 3, 3, 0]}>
-              <LabelList dataKey="missing" position="right" formatter={(v) => formatNumber(v)} fontSize={11} fill="var(--text)" />
+            <Bar dataKey="received" name="Received" fill={RECEIVED} radius={[0, 3, 3, 0]}>
+              <LabelList dataKey="received" position="right" formatter={(v) => formatNumber(v)} fontSize={11} fill="var(--text)" />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -109,7 +108,7 @@ export default function TransferFlowCharts({ outlets }) {
       <Panel
         title="Plan vs received"
         legend={[{ label: "Planned (outline)", outline: true }, { label: "Received (marked done)", color: MOVED }]}
-        caption={`Total gap, units planned but not received: ${gap("plan", "received")}.`}
+        caption={`Plan minus received (positive = fewer received than planned): ${gap("plan", "received")}.`}
       >
         <ResponsiveContainer width="100%" height={height}>
           <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 48, bottom: 4, left: 4 }} barGap={2}>

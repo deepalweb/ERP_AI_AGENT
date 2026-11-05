@@ -48,35 +48,64 @@ const sumOrNull = (values) => {
  * shape the finding's own charts and flow block read from the server snapshot. */
 export function summarizeTraceRows(rows) {
   const byOutlet = new Map();
+  const outboundByKey = new Map();
+  const inboundByKey = new Map();
   for (const row of rows) {
-    const outlet = byOutlet.get(row.outlet) ?? { outlet: row.outlet, plans: [], sents: [], received: 0, units: 0 };
-    outlet.plans.push(row.plan_qty ?? null);
-    outlet.sents.push(row.sent_qty ?? null);
-    outlet.received += row.received_qty ?? 0;
+    const outlet = byOutlet.get(row.outlet) ?? { outlet: row.outlet, plans: 0, planSeen: false, sents: 0, sentSeen: false, received: 0, units: 0 };
     outlet.units += row.missing_qty ?? 0;
     byOutlet.set(row.outlet, outlet);
+
+    // Plan/sent belong to an outbound picking + product and are repeated on
+    // each shortage row and sometimes on split inbound moves.
+    const productKey = row.product_id ?? row.sku ?? row.product;
+    const outKey = row.transfer_out_id != null
+      ? `${row.transfer_out_id}:${productKey}`
+      : `${row.transfer_out ?? "unknown"}:${productKey}`;
+    if (!outboundByKey.has(outKey)) outboundByKey.set(outKey, row);
+
+    // Expected/received belong to an incoming stock move; repeated shortage
+    // reason rows can carry the same copied quantities.
+    const inKey = row.receipt_move_id != null
+      ? String(row.receipt_move_id)
+      : `${row.receipt_id ?? row.receipt ?? "unknown"}:${productKey}`;
+    if (!inboundByKey.has(inKey)) inboundByKey.set(inKey, row);
   }
+
+  for (const row of outboundByKey.values()) {
+    const outlet = byOutlet.get(row.outlet);
+    if (row.plan_qty != null) { outlet.plans += row.plan_qty; outlet.planSeen = true; }
+    if (row.sent_qty != null) { outlet.sents += row.sent_qty; outlet.sentSeen = true; }
+  }
+  for (const row of inboundByKey.values()) {
+    const outlet = byOutlet.get(row.outlet);
+    outlet.received += row.received_qty ?? 0;
+  }
+
   const outletRows = [...byOutlet.values()]
     .map((o) => ({
       outlet: o.outlet,
-      plan_units: sumOrNull(o.plans),
-      sent_units: sumOrNull(o.sents),
+      plan_units: o.planSeen ? o.plans : null,
+      sent_units: o.sentSeen ? o.sents : null,
       line_received_units: o.received,
+      physical_gap_units: o.sentSeen ? o.sents - o.received : null,
       units: o.units,
     }))
     .sort((a, b) => b.units - a.units);
 
-  const plans = rows.map((r) => r.plan_qty ?? null);
-  const sents = rows.map((r) => r.sent_qty ?? null);
-  const planningGap = rows.filter((r) => r.plan_qty != null && r.sent_qty != null).reduce((sum, r) => sum + (r.plan_qty - r.sent_qty), 0);
-  const transitGap = rows.filter((r) => r.sent_qty != null).reduce((sum, r) => sum + (r.sent_qty - (r.received_qty ?? 0)), 0);
-  const totalGap = rows.filter((r) => r.plan_qty != null).reduce((sum, r) => sum + (r.plan_qty - (r.received_qty ?? 0)), 0);
+  const outbound = [...outboundByKey.values()];
+  const inbound = [...inboundByKey.values()];
+  const planUnits = sumOrNull(outbound.map((r) => r.plan_qty ?? null));
+  const sentUnits = sumOrNull(outbound.map((r) => r.sent_qty ?? null));
+  const receivedUnits = inbound.reduce((sum, r) => sum + (r.received_qty ?? 0), 0);
+  const planningGap = outbound.filter((r) => r.plan_qty != null && r.sent_qty != null).reduce((sum, r) => sum + (r.plan_qty - r.sent_qty), 0);
+  const transitGap = outbound.filter((r) => r.sent_qty != null).reduce((sum, r) => sum + (r.sent_qty ?? 0), 0) - receivedUnits;
+  const totalGap = (planUnits ?? 0) - receivedUnits;
   return {
     outletRows,
     impact: {
-      plan_units: sumOrNull(plans),
-      sent_units: sumOrNull(sents),
-      line_received_units: rows.reduce((sum, r) => sum + (r.received_qty ?? 0), 0),
+      plan_units: planUnits,
+      sent_units: sentUnits,
+      line_received_units: receivedUnits,
       units_affected: rows.reduce((sum, r) => sum + (r.missing_qty ?? 0), 0),
       planning_gap_units: planningGap,
       transit_gap_units: transitGap,

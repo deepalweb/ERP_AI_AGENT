@@ -10,7 +10,9 @@ function fmt(value) {
 }
 
 /** System status for the investigation: how current the source data is and when the
- * detectors last ran. One compact line; the run button never runs on its own. */
+ * detectors last ran. One compact line; the run button never runs on its own.
+ * onRun is optional -- a caller with no "run a fresh scan" action (e.g. the case
+ * detail page) omits it and just gets the status line, not a dead button. */
 export default function DataSyncBar({ sync, running, failed, onRun }) {
   const order = stampOf(sync?.latest_order_at);
   const dayOld = order ? (Date.now() - order.getTime()) / 86400000 > 1 : false;
@@ -22,15 +24,17 @@ export default function DataSyncBar({ sync, running, failed, onRun }) {
       <span>Last full scan <span className="text-foreground">{fmt(sync?.last_run_at)}</span></span>
       {dayOld && <span className="text-warning">Newest order is over a day old</span>}
       {failed && <span className="text-critical">Last run failed</span>}
-      <button
-        type="button"
-        onClick={onRun}
-        disabled={running}
-        title="Re-runs every detector against the reporting database. New results appear when it finishes."
-        className="ml-auto rounded-lg border border-accent-border bg-accent-soft px-3 py-1.5 font-medium text-accent hover:bg-accent-soft disabled:opacity-60"
-      >
-        {running ? "Running investigation…" : "Run investigation"}
-      </button>
+      {onRun && (
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={running}
+          title="Re-runs every detector against the reporting database. New results appear when it finishes."
+          className="ml-auto rounded-lg border border-accent-border bg-accent-soft px-3 py-1.5 font-medium text-accent hover:bg-accent-soft disabled:opacity-60"
+        >
+          {running ? "Running investigation…" : "Run investigation"}
+        </button>
+      )}
     </section>
   );
 }

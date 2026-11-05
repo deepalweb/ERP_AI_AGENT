@@ -1,4 +1,5 @@
 import TrendChart from "../charts/TrendChart";
+import Badge from "./Badge";
 import { formatByUnit, formatConfirmPeriod, formatNumber, moveToneClass } from "../format";
 
 function change(value, unit) {
@@ -6,9 +7,22 @@ function change(value, unit) {
   return `${value > 0 ? "+" : ""}${unit === "percent" ? `${Number(value).toFixed(2)} pp` : formatByUnit(value, unit)}`;
 }
 
+// Same labels/tones as CurrentPeriodInvestigations.jsx's own CATEGORY map --
+// this is the same category value, just surfaced a second place.
+const CURRENT_PERIOD_CATEGORY = {
+  critical: ["Needs attention", "critical"], opportunity: ["Positive movement", "good"],
+  normal: ["Within thresholds", "neutral"],
+};
+
 /** Read only the saved investigation: comparison windows and units are not
- * interchangeable, particularly for rates and channel composition. */
-export default function InvestigationResults({ latest, showTrend = false }) {
+ * interchangeable, particularly for rates and channel composition.
+ * currentPeriodItem (optional) is the matching row from the live
+ * current-period check (design/CurrentPeriodInvestigations.jsx) -- passed
+ * through so the excluded-month caption below can point at its own early
+ * read instead of leaving the reader to separately notice that panel
+ * elsewhere on the page already has a verdict for the very month this
+ * chart just excluded. */
+export default function InvestigationResults({ latest, showTrend = false, currentPeriodItem = null }) {
   if (!latest) return null;
   const confirm = latest.confirm ?? {};
   const unit = confirm.unit ?? latest.metric?.unit;
@@ -45,7 +59,18 @@ export default function InvestigationResults({ latest, showTrend = false }) {
           <TrendChart data={complete} formatX={formatConfirmPeriod} formatValue={(v) => formatByUnit(v, unit)} stroke="var(--accent)" gridStroke="var(--border)" axisStroke="var(--text-subtle)" />
         </div>
       )}
-      {partial.length > 0 && <p className="text-xs text-foreground-subtle">Still in progress, excluded from the trend comparison: {partial.map((p) => `${formatConfirmPeriod(p.month)} (${formatByUnit(p.value, unit)})`).join("; ")}.</p>}
+      {partial.length > 0 && (
+        <div className="text-xs text-foreground-subtle">
+          <p>Still in progress, excluded from the trend comparison: {partial.map((p) => `${formatConfirmPeriod(p.month)} (${formatByUnit(p.value, unit)})`).join("; ")}.</p>
+          {currentPeriodItem?.status === "measured" && CURRENT_PERIOD_CATEGORY[currentPeriodItem.category] && (
+            <p className="mt-1 flex flex-wrap items-center gap-1.5">
+              Early read on the excluded month:
+              <Badge tone={CURRENT_PERIOD_CATEGORY[currentPeriodItem.category][1]}>{CURRENT_PERIOD_CATEGORY[currentPeriodItem.category][0]}</Badge>
+              — see the "Current period investigations" panel on this page for detail. This is provisional, not a completed-month verdict.
+            </p>
+          )}
+        </div>
+      )}
       {breakdowns.length > 0 && (
         <div>
           <h3 className="text-sm font-semibold text-foreground-strong">Affected segments</h3>

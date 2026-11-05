@@ -1,19 +1,17 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import RankedBarChart from "../charts/RankedBarChart";
 import { formatCurrency, formatNumber } from "../format";
 import { AffectedRecordTable, PrimaryMetricStrip } from "./CaseVisuals";
-import TransferFlowCharts from "./TransferFlowCharts";
 import { INVENTORY_TAGS, tagFor } from "./inventoryTags";
-import { inventoryAnswerText, inventoryExposureLine, inventoryNextCheckText } from "./plainLanguage";
+import { inventoryAnswerText, inventoryExposureLine } from "./plainLanguage";
 import { filterTraceRows, isFilterActive, summarizeTraceRows } from "./transferFilters";
+import InvestigationResults from "./InvestigationResults";
+import { inventoryFamilyFor } from "./inventoryDisplay";
+import { resolveFindingTemplate } from "./findingTemplates";
 
 const shortOutlet = (name) => (name ?? "").replace("Celeste Daily", "").replace(/^[\s-]+/, "").trim() || name;
 const shortProduct = (name) => (name ?? "").split(/\s+-\s+(?:Celeste\b|SKU\b)/)[0];
-const plainUnknown = (text) => {
-  const stripped = (text ?? "").replace(/^Not established:\s*/i, "");
-  return stripped.charAt(0).toUpperCase() + stripped.slice(1);
-};
-
 // MONEY_KINDS stays a plain kind set, not tag-driven: it's a THIRD, orthogonal
 // axis (does this finding carry a real Rs figure) that cuts across tags --
 // WRITE_OFF and most of STOCK_POSITION are count-only, not money.
@@ -39,6 +37,7 @@ const RECORD_COLUMNS_TRANSFER = [
   { key: "out_sent_by", label: "Sent by (marked done)", format: personLabel },
   { key: "sent_qty", label: "Sent", format: (v) => formatNumber(v) },
   { key: "receipt", label: "Receipt (in)" },
+  { key: "receipt_state", label: "Receipt status" },
   { key: "received_on", label: "Received on", format: formatWhen },
   { key: "receipt_completed_by", label: "Received by (marked done)", format: personLabel },
   { key: "product", label: "Product", format: (v) => shortProduct(v) },
@@ -46,7 +45,7 @@ const RECORD_COLUMNS_TRANSFER = [
   { key: "expected_qty", label: "Expected on receipt", format: (v) => formatNumber(v) },
   { key: "received_qty", label: "Received", format: (v) => formatNumber(v) },
   { key: "planning_gap_qty", label: "Planning gap", format: (v) => (v == null ? "n/a" : formatNumber(v)) },
-  { key: "missing_qty", label: "Missing (transit)", format: (v) => formatNumber(v) },
+  { key: "missing_qty", label: "Shortage recorded", format: (v) => formatNumber(v) },
   { key: "recorded_by", label: "Shortage recorded by", format: personLabel },
   { key: "recorded_on", label: "Recorded on", format: formatWhen },
 ];
@@ -63,18 +62,6 @@ const RECORD_COLUMNS_DISPATCH = [
   { key: "product", label: "Product", format: (v) => shortProduct(v) },
   { key: "outlet", label: "Outlet", format: (v) => shortOutlet(v) },
   { key: "receipt", label: "Receipt (in)" },
-];
-
-const RECORD_COLUMNS_PATTERN = [
-  { key: "dispatcher", label: "Dispatcher", format: personLabel },
-  { key: "product", label: "Product", format: (v) => shortProduct(v) },
-  { key: "rate_pct", label: "Rate on this product", format: (v) => `${v}%` },
-  { key: "own_rate_pct", label: "Their own overall rate", format: (v) => `${v}%` },
-  { key: "ratio", label: "Times their own rate", format: (v) => (v == null ? "n/a" : `${v}x`) },
-  { key: "expected_units", label: "Handled", format: (v) => formatNumber(v) },
-  { key: "missing_units", label: "Missing", format: (v) => formatNumber(v) },
-  { key: "short_lines", label: "Short lines", format: (v) => formatNumber(v) },
-  { key: "outlets", label: "Outlets", format: (v) => formatNumber(v) },
 ];
 
 const RECORD_COLUMNS_STUCK_SESSIONS = [
@@ -118,8 +105,8 @@ const RECORD_COLUMNS_EXTREME = [
 
 function Block({ title, children }) {
   return (
-    <section className="rounded-xl border border-border bg-surface p-5">
-      <h2 className="text-xs font-semibold uppercase tracking-wider text-foreground-subtle">{title}</h2>
+    <section className="rounded-lg border border-border bg-surface px-4 py-4">
+      <h2 className="border-l-2 border-l-accent pl-2.5 font-display text-sm font-semibold text-foreground-strong">{title}</h2>
       <div className="mt-3">{children}</div>
     </section>
   );
@@ -173,10 +160,9 @@ function answerFor(latest) {
   }
   if (kind === "dispatch_pattern") {
     const top = topOf(latest.breakdowns?.find((b) => b.dimension === "person"));
-    return `${formatNumber(latest.impact.count)} dispatcher/product pattern(s) show a miss rate well above that `
-      + "person's own overall rate"
+    return `${formatNumber(latest.impact.count)} dispatcher/product pair(s) have a recorded shortage rate well above the rate on the other products they marked as dispatched`
       + (top ? `, led by ${personLabel(top.name)} (${formatNumber(top.current)} missing units)` : "")
-      + ". See the company-wide panel below to check the lines behind each pattern.";
+      + ". Review the associated shortage records; this does not establish who caused the gap.";
   }
   return latest?.title ?? "No summary available for this case yet.";
 }
@@ -214,55 +200,195 @@ function valueLineFor(latest) {
 
 /** Opportunity cases describe a recovery, not a loss. They get their own short
  * view so a revenue estimate never reads as inventory exposure. */
-function OpportunityView({ latest, followUp, trendNode }) {
+function OpportunityView({ caseId, latest, primaryMetrics, followUp, trendNode, measurement, verificationText, relationships = [], relatedSignals = [] }) {
   return (
-    <div className="mt-4 space-y-5">
-      <Block title="What happened">
-        <p className="text-base text-foreground-strong">{latest?.title}</p>
-        {latest?.impact?.detail && <p className="mt-2 text-sm text-foreground-subtle">{latest.impact.detail}</p>}
-      </Block>
-      <Block title="How to read this">
-        <p className="text-sm text-foreground">
-          This is an improvement signal, not a loss. Any rupee figure is a revenue estimate from recovered orders, so it is
-          not counted as inventory exposure anywhere on this page.
-        </p>
-      </Block>
-      {trendNode && (
-        <details className="rounded-xl border border-border bg-surface p-4">
-          <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">Current-period check (provisional)</summary>
-          <div className="mt-3">{trendNode}</div>
-        </details>
-      )}
-      <section className="rounded-xl border border-accent-border bg-accent-soft p-5" aria-label="Recommended next check">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-accent">Recommended next check</h2>
-        <p className="mt-2 text-base text-foreground-strong">Confirm the improvement continues for the next few weeks before changing stock policy.</p>
-        <div className="mt-4">{followUp}</div>
-      </section>
+    <div className="mt-5 space-y-5">
+      {primaryMetrics.length > 0 && <section aria-labelledby="inventory-key-metrics"><h2 id="inventory-key-metrics" className="mb-2 text-sm font-semibold text-foreground-strong">Key metrics</h2><PrimaryMetricStrip cards={primaryMetrics} /></section>}
+      <section aria-labelledby="inventory-detected" className="rounded-xl border-l-4 border-accent-border bg-accent-soft px-5 py-4"><h2 id="inventory-detected" className="text-xs font-semibold uppercase tracking-wider text-accent">What Celeste detected</h2><p className="mt-2 max-w-4xl text-base font-medium text-foreground-strong">{latest?.title || "Favorable inventory movement was detected."}</p>{latest?.impact?.detail && <p className="mt-2 max-w-4xl text-sm text-foreground">{latest.impact.detail}</p>}</section>
+      <section aria-labelledby="inventory-evidence" className="space-y-3"><h2 id="inventory-evidence" className="text-sm font-semibold text-foreground-strong">Evidence to review</h2><Block title="Change over time"><InvestigationResults latest={latest} showTrend /></Block>{trendNode && <details className="rounded-lg border border-border bg-surface px-4 py-3"><summary className="cursor-pointer text-sm font-medium text-foreground-strong">Provisional current-period check</summary><div className="mt-3">{trendNode}</div></details>}</section>
+      <section aria-labelledby="inventory-interpretation" className="rounded-xl border border-border bg-surface p-4"><h2 id="inventory-interpretation" className="text-sm font-semibold text-foreground-strong">Celeste’s interpretation</h2><p className="mt-2 text-sm text-foreground">This is a favorable measured movement worth validating. It does not establish what caused the change.</p><p className="mt-2 text-sm text-foreground-subtle">Estimated benefit is not verified realized savings.</p></section>
+      <section aria-labelledby="inventory-actions" className="rounded-xl border border-accent-border bg-accent-soft p-4"><h2 id="inventory-actions" className="text-sm font-semibold text-foreground-strong">Recommended management action</h2><p className="mt-2 text-sm text-foreground">Confirm the improvement continues before changing stock policy.</p><div className="mt-4">{followUp}</div></section>
+      <RelatedInventoryFindings caseId={caseId} relationships={relationships} relatedSignals={relatedSignals} />
+      <InventoryMethodology measurement={measurement} verificationText={verificationText} />
     </div>
   );
 }
 
-function FlowBlock({ impact }) {
-  const stage = (label, value) => (
-    <div className="rounded-lg border border-border p-3">
-      <p className="text-xs font-medium uppercase tracking-wider text-foreground-subtle">{label}</p>
-      <p className="mt-1 text-xl font-semibold tabular-nums text-foreground-strong">{formatNumber(value)} <span className="text-sm font-normal text-foreground-subtle">units</span></p>
-    </div>
-  );
+function EvidenceInterpretation({ latest, notKnown }) {
+  const checks = latest?.root_cause?.checks ?? [];
+  const measured = checks.filter((check) => check.verdict === "confirmed");
+  const possible = checks.filter((check) => check.verdict === "possible_contributor");
+  const unknown = checks.filter((check) => !["confirmed", "possible_contributor"].includes(check.verdict));
   return (
-    <Block title="From plan to receipt">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {stage("Planned (transfer note)", impact.plan_units)}
-        {stage("Sent (marked done)", impact.sent_units)}
-        {stage("Received (marked done)", impact.line_received_units)}
+    <section aria-labelledby="inventory-interpretation" className="rounded-xl border border-border bg-surface p-4">
+      <h2 id="inventory-interpretation" className="text-sm font-semibold text-foreground-strong">What the evidence means</h2>
+      <p className="mt-2 text-xs text-foreground-subtle">This interpretation uses the saved finding checks; it does not add a cause that the records cannot establish.</p>
+      {measured.length > 0 && <div className="mt-3"><h3 className="text-xs font-semibold uppercase tracking-wide text-foreground-subtle">Confirmed observations</h3><ul className="mt-1 space-y-1 text-sm text-foreground">{measured.map((check, index) => <li key={`${check.source}-${index}`}>{check.detail}</li>)}</ul></div>}
+      {possible.length > 0 && <div className="mt-3"><h3 className="text-xs font-semibold uppercase tracking-wide text-foreground-subtle">Possibly related</h3><ul className="mt-1 space-y-1 text-sm text-foreground-subtle">{possible.map((check, index) => <li key={`${check.source}-${index}`}>{check.detail}</li>)}</ul></div>}
+      {(unknown.length > 0 || notKnown.length > 0) && <div className="mt-3"><h3 className="text-xs font-semibold uppercase tracking-wide text-foreground-subtle">Not established</h3><ul className="mt-1 space-y-1 text-sm text-foreground-subtle">{unknown.map((check, index) => <li key={`${check.source}-${index}`}>{check.detail}</li>)}{notKnown.map((detail) => <li key={detail}>{detail}</li>)}</ul></div>}
+      {measured.length === 0 && possible.length === 0 && unknown.length === 0 && notKnown.length === 0 && <p className="mt-3 text-sm text-foreground-subtle">No additional explanatory checks are attached to this finding.</p>}
+      <p className="mt-3 border-t border-border pt-3 text-xs text-foreground-subtle">An observed association or discrepancy does not by itself establish cause or responsibility.</p>
+    </section>
+  );
+}
+
+function RelatedInventoryFindings({ caseId, relationships = [], relatedSignals = [] }) {
+  if (relationships.length === 0 && relatedSignals.length === 0) return null;
+  return <section aria-labelledby="inventory-related" className="rounded-xl border border-border bg-surface p-4"><h2 id="inventory-related" className="text-sm font-semibold text-foreground-strong">Related findings</h2>{relationships.length || relatedSignals.length ? <ul className="mt-3 space-y-2 text-sm">{relationships.map((row, index) => { const otherId = row.case_id === caseId ? row.related_case_id : row.case_id; return <li key={`${row.relationship_type}-${otherId}-${index}`} className="text-foreground-subtle">{row.relationship_type?.replaceAll("_", " ")}: {otherId ? <Link className="font-medium text-accent hover:underline" to={`/investigate/${encodeURIComponent(otherId)}`}>open related case</Link> : "related case ID not recorded"}{["duplicate_of", "overlaps"].includes(row.relationship_type) && " · amounts may overlap; do not add without checking the underlying records."}</li>; })}{relatedSignals.map((signal) => <li key={signal.metric_id} className="text-foreground-subtle">{signal.headline}{signal.case_id && <> · <Link className="font-medium text-accent hover:underline" to={`/investigate/${encodeURIComponent(signal.case_id)}`}>open related case</Link></>}</li>)}</ul> : <p className="mt-2 text-sm text-foreground-subtle">No related findings are linked to this case.</p>}</section>;
+}
+
+function InventoryMethodology({ measurement, verificationText, children }) {
+  return <section aria-labelledby="inventory-methodology" className="rounded-xl border border-border bg-surface p-4"><h2 id="inventory-methodology" className="text-sm font-semibold text-foreground-strong">Data quality &amp; methodology</h2><p className="mt-2 text-sm text-foreground">{verificationText || "Verification explanation is not recorded."}</p><dl className="mt-3 grid gap-x-5 gap-y-2 border-t border-border pt-3 text-sm sm:grid-cols-3"><div><dt className="text-xs text-foreground-subtle">Source freshness</dt><dd className="font-medium text-foreground">{measurement?.freshness ?? "Not provided"}</dd></div><div><dt className="text-xs text-foreground-subtle">Data coverage</dt><dd className="font-medium text-foreground">{measurement?.coverage ?? "Not provided"}</dd></div><div><dt className="text-xs text-foreground-subtle">Cause confirmed</dt><dd className="font-medium text-foreground">Not established</dd></div></dl><p className="mt-2 text-xs text-foreground-subtle">Last measurement: {measurement?.observed_at ? formatWhen(measurement.observed_at) : "Not provided"}</p><div className="mt-2 space-y-2 text-sm text-foreground-subtle">{children}</div>{measurement && <details className="mt-3 border-t border-border pt-3"><summary className="cursor-pointer text-xs font-medium text-accent">Method and source details</summary><div className="mt-2 space-y-1 text-xs text-foreground-subtle"><p>Source check: {measurement.detector_id ?? "Not recorded"} · Observation period: {measurement.period ?? "Not recorded"}</p><p>{verificationText || "Verification explanation is not recorded."}</p></div></details>}</section>;
+}
+
+function FlowBlock({ impact, excludedRows = [], excludedTraceRows = [] }) {
+  const quantity = (value) => value == null ? "Not recorded" : formatNumber(value);
+  const cells = [
+    ["Planned", impact.plan_units],
+    ["Sent", impact.sent_units],
+    ["Received", impact.line_received_units],
+  ];
+  return (
+    <Block title="Quantity reconciliation">
+      <p className="text-xs text-foreground-subtle">Odoo-recorded quantities for transfer/product movements linked to this finding.</p>
+      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {cells.map(([label, value]) => <div key={label} className="rounded-lg bg-surface-sunken p-3"><p className="text-xs text-foreground-subtle">{label}</p><p className="mt-1 text-2xl font-semibold tabular-nums text-foreground-strong">{quantity(value)}</p><p className="text-xs text-foreground-subtle">units</p></div>)}
       </div>
-      <div className="mt-4 grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
-        <p><span className="font-semibold text-foreground-strong">{formatNumber(impact.planning_gap_units)} units</span> <span className="text-foreground-subtle">planning gap: planned but not sent</span></p>
-        <p><span className="font-semibold text-foreground-strong">{formatNumber(impact.transit_gap_units)} units</span> <span className="text-foreground-subtle">transit and receiving gap: sent but not received (missing)</span></p>
-        <p><span className="font-semibold text-foreground-strong">{formatNumber(impact.total_gap_units)} units</span> <span className="text-foreground-subtle">total gap: planned but not received</span></p>
-      </div>
-      <p className="mt-3 text-xs text-foreground-subtle">These are the quantities recorded in Odoo at each step, not physical counts.</p>
+      <dl className="mt-3 grid gap-x-5 gap-y-2 border-t border-border pt-3 text-sm sm:grid-cols-3">
+        <div><dt className="text-xs text-foreground-subtle">Plan → sent</dt><dd className="font-medium tabular-nums text-foreground">{quantity(impact.planning_gap_units)} units fewer sent than planned</dd></div>
+        <div><dt className="text-xs text-foreground-subtle">Sent → received</dt><dd className="font-medium tabular-nums text-foreground">{quantity(impact.transit_gap_units)} units fewer received than sent</dd></div>
+        <div><dt className="text-xs text-foreground-subtle">Plan → received</dt><dd className="font-medium tabular-nums text-foreground">{quantity(impact.total_gap_units)} units fewer received than planned</dd></div>
+      </dl>
+      <p className="mt-3 rounded-md border border-warning/25 bg-warning/5 px-3 py-2 text-xs text-foreground-subtle">
+        Recorded shortage-reason units ({quantity(impact.units_affected)}) are a separate measure from these movement gaps. Their difference is not a reconciled loss; compare the underlying transfer and receipt records before drawing that conclusion.
+      </p>
+      {Number(impact.excluded_lines) > 0 && <div className="mt-3 rounded-md border border-warning/30 bg-warning/5 px-3 py-3 text-sm">
+        <p className="font-semibold text-foreground-strong">Excluded from these totals: {formatNumber(impact.excluded_lines)} line(s), {formatNumber(impact.excluded_units)} units</p>
+        <p className="mt-1 text-xs text-foreground-subtle">These shortage records are on cancelled or not-yet-received receipts. They are not counted as missing stock unless receipt and arrival evidence confirms that.</p>
+        {excludedRows.length > 0 && <p className="mt-1 text-xs text-foreground-subtle">{excludedRows.map((row) => `${shortOutlet(row.outlet)}: ${formatNumber(row.lines)} line(s), ${formatNumber(row.units)} units (${(row.states ?? []).join(", ") || "receipt status not recorded"})`).join(" · ")}</p>}
+        {excludedTraceRows.length > 0 && <details className="mt-2">
+          <summary className="cursor-pointer text-xs font-medium text-accent">Inspect excluded receipt records ({formatNumber(excludedTraceRows.length)})</summary>
+          <div className="mt-2 overflow-x-auto"><AffectedRecordTable columns={RECORD_COLUMNS_TRANSFER} rows={excludedTraceRows} rowKey="id" /></div>
+        </details>}
+        {excludedTraceRows.length === 0 && <p className="mt-1 text-xs text-foreground-subtle">The saved finding does not include receipt-level references for these excluded lines; refresh the finding to attach them.</p>}
+      </div>}
+      <details className="mt-3 rounded-lg border border-border px-3 py-2">
+        <summary className="cursor-pointer text-sm font-medium text-foreground-strong">How these quantities are counted</summary>
+        <p className="mt-2 text-xs text-foreground-subtle">Plan and sent quantities are counted once per outbound transfer/product. Expected and received quantities are counted once per incoming stock move. Repeated shortage-reason rows remain separate for the recorded shortage total.</p>
+      </details>
     </Block>
+  );
+}
+
+function OutletReconciliationTable({ rows }) {
+  if (!rows?.length) return <p className="text-sm text-foreground-subtle">No outlet-level quantities are available in this saved finding.</p>;
+  const qty = (value) => value == null ? "Not recorded" : formatNumber(value);
+  const fulfillmentRows = rows
+    .map((row) => ({
+      ...row,
+      fulfillment_pct: Number(row.plan_units) > 0 && row.line_received_units != null
+        ? (Number(row.line_received_units) / Number(row.plan_units)) * 100
+        : null,
+    }))
+    .sort((a, b) => (a.fulfillment_pct ?? Infinity) - (b.fulfillment_pct ?? Infinity));
+  const chartRows = fulfillmentRows.filter((row) => row.fulfillment_pct != null);
+  const movementRows = fulfillmentRows.filter((row) => row.plan_units != null || row.sent_units != null || row.line_received_units != null);
+  const movementMax = Math.max(1, ...movementRows.flatMap((row) => [row.plan_units, row.sent_units, row.line_received_units].filter((value) => value != null).map(Number)));
+  return <div>
+    {chartRows.length > 0 && <section aria-labelledby="outlet-fulfillment-heading" className="mb-5 rounded-lg bg-surface-sunken p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 id="outlet-fulfillment-heading" className="text-sm font-semibold text-foreground-strong">Planned quantity fulfillment</h3>
+        <span className="text-xs text-foreground-subtle">Received ÷ planned · lowest first</span>
+      </div>
+      <p className="mt-1 text-xs text-foreground-subtle">Share of planned units recorded as received. This measures quantity, not on-time delivery (OTIF).</p>
+      <div className="mt-4 space-y-3">
+        {chartRows.map((row) => {
+          const rate = row.fulfillment_pct;
+          return <div key={row.outlet} className="grid grid-cols-[minmax(7rem,10rem)_1fr_auto] items-center gap-3 text-sm">
+            <span className="truncate text-foreground">{shortOutlet(row.outlet)}</span>
+            <div
+              className="h-3 overflow-hidden rounded-full bg-surface"
+              role="img"
+              aria-label={`${shortOutlet(row.outlet)}: ${rate.toFixed(1)} percent of planned quantity received`}
+              title={`${formatNumber(row.line_received_units)} received ÷ ${formatNumber(row.plan_units)} planned`}
+            >
+              <div className="h-full rounded-full bg-accent" style={{ width: `${Math.max(0, Math.min(rate, 100))}%` }} />
+            </div>
+            <span className="w-16 text-right font-semibold tabular-nums text-foreground-strong">{rate.toFixed(1)}%</span>
+          </div>;
+        })}
+      </div>
+      {chartRows.some((row) => row.fulfillment_pct > 100) && <p className="mt-2 text-xs text-foreground-subtle">Rates above 100% mean recorded receipts exceeded the planned quantity; bars are capped at 100%.</p>}
+    </section>}
+    {movementRows.length > 0 && <section aria-labelledby="outlet-movement-heading" className="mb-5 rounded-lg bg-surface-sunken p-4">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 id="outlet-movement-heading" className="text-sm font-semibold text-foreground-strong">What was planned, sent and received</h3>
+        <div className="flex flex-wrap gap-3 text-xs text-foreground-subtle" aria-label="Chart legend">
+          <span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-sm bg-border" />Planned</span>
+          <span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-sm bg-accent/60" />Sent</span>
+          <span><i className="mr-1.5 inline-block h-2.5 w-2.5 rounded-sm bg-accent" />Received</span>
+        </div>
+      </div>
+      <p className="mt-1 text-xs text-foreground-subtle">Odoo-recorded units for each outlet. All bars share one scale; these records do not independently verify physical quantities.</p>
+      <div className="mt-4 space-y-4">
+        {movementRows.map((row) => <div key={row.outlet} className="grid gap-x-4 gap-y-2 sm:grid-cols-[9rem_minmax(0,1fr)] sm:items-center">
+          <h4 className="text-sm font-medium text-foreground">{shortOutlet(row.outlet)}</h4>
+          <div className="space-y-1.5">
+            {[["Planned", row.plan_units, "bg-border"], ["Sent", row.sent_units, "bg-accent/60"], ["Received", row.line_received_units, "bg-accent"]].map(([label, value, color]) => <div key={label} className="grid grid-cols-[4.5rem_minmax(0,1fr)_3.5rem] items-center gap-2 text-xs">
+              <span className="text-foreground-subtle">{label}</span>
+              <div className="h-2 overflow-hidden rounded-full bg-surface" role="img" aria-label={`${shortOutlet(row.outlet)} ${label.toLowerCase()}: ${value == null ? "not recorded" : `${formatNumber(value)} units`}`}>
+                {value != null && <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.max(0, Number(value) / movementMax * 100)}%` }} />}
+              </div>
+              <span className="text-right tabular-nums text-foreground">{value == null ? "—" : formatNumber(value)}</span>
+            </div>)}
+          </div>
+        </div>)}
+      </div>
+    </section>}
+    <div className="overflow-x-auto"><table className="w-full min-w-[840px] text-sm"><thead className="text-left text-xs text-foreground-subtle"><tr><th className="pb-2 pr-3 font-medium">Outlet</th><th className="pb-2 px-2 text-right font-medium">Planned</th><th className="pb-2 px-2 text-right font-medium">Sent</th><th className="pb-2 px-2 text-right font-medium">Received</th><th className="pb-2 px-2 text-right font-medium">Plan fulfillment</th><th className="pb-2 px-2 text-right font-medium">Plan − received</th><th className="pb-2 px-2 text-right font-medium">Sent − received</th><th className="pb-2 pl-2 text-right font-medium">Shortage reasons</th></tr></thead><tbody>{fulfillmentRows.map((row) => <tr key={row.outlet} className="border-t border-border"><th scope="row" className="py-2 pr-3 text-left font-medium text-foreground">{shortOutlet(row.outlet)}</th><td className="px-2 py-2 text-right tabular-nums">{qty(row.plan_units)}</td><td className="px-2 py-2 text-right tabular-nums">{qty(row.sent_units)}</td><td className="px-2 py-2 text-right tabular-nums">{qty(row.line_received_units)}</td><td className="px-2 py-2 text-right font-semibold tabular-nums text-foreground-strong">{row.fulfillment_pct == null ? "Unavailable" : `${row.fulfillment_pct.toFixed(1)}%`}</td><td className="px-2 py-2 text-right tabular-nums">{row.plan_units == null || row.line_received_units == null ? "Not recorded" : qty(row.plan_units - row.line_received_units)}</td><td className="px-2 py-2 text-right tabular-nums">{row.sent_units == null || row.line_received_units == null ? "Not recorded" : qty(row.sent_units - row.line_received_units)}</td><td className="py-2 pl-2 text-right tabular-nums">{qty(row.units)}</td></tr>)}</tbody></table></div>
+    <p className="mt-2 text-xs text-foreground-subtle">Shortage-reason quantities are separate from movement gaps. Fulfillment is calculated from the planned and received quantities shown in each row.</p>
+  </div>;
+}
+
+function DispatcherPairTable({ rows }) {
+  if (!rows?.length) return <p className="text-sm text-foreground-subtle">No dispatcher/product pairs are available in this saved finding.</p>;
+  const incompleteBaseline = rows.some((row) => Number(row.other_products_expected_units) <= 0 || row.other_products_expected_units == null);
+  return (
+    <div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[780px] text-sm">
+          <thead className="text-left text-xs text-foreground-subtle"><tr>
+            <th className="pb-2 pr-3 font-medium">Dispatcher</th><th className="pb-2 pr-3 font-medium">Product</th>
+            <th className="pb-2 px-2 text-right font-medium">Shortage units</th><th className="pb-2 px-2 text-right font-medium">Short lines</th>
+            <th className="pb-2 px-2 text-right font-medium">Product units handled</th><th className="pb-2 px-2 text-right font-medium">Product rate</th>
+            <th className="pb-2 px-2 text-right font-medium">Other-product baseline</th><th className="pb-2 pl-2 text-right font-medium">Rate multiple</th>
+          </tr></thead>
+          <tbody>{rows.map((row) => {
+            const validProductRate = Number(row.expected_units) > 0 && row.rate_pct != null;
+            const validBaseline = Number(row.other_products_expected_units) > 0 && row.own_rate_pct != null;
+            const sourceRows = row.source_records ?? [];
+            return (
+              <tr key={`${row.dispatcher}-${row.sku ?? row.product}`} className="border-t border-border align-top">
+                <td className="py-2 pr-3 text-foreground">{personLabel(row.dispatcher)}</td>
+                <td className="py-2 pr-3 text-foreground">
+                  {shortProduct(row.product)}{row.sku && <span className="block text-xs text-foreground-subtle">SKU {row.sku}</span>}
+                  {sourceRows.length > 0 && <details className="mt-1"><summary className="cursor-pointer text-xs text-accent">Underlying shortage lines ({sourceRows.length})</summary><ul className="mt-1 space-y-1 text-xs text-foreground-subtle">{sourceRows.map((source) => <li key={source.id}>{source.receipt || "Receipt not recorded"} · {shortOutlet(source.outlet)} · {formatNumber(source.missing_units)} short of {formatNumber(source.expected_units)} · {source.date || "date not recorded"}</li>)}</ul></details>}
+                </td>
+                <td className="px-2 py-2 text-right tabular-nums">{row.missing_units == null ? "Unavailable" : formatNumber(row.missing_units)}</td>
+                <td className="px-2 py-2 text-right tabular-nums">{row.short_lines == null ? "Unavailable" : formatNumber(row.short_lines)}</td>
+                <td className="px-2 py-2 text-right tabular-nums">{row.expected_units == null ? "Unavailable" : formatNumber(row.expected_units)}</td>
+                <td className="px-2 py-2 text-right tabular-nums">{validProductRate ? `${row.rate_pct}%` : "Unavailable"}</td>
+                <td className="px-2 py-2 text-right tabular-nums">{validBaseline ? <>{row.own_rate_pct}%<span className="block text-xs text-foreground-subtle">of {formatNumber(row.other_products_expected_units)} units</span></> : "Unavailable"}</td>
+                <td className="py-2 pl-2 text-right tabular-nums">{validBaseline && row.ratio != null ? `${row.ratio}×` : "Unavailable"}</td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </div>
+      {incompleteBaseline && <p className="mt-2 rounded-md border border-warning/25 bg-warning/5 px-3 py-2 text-xs text-foreground-subtle">Some saved rows lack the other-product handled volume needed to verify the comparison. Baseline rates and multiples are withheld for those rows.</p>}
+      {!rows.some((row) => (row.source_records ?? []).length > 0) && <p className="mt-2 text-xs text-foreground-subtle">Underlying receipt lines are not included in this saved observation. Refresh the finding to attach source evidence.</p>}
+      <p className="mt-2 text-xs text-foreground-subtle">A dispatcher label identifies who marked a transfer note done. The pattern does not establish who caused a shortage.</p>
+    </div>
   );
 }
 
@@ -271,9 +397,20 @@ function TransferProductTable({ rows }) {
   for (const r of rows) {
     const key = shortProduct(r.product);
     const g = byProduct.get(key) ?? { product: key, plan: 0, sent: 0, received: 0, missing: 0, hasPlan: false };
-    if (r.plan_qty != null) { g.plan += r.plan_qty; g.hasPlan = true; }
-    if (r.sent_qty != null) g.sent += r.sent_qty;
-    g.received += r.received_qty;
+    const productId = r.product_id ?? r.sku ?? r.product;
+    const outgoingKey = r.transfer_out_id != null ? `${r.transfer_out_id}:${productId}` : `${r.transfer_out ?? r.id}:${productId}`;
+    const incomingKey = r.receipt_move_id != null ? String(r.receipt_move_id) : `${r.receipt_id ?? r.receipt ?? r.id}:${productId}`;
+    g.outgoing = g.outgoing ?? new Set();
+    g.incoming = g.incoming ?? new Set();
+    if (!g.outgoing.has(outgoingKey)) {
+      if (r.plan_qty != null) { g.plan += r.plan_qty; g.hasPlan = true; }
+      if (r.sent_qty != null) g.sent += r.sent_qty;
+      g.outgoing.add(outgoingKey);
+    }
+    if (!g.incoming.has(incomingKey)) {
+      g.received += r.received_qty;
+      g.incoming.add(incomingKey);
+    }
     g.missing += r.missing_qty;
     byProduct.set(key, g);
   }
@@ -288,8 +425,8 @@ function TransferProductTable({ rows }) {
             <th className="pb-2 pr-3 text-right font-medium">Plan</th>
             <th className="pb-2 pr-3 text-right font-medium">Sent</th>
             <th className="pb-2 pr-3 text-right font-medium">Received</th>
-            <th className="pb-2 pr-3 text-right font-medium">Missing</th>
-            <th className="pb-2 text-right font-medium">Share of missing</th>
+            <th className="pb-2 pr-3 text-right font-medium">Reason qty</th>
+            <th className="pb-2 text-right font-medium">Share of reason qty</th>
           </tr>
         </thead>
         <tbody>
@@ -314,11 +451,12 @@ function TransferProductTable({ rows }) {
  * where, what is driving it, what to do, what is not known yet, then the raw
  * records and data details collapsed. Each finding type states its own value
  * basis; counts are never presented as rupees. */
-export default function InventoryCaseView({ latest, primaryMetrics, nextDecision, followUp, trendNode, measurement, verificationText, accountabilityNode, transferView }) {
+export default function InventoryCaseView({ caseId, latest, primaryMetrics, followUp, trendNode, measurement, verificationText, accountabilityNode, transferView, relationships = [], relatedSignals = [] }) {
   const [showAllProducts, setShowAllProducts] = useState(false);
-  if (latest?.category === "opportunity") return <OpportunityView latest={latest} followUp={followUp} trendNode={trendNode} />;
+  if (latest?.category === "opportunity") return <OpportunityView caseId={caseId} latest={latest} primaryMetrics={primaryMetrics} followUp={followUp} trendNode={trendNode} measurement={measurement} verificationText={verificationText} relationships={relationships} relatedSignals={relatedSignals} />;
 
   const kind = latest?.impact?.kind;
+  const findingTemplate = resolveFindingTemplate(latest);
   const hasExtremeRows = (latest?.extreme_rows ?? []).length > 0;
   const tag = tagFor(latest?.metric_id, { hasExtremeRows });
   const isTransfer = tag === INVENTORY_TAGS.TRANSFER_TRACE;
@@ -338,7 +476,7 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
   const isDamageWriteoff = tag === INVENTORY_TAGS.WRITE_OFF;
   const transferFiltersOn = isTransfer && isFilterActive(transferView?.filters);
   const traceRows = isTransfer ? filterTraceRows(latest?.trace_rows ?? [], transferView?.filters, transferView?.options) : [];
-  const transferSummary = transferFiltersOn ? summarizeTraceRows(traceRows) : null;
+  const transferSummary = isTransfer ? summarizeTraceRows(traceRows) : null;
   const records = isExtreme ? latest.extreme_rows : isDispatchOverage ? (latest.dispatch_rows ?? []) : isDispatchPattern ? (latest.pattern_rows ?? [])
     : isStuckSessions || isCompletedSessions ? (latest.sessions ?? [])
     : isDamageWriteoff ? (latest.top_products ?? [])
@@ -352,72 +490,101 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
         .sort((a, b) => b[sessionValueKey] - a[sessionValueKey])
         .map((s) => ({ name: `${s.name} (${shortOutlet(s.outlet)})`, current: s[sessionValueKey] }))
     : (storeBreakdown?.top_contributors ?? []).map((c) => ({ ...c, name: shortOutlet(c.name) }));
-  const outletRates = transferFiltersOn ? transferSummary.outletRows : latest?.outlet_rows ?? [];
-  const topRate = [...(latest?.outlet_rows ?? [])].filter((o) => o.unit_rate != null).sort((a, b) => b.unit_rate - a.unit_rate)[0];
+  const outletRates = latest?.outlet_rows ?? [];
+  const hasGitOrRelatedRows = (latest?.git_rows ?? []).length > 0
+    || (latest?.source_location_rows ?? []).some((row) => row.usage === "transit")
+    || (latest?.related_transfer_outcomes ?? []).length > 0;
+  const latestSourceRecord = isTransfer
+    ? traceRows.map((row) => row.recorded_on).filter(Boolean).sort().at(-1)
+    : null;
   const whatBreakdowns = (latest?.breakdowns ?? []).filter((b) => b.dimension !== "store" && b.dimension !== "outlet");
   const stuckValuation = kind === "stuck_stock_count_value_at_risk" ? (latest.impact?.valuation_coverage ?? {}) : null;
   const notKnown = [
     ...(stuckValuation?.no_cost_data_lines ? [`${formatNumber(stuckValuation.no_cost_data_lines)} unscanned lines have no cost and are not valued, so the total is a lower bound.`] : []),
     ...(stuckValuation?.catalog_estimate_lines ? [`${formatNumber(stuckValuation.catalog_estimate_lines)} lines are valued from a catalog estimate rather than their own cost.`] : []),
-    ...(latest?.root_cause?.checks ?? []).filter((c) => c.verdict === "unknown" || c.verdict === "possible_contributor").map((c) => plainUnknown(c.detail)),
-    ...(latest?.excluded_rows?.length
-      ? [`${formatNumber(latest.impact?.excluded_lines ?? 0)} ${(latest.impact?.excluded_lines ?? 0) === 1 ? "line" : "lines"} on cancelled or not-yet-received receipts (${formatNumber(latest.impact?.excluded_units ?? 0)} units) are excluded from every figure on this page.`]
+    ((latest?.impact?.excluded_lines ?? 0) > 0
+      ? [`${formatNumber(latest.impact.excluded_lines)} ${latest.impact.excluded_lines === 1 ? "line" : "lines"} on cancelled or not-yet-received receipts (${formatNumber(latest.impact.excluded_units ?? 0)} units) are excluded from the movement totals and shortage finding.`]
       : []),
   ];
+  const inventoryFamily = inventoryFamilyFor({ ...latest, domain: "inventory" });
 
   return (
-    <div className="mt-4 space-y-5">
-      <section className="rounded-xl border border-border bg-surface p-5">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-foreground-subtle">What happened</h2>
-        <p className="mt-3 text-base text-foreground-strong">{answerFor(latest)}</p>
-        {valueLine ? <p className="mt-2 text-sm text-foreground-subtle">{valueLine}</p> : (
+    <div className="mt-5 space-y-5">
+      {primaryMetrics.length > 0 && <section aria-labelledby="inventory-key-metrics"><h2 id="inventory-key-metrics" className="mb-2 text-sm font-semibold text-foreground-strong">Key metrics</h2><PrimaryMetricStrip cards={primaryMetrics} /></section>}
+      <section aria-labelledby="inventory-detected" className="rounded-xl border-l-4 border-accent bg-surface px-5 py-4">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-foreground-subtle">
+          <span id="inventory-detected" className="text-accent">What Celeste detected</span>
+          <span aria-hidden="true">·</span>
+          {inventoryFamily && <span>{inventoryFamily.label}</span>}
+          {inventoryFamily && <span aria-hidden="true">·</span>}
+          <span>{findingTemplate.label}</span>
+        </div>
+        <h2 className="mt-2 w-full font-display text-xl font-semibold leading-snug text-foreground-strong">{answerFor(latest)}</h2>
+        {valueLine ? <p className="mt-2 w-full text-sm text-foreground-subtle">{valueLine}</p> : (
           <p className="mt-2 text-sm text-foreground-subtle">No rupee value is recorded for this finding; the counts above are the measure.</p>
         )}
+        {(isExtreme || isDispatchPattern) && <p className="mt-3 max-w-4xl rounded-lg border border-warning/30 bg-warning/5 px-3 py-2 text-sm text-foreground-subtle">This is a severity or pattern view of recorded receiving shortages. Its lines may also appear in the broader shortage finding; do not add the unit totals across these findings.</p>}
       </section>
 
-      {(isTransfer || isDispatchPattern) && transferView?.filterBar && (
-        <section aria-label="Filter this result" className="rounded-xl border border-border bg-surface p-4">
-          <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-foreground-subtle">Filter this result</h2>
-          {transferView.filterBar}
-          <p className="mt-3 text-xs text-foreground-subtle">
-            {!isTransfer
-              ? "Filters apply to the company-wide panel below."
-              : transferFiltersOn
-              ? `Showing ${formatNumber(traceRows.length)} of ${formatNumber(latest?.trace_rows?.length ?? 0)} lines in this finding, and the company-wide panel below. The headline figures above cover the whole finding.`
-              : "Filters apply to the lines in this finding and to the company-wide panel below."}
-          </p>
-          {isTransfer && transferFiltersOn && traceRows.length === 0 && <p className="mt-3 text-sm text-foreground">No lines in this finding match these filters.</p>}
-        </section>
-      )}
+      <div className="space-y-5">
+      <section aria-labelledby="inventory-evidence" className="min-w-0 space-y-3">
+          <h2 id="inventory-evidence" className="text-sm font-semibold text-foreground-strong">Evidence to review</h2>
+          {isTransfer && transferView?.filterBar && (
+            <section aria-label="Source record filters" className="rounded-lg border border-border bg-surface px-4 py-3">
+              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-foreground-subtle">Filter source records</h2>
+              {transferView.filterBar}
+              <p className="mt-3 text-xs text-foreground-subtle">
+                {transferFiltersOn
+                  ? `Showing ${formatNumber(traceRows.length)} of ${formatNumber(latest?.trace_rows?.length ?? 0)} lines. Headline metrics, quantity reconciliation and outlet comparison remain on the full finding scope.`
+                  : "Filters narrow the source records and product ranking below. Headline metrics, quantity reconciliation and outlet comparison remain on the full finding scope."}
+              </p>
+              {isTransfer && transferFiltersOn && traceRows.length === 0 && <p className="mt-3 text-sm text-foreground">No lines in this finding match these filters.</p>}
+            </section>
+          )}
 
-      {primaryMetrics.length > 0 && <PrimaryMetricStrip cards={primaryMetrics} />}
+          {isTransfer && latest?.impact?.plan_units != null && <FlowBlock impact={latest.impact} excludedRows={latest.excluded_rows ?? []} excludedTraceRows={latest.excluded_trace_rows ?? []} />}
 
-      {isTransfer && (transferFiltersOn ? transferSummary.impact.plan_units != null : latest?.impact?.plan_units != null) && <FlowBlock impact={transferFiltersOn ? transferSummary.impact : latest.impact} />}
+          {isTransfer && hasGitOrRelatedRows && (
+            <Block title="GIT, damage and return evidence">
+              <div className="space-y-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-foreground-strong">Current GIT lane balances</h3>
+                  <p className="mt-1 text-xs text-foreground-subtle">Current on-hand stock in Odoo locations marked as transit. These balances are lane/product context and cannot be attributed to a historical transfer.</p>
+                  {(latest?.source_location_rows ?? []).filter((row) => row.usage === "transit").length > 0 ? (
+                    <div className="mt-2 overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-xs text-foreground-subtle"><tr><th className="pb-2 pr-3 font-medium">Transit location</th><th className="pb-2 pr-3 text-right font-medium">Affected products</th><th className="pb-2 pr-3 text-right font-medium">Current on hand</th><th className="pb-2 text-right font-medium">Reserved</th></tr></thead><tbody>{latest.source_location_rows.filter((row) => row.usage === "transit").map((row) => <tr key={row.location} className="border-t border-border"><td className="py-1.5 pr-3">{row.location}</td><td className="py-1.5 pr-3 text-right tabular-nums">{formatNumber(row.affected_products)}</td><td className="py-1.5 pr-3 text-right tabular-nums">{formatNumber(row.current_on_hand_units)}</td><td className="py-1.5 text-right tabular-nums">{formatNumber(row.current_reserved_units)}</td></tr>)}</tbody></table></div>
+                  ) : <p className="mt-1 text-sm text-foreground-subtle">No current GIT balance was attached to this saved observation. A new scan is needed to show the location balances.</p>}
+                  {(latest?.git_rows ?? []).length > 0 && <details className="mt-2 text-sm"><summary className="cursor-pointer font-medium text-accent">View current transit stock by product ({formatNumber(latest.git_rows.length)})</summary><div className="mt-2 max-h-80 overflow-auto"><table className="w-full text-sm"><thead className="sticky top-0 bg-surface text-left text-xs text-foreground-subtle"><tr><th className="pb-2 pr-3 font-medium">Location</th><th className="pb-2 pr-3 font-medium">Product</th><th className="pb-2 pr-3 text-right font-medium">On hand</th><th className="pb-2 text-right font-medium">Reserved</th></tr></thead><tbody>{latest.git_rows.map((row) => <tr key={`${row.location}-${row.sku ?? row.product}`} className="border-t border-border"><td className="py-1.5 pr-3">{row.location}</td><td className="py-1.5 pr-3">{shortProduct(row.product)}</td><td className="py-1.5 pr-3 text-right tabular-nums">{formatNumber(row.on_hand_units)}</td><td className="py-1.5 text-right tabular-nums">{formatNumber(row.reserved_units)}</td></tr>)}</tbody></table></div></details>}
+                  {(latest?.source_location_rows ?? []).some((row) => row.usage !== "transit") && <p className="mt-2 text-xs text-foreground-subtle">Some source paths under “Transits” are marked as internal locations in Odoo; they are not counted as GIT balances.</p>}
+                </div>
+                <div className="border-t border-border pt-3">
+                  <h3 className="text-sm font-semibold text-foreground-strong">Other reasons on the same receipt and product</h3>
+                  <p className="mt-1 text-xs text-foreground-subtle">These are linked receipt records, shown separately from missing-item quantities.</p>
+                  {(latest?.related_transfer_outcomes ?? []).length > 0 ? <ul className="mt-2 space-y-1 text-sm">{latest.related_transfer_outcomes.map((row) => <li key={`${row.reason}-${row.reason_type}`}><span className="font-medium text-foreground">{row.reason}</span> ({row.reason_type?.replaceAll("_", " ") ?? "type not recorded"}): {formatNumber(row.records)} records, {formatNumber(row.units)} units across {formatNumber(row.receipt_product_pairs)} receipt/product pair(s)</li>)}</ul> : <p className="mt-1 text-sm text-foreground-subtle">No other reason records are linked to the affected receipt/product pairs in this saved observation. Damage and return records outside these pairs are not included here.</p>}
+                </div>
+              </div>
+            </Block>
+          )}
 
-      <Block title="Where it is happening">
-        {(isTransfer ? outletRates.length > 0 : outletData.length > 0) ? (
-          <>
-            {isTransfer ? <TransferFlowCharts outlets={outletRates} /> : (
+      {isTransfer ? (
+      <Block title="Outlet reconciliation">
+        {outletRates.length > 0 ? <OutletReconciliationTable rows={outletRates} /> : <OutletReconciliationTable rows={transferSummary?.outletRows ?? []} />}
+        <p className="mt-3 text-xs text-foreground-subtle">This table shows the saved finding’s full outlet scope. Source-record filters do not change these totals. The fulfillment rate is received quantity divided by planned quantity; it does not measure delivery timing.</p>
+      </Block>
+      ) : outletData.length > 0 ? (
+      <Block title="Outlet distribution">
+            {(
             <RankedBarChart
               data={outletData}
               nameKey="name"
               valueKey="current"
-              formatValue={(v) => (isMoney ? formatCurrency(v) : isTransfer ? `${formatNumber(v)} missing units` : formatNumber(v))}
+              formatValue={(v) => (isMoney ? formatCurrency(v) : formatNumber(v))}
             />
             )}
-            {topRate && (
-              <p className="mt-3 text-sm text-foreground">
-                {shortOutlet(topRate.outlet)} has the highest missing rate: {topRate.unit_rate}% of the units it received.
-              </p>
-            )}
-          </>
-        ) : (
-          <p className="text-sm text-foreground-subtle">This finding is company-wide; no outlet breakdown is recorded.</p>
-        )}
       </Block>
+      ) : null}
 
-      <Block title="What is driving it">
-        {isTransfer ? <TransferProductTable rows={traceRows} /> : whatBreakdowns.length > 0 ? whatBreakdowns.map((breakdown) => {
+      <Block title={isDispatchPattern ? "Dispatcher/product pairs" : isTransfer ? "Ranked product discrepancies" : "Largest contributing records"}>
+        {isTransfer ? <TransferProductTable rows={traceRows} /> : isDispatchPattern ? <DispatcherPairTable rows={latest?.pattern_rows ?? []} /> : whatBreakdowns.length > 0 ? whatBreakdowns.map((breakdown) => {
           const rows = breakdown.top_contributors ?? [];
           const shown = showAllProducts ? rows : rows.slice(0, 5);
           const total = rows.reduce((sum, r) => sum + Math.abs(r.current ?? 0), 0);
@@ -469,82 +636,53 @@ export default function InventoryCaseView({ latest, primaryMetrics, nextDecision
         )}
       </Block>
 
-      <section className="rounded-xl border border-accent-border bg-accent-soft p-5" aria-label="Recommended next check">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-accent">Recommended next check</h2>
-        <p className="mt-2 text-base text-foreground-strong">{latest?.recommendations?.[0]?.action || inventoryNextCheckText(latest) || nextDecision || "Review the evidence and decide on next steps."}</p>
-        <div className="mt-4">{followUp}</div>
-      </section>
+          {(accountabilityNode || (isDispatchPattern && transferView?.filterBar)) && (
+            <details className="rounded-lg border border-border bg-surface px-4 py-3">
+              <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">Related company-wide transfer context (optional)</summary>
+              <p className="mt-2 text-xs text-foreground-subtle">This context can help compare related records; concentration does not establish who caused a discrepancy.</p>
+              {isDispatchPattern && transferView?.filterBar && <div className="mt-3"><p className="mb-2 text-xs text-foreground-subtle">These filters apply to the company-wide comparison below, not to the saved dispatcher/product pair measures.</p>{transferView.filterBar}</div>}
+              <div className="mt-3">{accountabilityNode}</div>
+            </details>
+          )}
 
-      {accountabilityNode && (
-        // Collapsed by default (real user complaint: correctly-scoped is
-        // still a lot of secondary charts/tables under one narrow finding
-        // -- the dispatch/receiving scatter, "Sent above plan," "When the
-        // loss happened," and the raw numbers table are optional
-        // deeper-digging context, not primary findings data; "What is
-        // driving it" above already answers the finding's own question).
-        <details className="rounded-xl border border-border bg-surface p-5">
-          <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wider text-foreground-subtle">
-            Who and what is driving the loss, company-wide (optional — for deeper digging)
-          </summary>
-          <div className="mt-3">{accountabilityNode}</div>
-        </details>
-      )}
-
-      <Block title="What is not known yet">
-        {notKnown.length > 0 ? (
-          <ul className="list-disc space-y-2 pl-5 text-sm text-foreground">
-            {notKnown.map((text) => <li key={text}>{text}</li>)}
-          </ul>
-        ) : (
-          <p className="text-sm text-foreground-subtle">Nothing outstanding is recorded for this case.</p>
-        )}
-      </Block>
-
-      {records.length > 0 && (
-        <details className="rounded-xl border border-border bg-surface p-4">
-          <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">
-            View {isExtreme ? "receiving records" : isDispatchOverage ? "dispatch records, line by line"
-              : isDispatchPattern ? "dispatcher/product pairs" : isStuckSessions ? "stock count sessions"
-              : isCompletedSessions ? "completed count sessions" : isDamageWriteoff ? "affected products"
-              : "transfer trace, line by line"} ({formatNumber(records.length)})
-          </summary>
-          <div className="mt-3">
-            <div className="overflow-x-auto">
-              <AffectedRecordTable
-                columns={isExtreme ? RECORD_COLUMNS_EXTREME : isDispatchOverage ? RECORD_COLUMNS_DISPATCH
-                  : isDispatchPattern ? RECORD_COLUMNS_PATTERN : isStuckSessions ? RECORD_COLUMNS_STUCK_SESSIONS
-                  : isCompletedSessions ? RECORD_COLUMNS_COMPLETED_SESSIONS : isDamageWriteoff ? RECORD_COLUMNS_DAMAGE_PRODUCTS
-                  : RECORD_COLUMNS_TRANSFER}
-                rows={records}
-                rowKey={isDispatchPattern || isDamageWriteoff ? "sku" : "id"}
-              />
-            </div>
-          </div>
-        </details>
-      )}
-
+          {records.length > 0 && !isDispatchPattern && (
+            isTransfer ? <details className="rounded-lg border border-border bg-surface px-4 py-3">
+              <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">Source shortage records · {formatNumber(records.length)}{latestSourceRecord ? ` · latest record ${formatWhen(latestSourceRecord)}` : ""}</summary>
+              <p className="mt-2 text-xs text-foreground-subtle">Rows preserve individual Odoo shortage records. Movement quantities in the comparison above are deduplicated by their stock-move IDs.</p>
+              <div className="mt-3 overflow-x-auto">
+                <AffectedRecordTable columns={RECORD_COLUMNS_TRANSFER} rows={records} rowKey="id" />
+              </div>
+            </details> : <details className="rounded-lg border border-border bg-surface px-4 py-3">
+                <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">View source records ({formatNumber(records.length)})</summary>
+                <p className="mt-2 text-xs text-foreground-subtle">These are the underlying records supplied with this saved finding. The summary and breakdowns above remain the measured result.</p>
+                <div className="mt-3 overflow-x-auto">
+                  <AffectedRecordTable
+                    columns={isExtreme ? RECORD_COLUMNS_EXTREME : isDispatchOverage ? RECORD_COLUMNS_DISPATCH
+                      : isStuckSessions ? RECORD_COLUMNS_STUCK_SESSIONS
+                      : isCompletedSessions ? RECORD_COLUMNS_COMPLETED_SESSIONS : isDamageWriteoff ? RECORD_COLUMNS_DAMAGE_PRODUCTS
+                      : RECORD_COLUMNS_TRANSFER}
+                    rows={records}
+                    rowKey={isDispatchPattern || isDamageWriteoff ? "sku" : "id"}
+                  />
+                </div>
+            </details>
+          )}
       {trendNode && (
-        <details className="rounded-xl border border-border bg-surface p-4">
-          <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">Current-period check (provisional)</summary>
+        <details className="rounded-lg border border-border bg-surface px-4 py-3">
+          <summary className="cursor-pointer text-sm font-medium text-foreground-strong">Provisional current-period check</summary>
           <div className="mt-3">{trendNode}</div>
         </details>
       )}
-      <details className="rounded-xl border border-border bg-surface p-4">
-        <summary className="cursor-pointer text-sm font-semibold text-foreground-strong">Data source and calculation details</summary>
-        <div className="mt-3 space-y-2 text-sm text-foreground-subtle">
-          <p>{verificationText}</p>
-          {measurement && (
-            <>
-              <p>Data up to date: {measurement.freshness ?? "unknown"} · Data coverage: {measurement.coverage ?? "unknown"}</p>
-              <p>Source check: {measurement.detector_id} · Period: {measurement.period || "unavailable"}</p>
-            </>
-          )}
-          {isTransfer && <p>Plan is the quantity on the transfer note, Sent is the quantity completed on that note, and Received is the quantity completed on the receipt. Planned by is the note creator. Sent by and Received by are the people who moved each Odoo record to Done, taken from its status history. They show who closed the record, not who physically carried the goods. Accounts marked shared are device or team logins, so the individual cannot be identified from this data.</p>}
-          {isTransfer && <p>Discrepancy rates divide the units recorded missing by the units received over the same window, counting only received receipts. Estimated exposure uses the current catalog cost; lines without a cost are not valued.</p>}
-          {isDispatchOverage && <p>This flags an outbound line sent at least 5x its planned quantity and at least 50 units over plan -- the top ~0.3% of all outbound lines by this measure over the last 6 months, not routine rounding. It does not establish whether the extra quantity is a real top-up, a picking error, or a unit mismatch on the transfer note.</p>}
-          {isDispatchPattern && <p>This flags a dispatcher's miss rate on one specific recurring product when it is at least 5% and at least 5x that dispatcher's own overall rate across everything else they handle, with at least 50 units handled on the pair. Raw concentration (one person sending most of a product) is not used: dispatchers are tied to fixed routes, so that is usually just who is on the route, not a behavior signal.</p>}
-        </div>
-      </details>
+      <EvidenceInterpretation latest={latest} notKnown={notKnown} />
+      </section>
+      <RelatedInventoryFindings caseId={caseId} relationships={relationships} relatedSignals={relatedSignals} />
+      </div>
+      <InventoryMethodology measurement={measurement} verificationText={verificationText}>
+        {isTransfer && <p>Plan is the quantity on the transfer note, Sent is the quantity completed on that note, and Received is the quantity completed on the receipt. Status-history users show who closed a record, not who physically carried goods. Shared accounts do not identify an individual.</p>}
+        {isTransfer && <p>Discrepancy rates divide units recorded missing by units received in the same window. Estimated exposure uses current catalog cost; lines without cost are not valued.</p>}
+        {isDispatchOverage && <p>This flags outbound lines at least 5x planned and 50 units over plan. It does not establish whether the extra quantity reflects a top-up, picking error, or unit mismatch.</p>}
+        {isDispatchPattern && <p>This compares each recurring product’s recorded shortage rate with the rate for the same marked dispatcher’s other products. It uses minimum rate and handled-unit thresholds; it identifies records for review and does not establish fault. If the comparison baseline is unavailable, run a fresh investigation before using the ratio.</p>}
+      </InventoryMethodology>
     </div>
   );
 }

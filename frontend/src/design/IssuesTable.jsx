@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import Badge, { toneForPriority } from "./Badge";
 import { caseStatusMeta } from "./caseStatus";
 import { DOMAIN_LABEL } from "./domains";
-import { priorityLabelFor, titleFor as standardTitleFor } from "./inventoryDisplay";
+import { findingTypeFor, inventoryFamilyFor, priorityLabelFor, titleFor as standardTitleFor } from "./inventoryDisplay";
 import { CATALOG_COST_ESTIMATE_KINDS } from "./overviewMath";
 import { formatCurrency, formatNumber, prettifyMetricId } from "../format";
 
@@ -13,19 +13,20 @@ function ageDays(firstObserved) {
   return Math.max(0, Math.floor((Date.now() - date.getTime()) / 86400000));
 }
 
-const COLUMN_COUNT = 7;
+const COLUMN_COUNT = 8;
 
 function ExposureTag({ text }) {
   return <span className="ml-1.5 rounded border border-border px-1 py-0.5 align-middle text-[10px] font-medium uppercase tracking-wide text-foreground-subtle">{text}</span>;
 }
 
-function IssueRow({ item, evidenceFor, typeFor, dedupeDomain }) {
+function IssueRow({ item, evidenceFor, typeFor, findingType, dedupeDomain }) {
   const title = standardTitleFor(item);
   const impact = item.latest?.impact_summary;
   const value = impact?.financial_impact_rs;
   const units = impact?.units_affected;
   const coverage = impact?.valued_units_pct;
   const weakValue = coverage != null && coverage < 50;
+  const family = inventoryFamilyFor(item);
   const exposureSub = [units != null ? `${formatNumber(units)} units` : null, coverage != null ? `${coverage}% valued` : null].filter(Boolean).join(" · ");
   const age = ageDays(evidenceFor(item.case_id)?.first_observed);
   return (
@@ -34,7 +35,12 @@ function IssueRow({ item, evidenceFor, typeFor, dedupeDomain }) {
         <Link to={`/investigate/${encodeURIComponent(item.case_id)}`} className="font-medium text-accent hover:underline">{title}</Link>
       </td>
       <td className="hidden px-4 py-3 text-foreground sm:table-cell">
-        {dedupeDomain ? <span className="text-foreground-subtle" aria-hidden="true">—</span> : (DOMAIN_LABEL[item.domain] ?? prettifyMetricId(item.domain || "unclassified"))}
+        {family ? (family.domainKey === "stock_movement" ? "Stock Movement & Transfer Discrepancies"
+          : family.domainKey === "stock_availability_risk" ? "Stock Availability & Stockout Risk"
+          : family.domainKey === "stock_record_controls" ? "Stock Count & Inventory Record Controls"
+          : family.domainKey === "damage_writeoff_losses" ? "Inventory Damage & Write-off Losses"
+          : "Inventory Performance & Opportunities")
+          : dedupeDomain ? <span className="text-foreground-subtle" aria-hidden="true">—</span> : (DOMAIN_LABEL[item.domain] ?? prettifyMetricId(item.domain || "unclassified"))}
       </td>
       <td className="px-4 py-3">
         {item.category === "opportunity"
@@ -42,13 +48,17 @@ function IssueRow({ item, evidenceFor, typeFor, dedupeDomain }) {
           : <Badge tone={toneForPriority(item.priority)}>{prettifyMetricId(item.priority || "Unranked")}</Badge>}
       </td>
       <td className="px-4 py-3 text-foreground">{caseStatusMeta(item.status).label}</td>
-      <td className="hidden px-4 py-3 text-foreground-subtle sm:table-cell">{typeFor(item)}</td>
+      <td className="hidden px-4 py-3 text-foreground sm:table-cell">{findingType(item) ?? "—"}</td>
+      <td className="hidden px-4 py-3 text-foreground-subtle lg:table-cell">{typeFor(item)}</td>
       <td className="hidden whitespace-nowrap px-4 py-3 text-right tabular-nums text-foreground sm:table-cell" title="Days since this finding was first observed, not since its data last changed.">{age == null ? "n/a" : `${age} d`}</td>
       <td className="px-4 py-3 text-right tabular-nums">
         {Number.isFinite(value) ? (
           <span className={weakValue ? "text-foreground-subtle" : "text-foreground"}>
             {formatCurrency(value)}
-            <ExposureTag text={CATALOG_COST_ESTIMATE_KINDS.has(impact?.kind) ? "Est." : "Recorded"} />
+            <ExposureTag text={item.category === "opportunity" ? "Est. benefit"
+              : CATALOG_COST_ESTIMATE_KINDS.has(impact?.kind) ? "Catalog estimate"
+              : impact?.kind === "completed_stock_count_variance" || impact?.kind === "damage_writeoff" ? "Recorded value"
+              : "Measured"} />
           </span>
         ) : (
           <span className="text-foreground-subtle">Not quantified</span>
@@ -62,7 +72,7 @@ function IssueRow({ item, evidenceFor, typeFor, dedupeDomain }) {
 /** Issue list, grouped by management family when `groups` is given. Each group
  * header states its family's priority and that exposure is not summed across its
  * findings. Items outside every group are listed last under "Other inventory cases". */
-export default function IssuesTable({ items, evidenceFor, typeFor, groups }) {
+export default function IssuesTable({ items, evidenceFor, typeFor, findingType = findingTypeFor, groups }) {
   const sections = [];
   if (groups?.length) {
     const byKey = new Map(groups.map((g) => [g.key, { ...g, items: [] }]));
@@ -87,14 +97,15 @@ export default function IssuesTable({ items, evidenceFor, typeFor, groups }) {
             <th scope="col" className="hidden px-4 py-2.5 font-medium sm:table-cell">Domain</th>
             <th scope="col" className="px-4 py-2.5 font-medium">Priority</th>
             <th scope="col" className="px-4 py-2.5 font-medium">Status</th>
-            <th scope="col" className="hidden px-4 py-2.5 font-medium sm:table-cell">Type</th>
+            <th scope="col" className="hidden px-4 py-2.5 font-medium sm:table-cell">Finding type</th>
+            <th scope="col" className="hidden px-4 py-2.5 font-medium lg:table-cell">Evidence class</th>
             <th scope="col" className="hidden px-4 py-2.5 text-right font-medium sm:table-cell" title="Days since this finding was first observed, not since its data last changed.">Age</th>
-            <th scope="col" className="px-4 py-2.5 text-right font-medium">Recorded exposure</th>
+            <th scope="col" className="px-4 py-2.5 text-right font-medium">Value / benefit</th>
           </tr>
         </thead>
         <tbody>
           {sections.map((section) => (
-            <Section key={section.key} section={section} evidenceFor={evidenceFor} typeFor={typeFor} />
+            <Section key={section.key} section={section} evidenceFor={evidenceFor} typeFor={typeFor} findingType={findingType} />
           ))}
         </tbody>
       </table>
@@ -102,7 +113,7 @@ export default function IssuesTable({ items, evidenceFor, typeFor, groups }) {
   );
 }
 
-function Section({ section, evidenceFor, typeFor }) {
+function Section({ section, evidenceFor, typeFor, findingType }) {
   return (
     <>
       {section.label && (
@@ -118,7 +129,7 @@ function Section({ section, evidenceFor, typeFor }) {
         </tr>
       )}
       {section.items.map((item) => (
-        <IssueRow key={item.case_id} item={item} evidenceFor={evidenceFor} typeFor={typeFor} dedupeDomain={section.key !== "other" && section.key !== "all"} />
+        <IssueRow key={item.case_id} item={item} evidenceFor={evidenceFor} typeFor={typeFor} findingType={findingType} dedupeDomain={section.key !== "other" && section.key !== "all"} />
       ))}
     </>
   );

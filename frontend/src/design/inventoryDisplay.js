@@ -4,7 +4,9 @@
 // in both places. Detector logic and stored history are unchanged. Falls back to the
 // stored title for any case type not listed here, or when the needed number is absent.
 
-import { formatCurrency, formatNumber } from "../format";
+import { formatCurrency, formatNumber } from "../format.js";
+import { ARCHETYPES, resolveFindingTemplate } from "./findingTemplates.js";
+import { INVENTORY_FAMILIES, inventoryFindingType } from "./inventoryTaxonomy.js";
 
 const plural = (n, word) => `${formatNumber(n)} ${word}${n === 1 ? "" : "s"}`;
 
@@ -37,7 +39,7 @@ export function titleFor(item) {
   if (id === "dispatch_pattern") {
     const count = latest?.confirm?.current;
     if (count == null) return fallback;
-    return `Dispatcher pattern on recurring products · ${plural(count, "pair")} · last 14 days`;
+    return `Higher dispatcher/product shortage rate · ${plural(count, "pair")} · last 14 days`;
   }
   if (kind === "top_sellers_out_of_stock") {
     if (impact.count == null || impact.total_top_sellers == null) return fallback;
@@ -67,17 +69,42 @@ export function titleFor(item) {
   return fallback;
 }
 
+/** Display grouping for inventory investigation cases; detection and API IDs stay unchanged. */
+export function inventoryFamilyFor(item = {}) {
+  const id = item.metric_id ?? "";
+  let key = null;
+  if (id.startsWith("extreme_event_") || id === "dispatch_pattern") key = "warehouse_transfer_shortages";
+  else if (id.startsWith("transfer_discrepancy_")) {
+    key = id.endsWith("_extra_quantity") ? "warehouse_transfer_overages"
+      : id.endsWith("_product_damage") ? "damage_and_writeoffs" : "warehouse_transfer_shortages";
+  } else if (id === "dispatch_sent_above_plan") key = "warehouse_dispatch_overage";
+  else if (["stock_availability", "top_seller_stock"].includes(id)) key = "stock_availability";
+  else if (["stuck_stock_count", "completed_stock_count_variance"].includes(id) || id.startsWith("completed_stock_count_variance-")) key = "stock_count_controls";
+  else if (id === "damage_writeoff") key = "damage_and_writeoffs";
+  else if (id === "dead_overstock_value") key = "inventory_health";
+  else if (item.domain === "inventory" && item.category === "opportunity") key = "inventory_opportunities";
+  const family = key ? INVENTORY_FAMILIES[key] : null;
+  return family ? { key, label: family.label, domainKey: family.domainKey, findingTypes: family.findingTypes } : null;
+}
+
+/** The concrete issue pattern. Kept distinct from the evidence archetype. */
+export function findingTypeFor(item = {}) {
+  return inventoryFindingType(item);
+}
+
 // Business-facing type. Stuck counts and count variance are controls, not states.
 export function typeKeyFor(item) {
-  const id = item.metric_id ?? "";
-  if (item.category === "opportunity") return "opportunity";
-  if (id.startsWith("extreme_event_") || id === "dispatch_sent_above_plan") return "extreme";
-  if (id === "dispatch_pattern") return "recurring";
-  if (id.startsWith("incident_") || id.startsWith("transfer_discrepancy_")) return "recurring";
-  if (id === "stuck_stock_count" || id === "completed_stock_count_variance" || id === "damage_writeoff") return "control";
-  if (item.domain === "controls") return "control";
-  if (id === "stock_availability" || id === "top_seller_stock") return "state";
-  return item.horizon === "monthly" ? "trend" : "state";
+  const archetype = resolveFindingTemplate(item).archetype;
+  return ({
+    [ARCHETYPES.STATE_SNAPSHOT]: "state",
+    [ARCHETYPES.TREND_DEVIATION]: "trend",
+    [ARCHETYPES.RECURRING_PATTERN]: "recurring",
+    [ARCHETYPES.EXTREME_EVENT]: "extreme",
+    [ARCHETYPES.CONTROL_EXCEPTION]: "control",
+    [ARCHETYPES.RECORDED_LOSS]: "recorded_loss",
+    [ARCHETYPES.OPPORTUNITY_OUTCOME]: "opportunity",
+    [ARCHETYPES.LEGACY]: "legacy",
+  })[archetype];
 }
 
 export const TYPE_LABELS = {
@@ -86,8 +113,14 @@ export const TYPE_LABELS = {
   recurring: "Recurring pattern",
   extreme: "Extreme event",
   control: "Control",
-  opportunity: "Opportunity",
+  recorded_loss: "Recorded financial event",
+  opportunity: "Opportunity outcome",
+  legacy: "Legacy",
 };
+
+// Existing issue-list type filters classify evidence shape; use the explicit
+// name so this dimension cannot be confused with the business finding type.
+export const EVIDENCE_CLASS_LABELS = TYPE_LABELS;
 
 // Opportunities have no severity rank, so they show their own label rather than a priority.
 export function priorityLabelFor(item, prettify) {

@@ -37,6 +37,7 @@ export const INVENTORY_TAGS = {
 const METRIC_PREFIX_TAGS = [
   ["transfer_discrepancy_", INVENTORY_TAGS.TRANSFER_TRACE],
   ["extreme_event_", INVENTORY_TAGS.TRANSFER_TRACE],
+  ["completed_stock_count_variance-", INVENTORY_TAGS.NAMED_INCIDENT],
 ];
 const METRIC_EXACT_TAGS = {
   dispatch_sent_above_plan: INVENTORY_TAGS.DISPATCH,

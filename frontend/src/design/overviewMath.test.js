@@ -82,3 +82,10 @@ test("domain coverage is null when no units are recorded", () => {
   const [row] = exposureByDomain([{ domain: "inventory", impact: { kind: "transfer_discrepancy", financial_impact_rs: 10 } }]);
   assert.equal(row.coverage, null);
 });
+
+test("domain coverage defaults missing valued_units_pct to fully valued, not zero", () => {
+  const [row] = exposureByDomain([
+    { domain: "inventory", impact: { kind: "transfer_discrepancy", financial_impact_rs: 10, units_affected: 5 } },
+  ]);
+  assert.equal(row.coverage, 100);
+});

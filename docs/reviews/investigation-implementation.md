@@ -30,17 +30,26 @@ Zero-baseline activation is metric-specific. Cancellation, delayed-order, Uber a
 
 Scans build deterministic evidence, apply corroboration, then generate recommendations against the final evidence. AI items must pass bounded schema validation: nonempty action and expected benefit, allowed priority, bounded optional owner role, and evidence references limited to supplied evidence. Invalid items are rejected individually; unavailable or rejected generation is exposed to the UI. The owner text is a suggested role, not an authenticated assignment.
 
-Agent and investigation generation share one model selector: `OPENAI_MODEL`, falling back to `moonshotai/kimi-k3`. No live model-quality or threshold-calibration study was performed.
+Agent and investigation generation share one model selector: `OPENAI_MODEL`, falling back to `meta/muse-glimmer-30b` on the NVIDIA OpenAI-compatible endpoint. No live model-quality or threshold-calibration study was performed.
 
 ## D — Explanation and audit trail
 
 Case details show measurement coverage, source freshness, last verification check, provenance and the reason verification is held. Target versions and historical outcomes are expandable. The timeline records meaningful measurement, evidence, policy, target and action-cycle changes. Current category determines the displayed resolution policy, including legacy rows. Recovery wording distinguishes a recovered condition from proof that an underlying cause was resolved.
 
+## Completed stock-count variance follow-up
+
+The two open completed-count cases previously reviewed were checked by session ID: both contained the exact same 172 completed sessions and Rs 13,399,873.16 gross absolute variance. The saved snapshots therefore establish a duplicate finding, not independent exposures. This comparison does not validate the underlying source freshness or the amount against source records.
+
+New measurements and saved-case evidence now retain the exact date bounds, outlet scope, query time, gross absolute variance, signed net variance, both denominator values/rates, and line/value valuation coverage. Variance rates use gross absolute variance over either counted value or system value; these denominators include source-cost and catalog-estimate lines only. The UI shows that coverage and warns when unpriced lines can make the rates overstate the full-inventory rate. Query time is not presented as a source-refresh watermark.
+
+When an ad-hoc completed-count investigation is saved, exact session-ID matches reuse a canonical active case and are linked as `duplicate_of`; partial intersections are linked as `overlaps` without merging case evidence or amounts. Existing cases are not automatically closed or rewritten: the two already-persisted duplicate cases will receive a relationship only if a matching scope is saved again, and still require a manager's disposition.
+
 ## Remaining boundaries
 
 - Inventory/control/count sources that lack a trustworthy refresh watermark remain unknown. Sales recency and query time are not accepted as evidence that inventory refreshed. These cases cannot automatically clear until their source exposes reliable freshness coverage.
 - Manually scoped cases need actual matching remeasurement; this work does not add a scheduler for every arbitrary manual scope.
-- Scan-wide atomic publication, new detectors and broad UI redesign remain deferred as requested.
+- A scan's application-database changes now commit together with its daily brief. If any scan stage fails, case, action-outcome, tracking, customer-snapshot, and health-history writes from that scan roll back; reporting-database reads remain read-only and outside this transaction.
+- New detectors and broad UI redesign remain deferred.
 - Existing historical outcomes are retained as recorded; the migration does not recompute them.
 
 ## Validation
@@ -51,6 +60,7 @@ Case details show measurement coverage, source freshness, last verification chec
 - Frontend unit tests: 64 passed; production build passed. Existing bundle-size and deprecation warnings remain.
 - Browser regressions: all 5 passed (three core workflows and two new integrity/coverage/history checks). Tests use mocked APIs and temporary databases, not production mutations.
 - Syntax/import lint checks passed for the final touched Python files; repository-wide lint still has pre-existing findings.
+- Follow-up, 19 October 2026: a forced late-stage scan failure now verifies rollback of case/tracking writes and retention of the last successful brief; all 6 scan-pipeline tests passed. The refresh-request error/retry browser test and existing Investigate domains browser test passed, as did all 80 frontend unit tests and the production build. The default backend suite reported 600 passed; 3 unrelated tests failed on reporting-database connection timeouts.
 
 The historical probe script describes the original defects and is not a post-fix acceptance suite. The maintained regressions are in `tests/test_investigation_integrity.py` and `frontend/e2e/investigation-integrity.spec.js`.
 

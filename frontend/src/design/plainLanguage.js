@@ -442,7 +442,11 @@ export function inventoryAnswerText(latest) {
   const productText = products.length >= 2
     ? `most affected products are ${shortName(products[0].name)} and ${shortName(products[1].name)}`
     : products.length === 1 ? `most affected product is ${shortName(products[0].name)}` : null;
-  return `${formatNumber(lines)} ${reason} ${lines === 1 ? "line" : "lines"} show ${formatNumber(units ?? 0)} units missing `
+  const quantityLabel = reason === "missing item" ? "units recorded missing"
+    : reason === "extra quantity" ? "extra units recorded"
+      : reason === "product damage" ? "units recorded as damaged"
+        : "units recorded under this reason";
+  return `${formatNumber(lines)} ${reason} ${lines === 1 ? "record" : "records"} total ${formatNumber(units ?? 0)} ${quantityLabel} `
     + `across ${outletCount} outlet${outletCount === 1 ? "" : "s"}${topText}`
     + (productText ? `; ${productText}` : "")
     + ". Review the largest receipts and receiving records first.";
@@ -484,6 +488,18 @@ export function inventoryNextCheckText(latest) {
   }
   if (kind === "completed_stock_count_variance") {
     return `Review the count sheets${storeText ? ` for ${storeText}` : ""} first: compare each counted quantity with the system quantity and check the receiving records for the same products.`;
+  }
+  if (kind === "dispatch_pattern") {
+    return "Compare each listed receipt with the outbound transfer and receiving record, then check the same dispatcher’s other-product baseline. Confirm the movement history before changing process or assigning follow-up.";
+  }
+  if (kind === "dispatch_over_plan") {
+    return "For each flagged line, compare the approved plan, completed outbound quantity and receipt. Confirm whether the extra quantity was an authorized top-up or a recording/unit issue.";
+  }
+  if (kind === "damage_writeoff") {
+    return "Review the write-off record and catalog-cost coverage, then check whether the recorded damage was inspected and dispositioned under the outlet’s process.";
+  }
+  if (kind === "stockout_cancellation_rate") {
+    return "Check the current and baseline periods for comparable order volume, then confirm whether stock availability changed alongside cancellations before crediting the improvement to inventory actions.";
   }
   return null;
 }

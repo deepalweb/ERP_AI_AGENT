@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Search, X } from "lucide-react";
-import { fetchCases, fetchManagementFamilies, fetchManagementSummary, refreshBrief } from "../api";
+import { fetchCaseDetail, fetchCases, fetchManagementFamilies, fetchManagementSummary, refreshBrief } from "../api";
 import Button from "../design/Button";
 import InvestigationDomains from "../design/InvestigationDomains";
 import { ManagementOverview, ScopeAttention, ScopeTiles } from "../design/ScopeSummary";
 import IssuesTable from "../design/IssuesTable";
+import InventoryFindingFamilyPage from "../design/InventoryFindingFamilyPage";
 import DataSyncBar from "../design/DataSyncBar";
 import CurrentPeriodInvestigations from "../design/CurrentPeriodInvestigations";
-import { TYPE_FILTERS, caseTypeFor } from "../design/caseTypes";
-import { TYPE_LABELS } from "../design/inventoryDisplay";
+import { FINDING_TYPE_FILTERS, TYPE_FILTERS, caseTypeFor } from "../design/caseTypes";
+import { findingTypeFor, TYPE_LABELS } from "../design/inventoryDisplay";
 import { DOMAIN_LABEL, DOMAIN_META } from "../design/domains";
 import { formatNumber, prettifyMetricId } from "../format";
 
 const PAGE_SIZE = 50;
+const EMPTY_FAMILIES = [];
 // A family is a few findings inside the inventory domain, so the family view fetches the
 // whole inventory page once and filters it on the client, rather than paging by family.
 const FAMILY_FETCH_LIMIT = 200;
@@ -69,7 +71,7 @@ function stamp(value) {
 // page) makes a client-side filter genuinely sufficient, not just a
 // placeholder. Revisit if case volume grows past one page.
 function searchHaystack(item) {
-  return [item.latest?.title, DOMAIN_LABEL[item.domain], item.metric_id, item.latest?.top_contributor?.name]
+  return [item.latest?.title, DOMAIN_LABEL[item.domain], item.metric_id, item.latest?.top_contributor?.name, findingTypeFor(item)]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -95,6 +97,7 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
   const [domain, setDomain] = useState(lockedDomain ?? "");
   const [priority, setPriority] = useState("");
   const [type, setType] = useState("");
+  const [findingType, setFindingType] = useState("");
   const [sort, setSort] = useState("recent_change");
   const [search, setSearch] = useState("");
   const [familyKey, setFamilyKey] = useState("");
@@ -110,11 +113,13 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
       setStatus("active");
       setPriority("");
       setType("");
+      setFindingType("");
       setSearch("");
       setFamilyKey("");
     }
     if ("status" in next) setStatus(next.status);
     if ("priority" in next) setPriority(next.priority);
+    if ("findingType" in next) setFindingType(next.findingType);
     if ("sort" in next) setSort(next.sort);
     if ("familyKey" in next) setFamilyKey(next.familyKey);
     setOffset(0);
@@ -145,6 +150,7 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
   });
   const queryClient = useQueryClient();
   const [requested, setRequested] = useState(false);
+  const [refreshError, setRefreshError] = useState(null);
   const summaryQuery = useQuery({
     queryKey: ["management", "summary"],
     queryFn: fetchManagementSummary,
@@ -161,12 +167,18 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
   }, [requested, refreshStatus, queryClient]);
   async function runInvestigation() {
     setRequested(true);
-    try { await refreshBrief(); } catch { setRequested(false); }
+    setRefreshError(null);
+    try {
+      await refreshBrief();
+    } catch (error) {
+      setRequested(false);
+      setRefreshError(error?.message || "The refresh request failed. Please retry.");
+    }
     summaryQuery.refetch();
   }
   const familiesQuery = useQuery({ queryKey: ["management", "families"], queryFn: fetchManagementFamilies });
   const cases = summaryQuery.data?.status === "ok" ? summaryQuery.data.cases : null;
-  const families = (familiesQuery.data?.status === "ok" ? familiesQuery.data.families : null) ?? [];
+  const families = (familiesQuery.data?.status === "ok" ? familiesQuery.data.families : null) ?? EMPTY_FAMILIES;
   const selectedFamily = families.find((family) => family.key === familyKey) ?? null;
 
   // Stable-referenced (not a fresh [] every render) so the useMemo hooks
@@ -198,11 +210,12 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
     const needle = search.trim().toLowerCase();
     return allItems.filter((item) => {
       if (type && caseTypeFor(item) !== type) return false;
+      if (findingType && findingTypeFor(item) !== findingType) return false;
       if (needle && !searchHaystack(item).includes(needle)) return false;
       return true;
     });
-  }, [allItems, type, search]);
-  const filtered = Boolean(type || search.trim());
+  }, [allItems, type, findingType, search]);
+  const filtered = Boolean(type || findingType || search.trim());
 
   const familyGroups = useMemo(() => families.map((family) => ({
     key: family.key,
@@ -211,6 +224,21 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
     note: family.exposure_quantified_children > 1 ? family.exposure_note : null,
   })), [families]);
   const groupedItems = useMemo(() => items.map((item) => ({ ...item, family_key: familyByCase.get(item.case_id) })), [items, familyByCase]);
+  const familyChildren = useMemo(() => {
+    if (!selectedFamily) return [];
+    const visibleIds = new Set(items.map((item) => item.case_id));
+    return selectedFamily.children.filter((child) => visibleIds.has(child.case_id));
+  }, [selectedFamily, items]);
+
+  const familyDetailQueries = useQueries({ queries: familyMode && selectedFamily ? familyChildren.map((child) => ({
+    queryKey: ["caseDetail", child.case_id],
+    queryFn: () => fetchCaseDetail(child.case_id),
+    staleTime: 30_000,
+  })) : [] });
+  const hydratedFamilyChildren = familyChildren.map((child, index) => ({
+    ...child,
+    detail: familyDetailQueries[index]?.data?.status === "ok" ? familyDetailQueries[index].data : null,
+  }));
 
   const latestSeen = useMemo(() => {
     const dates = fetchedItems.map((item) => stamp(item.last_seen_at)).filter(Boolean);
@@ -239,6 +267,12 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
 
       {summaryQuery.data?.status === "ok" && (
         <DataSyncBar sync={summaryQuery.data.sync} running={scanRunning} failed={refreshStatus === "failed"} onRun={runInvestigation} />
+      )}
+      {refreshError && (
+        <div role="alert" className="mt-3 flex items-center gap-2 rounded-xl border border-critical/25 bg-critical/10 p-3 text-sm text-critical">
+          <AlertCircle className="h-4 w-4 flex-none" strokeWidth={2} />
+          Couldn&rsquo;t start the investigation. {refreshError} Retry with &ldquo;Run investigation&rdquo;.
+        </div>
       )}
 
       <div className={`mt-6 grid gap-4 ${lockedDomain ? "" : "xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]"}`}>
@@ -298,6 +332,14 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
                 </button>
               </div>
             )}
+            {findingType && (
+              <div className="inline-flex items-center gap-2 rounded-full border border-accent-border bg-accent-soft px-3 py-1 text-xs font-medium text-accent">
+                Finding type: {findingType}
+                <button type="button" onClick={() => applyFilters({ findingType: "" })} aria-label="Clear finding type filter" className="text-accent hover:text-accent/70">
+                  <X size={12} />
+                </button>
+              </div>
+            )}
             {metricId && (
               <div className="inline-flex items-center gap-2 rounded-full border border-accent-border bg-accent-soft px-3 py-1 text-xs font-medium text-accent">
                 Filtered to {prettifyMetricId(metricId)}
@@ -345,7 +387,7 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
               </select>
             )}
             <select
-              aria-label="Case type"
+              aria-label="Evidence classification"
               value={type}
               onChange={(e) => setType(e.target.value)}
               className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground-strong outline-none focus:border-accent-border"
@@ -354,6 +396,18 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
                 <option key={t.value} value={t.value}>{t.label}</option>
               ))}
             </select>
+            {(lockedDomain === "inventory" || domain === "inventory") && (
+              <select
+                aria-label="Inventory finding type"
+                value={findingType}
+                onChange={(e) => applyFilters({ findingType: e.target.value })}
+                className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground-strong outline-none focus:border-accent-border"
+              >
+                {FINDING_TYPE_FILTERS.map((f) => (
+                  <option key={f.value} value={f.value}>{f.label}</option>
+                ))}
+              </select>
+            )}
             <select
               aria-label="Case priority"
               value={priority}
@@ -408,7 +462,13 @@ export default function Investigate({ lockedDomain, title = "Investigate", descr
           </div>
         )}
 
-        {items.length > 0 && (
+        {familyMode && selectedFamily && (
+          <div className="mt-4">
+            <InventoryFindingFamilyPage family={selectedFamily} children={hydratedFamilyChildren} loading={familyDetailQueries.some((query) => query.isPending)} />
+          </div>
+        )}
+
+        {items.length > 0 && !familyMode && (
           <>
             <div className="mb-3 flex items-center justify-between text-xs text-foreground-subtle">
               <span>{scopeLabel} · Saved investigations</span>

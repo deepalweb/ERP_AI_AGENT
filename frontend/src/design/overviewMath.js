@@ -45,7 +45,13 @@ export function needsAttention({ cases, casePriorities, impacts }) {
 // shared with IssuesTable.jsx's "Est." vs "Recorded" label, so the two stay consistent.
 // Revenue and cancellation figures are on a different basis and must not be summed
 // into the same chart, so they stay out until each is validated.
-export const CATALOG_COST_ESTIMATE_KINDS = new Set(["transfer_discrepancy", "dispatch_over_plan"]);
+export const CATALOG_COST_ESTIMATE_KINDS = new Set([
+  "transfer_discrepancy",
+  "dispatch_over_plan",
+  "damage_writeoff",
+  "inventory_value_at_risk",
+  "stuck_stock_count_value_at_risk",
+]);
 
 export function exposureByDomain(impacts) {
   const groups = new Map();
@@ -62,7 +68,12 @@ export function exposureByDomain(impacts) {
     const units = Number(row.impact?.units_affected);
     if (Number.isFinite(units) && units > 0) {
       group.units += units;
-      group.valuedUnits += units * ((row.impact?.valued_units_pct ?? 0) / 100);
+      // Missing valued_units_pct means the detector doesn't track valuation
+      // coverage for this case, not that it's 0% valued -- default to 100
+      // (fully valued) to match needsAttention()'s convention above, so a
+      // future detector that sets units_affected without valued_units_pct
+      // doesn't silently crush this domain's displayed coverage toward 0%.
+      group.valuedUnits += units * ((row.impact?.valued_units_pct ?? 100) / 100);
     }
     groups.set(domain, group);
   }

@@ -25,16 +25,20 @@ export default function CompletedVarianceInvestigationPanel({ latest }) {
   const sessions = latest.sessions ?? [];
   if (sessions.length === 0) return null;
 
-  const netTotal = sessions.reduce((sum, s) => sum + (s.net_variance_value_rs || 0), 0);
+  const netTotal = latest.net_variance_value_rs ?? sessions.reduce((sum, s) => sum + (s.net_variance_value_rs || 0), 0);
   const positiveTotal = sessions.reduce((sum, s) => sum + Math.max(0, s.net_variance_value_rs || 0), 0);
   const negativeTotal = sessions.reduce((sum, s) => sum + Math.min(0, s.net_variance_value_rs || 0), 0);
 
   const outletBreakdown = (latest.breakdowns ?? []).find((b) => b.dimension === "store");
   const productTypeBreakdown = (latest.breakdowns ?? []).find((b) => b.dimension === "product_type");
+  const coverage = latest.valuation_coverage;
+  const window = latest.observation_window;
+  const calculatedAt = latest.calculated_at ? new Date(latest.calculated_at).toLocaleString() : null;
+  const denominatorCaption = (value) => value == null ? "Denominator value unavailable" : `Denominator: ${formatCurrency(value)}`;
 
   return (
     <div>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <MetricSummaryCard label="Completed sessions" value={formatNumber(sessions.length)} />
         <MetricSummaryCard label="Gross absolute discrepancy" value={formatCurrency(latest.impact?.financial_impact_rs)} caption="Sum of every line's variance, ignoring direction" />
         <MetricSummaryCard label="Net variance" value={formatCurrency(netTotal)} caption="Overs and unders offsetting each other" />
@@ -42,23 +46,51 @@ export default function CompletedVarianceInvestigationPanel({ latest }) {
         <MetricSummaryCard
           label="Variance rate, vs. system qty"
           value={formatRate(latest.variance_rate_vs_system_pct)}
-          caption="Against what should have been there -- doesn't understate complete shortages"
+          caption={`${denominatorCaption(latest.system_value_rs)}; against what should have been there`}
         />
         <MetricSummaryCard
           label="Variance rate, vs. counted qty"
           value={formatRate(latest.variance_rate_vs_counted_pct)}
-          caption="Against what's still there now -- can read misleadingly high on a shortage"
+          caption={`${denominatorCaption(latest.counted_value_rs)}; against what's still there now`}
         />
+        {coverage && (
+          <MetricSummaryCard
+            label="Valuation coverage"
+            value={`${formatNumber(coverage.priced_lines)} / ${formatNumber(coverage.total_lines)} lines`}
+            caption={`${coverage.line_coverage_pct == null ? "Unknown" : `${coverage.line_coverage_pct}%`} line coverage · ${formatNumber(coverage.source_cost_lines)} source-cost, ${formatNumber(coverage.catalog_estimate_lines)} catalog-estimate, ${formatNumber(coverage.no_cost_lines)} unpriced`}
+          />
+        )}
       </div>
+      {(window || calculatedAt) && (
+        <p className="mt-3 text-xs text-foreground-subtle">
+          Scope: {window?.period ?? latest.confirm?.period ?? "Not recorded"}
+          {window?.start_date && window?.end_date ? ` · ${window.start_date} to ${window.end_date}` : ""}
+          {window?.outlet_scope ? ` · ${window.outlet_scope}` : ""}
+          {calculatedAt ? ` · Queried ${calculatedAt} (source refresh time unknown)` : ""}
+        </p>
+      )}
       <p className="mt-2 text-xs text-foreground-subtle">
         Gross and net are different real numbers, not a typo -- a store with Rs 50,000 counted over on one line and Rs
         50,000 under on another shows Rs 100,000 gross, Rs 0 net. Neither figure is a shrinkage or loss estimate by
-        itself; see "What the evidence establishes" below for whether picking-loss or damage data overlaps. The two
+        itself; see "What the evidence establishes" below for whether picking-loss or damage data overlaps. Both rates
+        divide gross absolute variance by their separately labeled, cost-valued denominator. The two
         variance rates use different denominators on purpose: a product counted as zero stock (onhand said there
         should have been stock, the physical count found none) contributes its full variance to both, but contributes
         nothing to counted value -- only system value. "Vs. counted" can read above 100% in that case; "vs. system"
         doesn't have that blind spot.
       </p>
+      {coverage?.no_cost_lines > 0 && (
+        <p className="mt-2 text-sm text-warning">
+          {formatNumber(coverage.no_cost_lines)} lines have no usable source or catalog cost. They are excluded from
+          both denominator values, so the displayed rates may overstate variance relative to the full inventory value.
+        </p>
+      )}
+      {coverage?.variance_value_coverage_pct != null && coverage.variance_value_coverage_pct < 100 && (
+        <p className="mt-2 text-sm text-warning">
+          Only {coverage.variance_value_coverage_pct}% of gross variance is on cost-priced lines; the rate numerator
+          includes the full gross variance, while its denominator includes only priced lines.
+        </p>
+      )}
 
       {outletBreakdown?.top_contributors?.length > 0 && (
         <div className="mt-4 border-t border-border pt-3">

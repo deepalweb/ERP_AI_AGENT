@@ -3,9 +3,10 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, ArrowLeft, MapPin } from "lucide-react";
 import {
-  acceptRecommendation, designateCaseObjectiveFromAction, dismissCase, fetchCaseDetail, fetchMetricDefinitions,
+  acceptRecommendation, designateCaseObjectiveFromAction, dismissCase, fetchCaseDetail, fetchCurrentPeriod, fetchMetricDefinitions,
   fetchTransferAccountability, reopenCase, updateFindingAction,
 } from "../api";
+import DataSyncBar from "../design/DataSyncBar";
 import TransferAccountabilityPanel from "../design/TransferAccountabilityPanel";
 import TransferFilterBar from "../design/TransferFilterBar";
 import Badge, { toneForPriority } from "../design/Badge";
@@ -23,21 +24,14 @@ import {
 } from "../design/plainLanguage";
 import InvestigationResults from "../design/InvestigationResults";
 import CurrentPeriodInvestigations from "../design/CurrentPeriodInvestigations";
-import InventoryInvestigationPanel from "../design/InventoryInvestigationPanel";
-import RevenueInvestigationPanel from "../design/RevenueInvestigationPanel";
-import StockCountInvestigationPanel from "../design/StockCountInvestigationPanel";
-import ControlsInvestigationPanel from "../design/ControlsInvestigationPanel";
-import CompletedVarianceInvestigationPanel from "../design/CompletedVarianceInvestigationPanel";
-import IncidentInvestigationPanel from "../design/IncidentInvestigationPanel";
-import TransferDiscrepancyInvestigationPanel from "../design/TransferDiscrepancyInvestigationPanel";
-import ExtremeEventInvestigationPanel from "../design/ExtremeEventInvestigationPanel";
 import InventoryCaseView from "../design/InventoryCaseView";
-import SupplierInvestigationPanel from "../design/SupplierInvestigationPanel";
-import SecondOrderConversionInvestigationPanel from "../design/SecondOrderConversionInvestigationPanel";
+import FindingResult from "../design/FindingResult";
+import { resolveFindingTemplate } from "../design/findingTemplates";
 import { BusinessBrief, CaseStatusPanel, EvidenceKnowledge, PrimaryMetricStrip, TechnicalDetails } from "../design/CaseVisuals";
 import { primaryMetricsFor } from "../design/caseTemplates";
+import { findingTypeFor, inventoryFamilyFor, titleFor as inventoryTitleFor } from "../design/inventoryDisplay";
+import { inventoryDomainMeta, observationWindowLabel } from "../design/inventoryTaxonomy";
 import { ActionTracker, SEVERITY_TAG_META } from "../design/SignalCard";
-import TrendChart from "../charts/TrendChart";
 import { formatByUnit, formatConfirmPeriod } from "../format";
 
 const HORIZON_LABEL = { monthly: "Monthly", weekly: "Weekly (trailing 7 days)", snapshot: "Point-in-time snapshot" };
@@ -72,6 +66,11 @@ function toDate(value) {
 function fmtDateTime(value) {
   const d = toDate(value);
   return d ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "n/a";
+}
+
+function ageInDays(value) {
+  const d = toDate(value);
+  return d ? Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000)) : null;
 }
 
 // Real factors from impact_engine.business_impact_score() (severity tier x
@@ -533,6 +532,16 @@ export default function CaseDetail() {
   const { caseId } = useParams();
   const queryClient = useQueryClient();
   const detailQuery = useQuery({ queryKey: ["caseDetail", caseId], queryFn: () => fetchCaseDetail(caseId) });
+  // Same queryKey/staleTime as CurrentPeriodInvestigations' own query (see
+  // design/CurrentPeriodInvestigations.jsx) -- React Query dedupes this to
+  // one fetch, not two. Read here so the excluded-month caption in
+  // "Comparison and affected segments" (left column) can point at the
+  // already-computed early read instead of making the user separately
+  // notice the sidebar's "Current period investigations" panel to find out
+  // the excluded month already looks critical (verified live, 2026-10-31:
+  // purchase_price_variance's Oct reading was already category="critical"
+  // at 11.96%, sitting unlinked two sections away from the chart).
+  const currentPeriodQuery = useQuery({ queryKey: ["currentPeriod"], queryFn: ({ signal }) => fetchCurrentPeriod({ signal }), staleTime: 300000, retry: false });
   const [searchParams, setSearchParams] = useSearchParams();
   const targetAction = searchParams.get("action");
   useEffect(() => {
@@ -783,9 +792,13 @@ export default function CaseDetail() {
   const { case: c, latest, observations, observations_note: observationsNote, performance_history: performanceHistory,
     relationships, history, actions, resolution_policy: resolutionPolicy, related_signals: relatedSignals } = detailQuery.data;
 
+  const currentPeriodItem = currentPeriodQuery.data?.items?.find((item) => item.metric_id === c.metric_id);
+
   const statusMeta = caseStatusMeta(c.status);
   const severityMeta = latest ? SEVERITY_TAG_META[latest.priority] ?? null : null;
-  const title = latest?.title ?? c.metric_id.replace(/_/g, " ");
+  const title = c.domain === "inventory"
+    ? inventoryTitleFor({ ...c, ...latest, metric_id: c.metric_id, latest })
+    : latest?.title ?? c.metric_id.replace(/_/g, " ");
   const headline = latest ? headlineFor(latest) : null;
   const scopeSegments = parseJSON(c.scope_segments, []);
   const isActive = c.status === "open" || c.status === "verification_pending" || c.status === "reopened";
@@ -839,18 +852,14 @@ export default function CaseDetail() {
   // implies), then a domain-level panel, then the generic trend-or-nothing
   // fallback. Metric-specific still wins over domain so a future domain
   // panel never accidentally shadows one of these three.
-  const isInventoryStockOut = c.metric_id === "top_seller_stock";
   const isRevenueCase = c.metric_id === "revenue";
-  const isStuckStockCount = c.metric_id === "stuck_stock_count";
-  const isCompletedVarianceCase = c.metric_id === "completed_stock_count_variance";
-  // incident_engine synthesizes a scope-specific metric_id per store/
-  // product/hour (incident_s{store_id}_p{product_id}_h{hour}) -- never a
-  // fixed string, so it can't be matched like the ones above.
-  const isIncidentCase = typeof c.metric_id === "string" && c.metric_id.startsWith("incident_");
   // transfer_discrepancy synthesizes a scope-specific metric_id per outlet/
   // reason (transfer_discrepancy_s{store_id}_{reason}) -- same convention
   // as incident_engine's isIncidentCase above.
   const isTransferDiscrepancyCase = typeof c.metric_id === "string" && c.metric_id.startsWith("transfer_discrepancy_");
+  const latestTransferSourceRecord = isTransferDiscrepancyCase
+    ? (latest?.trace_rows ?? []).map((row) => row.recorded_on).filter(Boolean).sort().at(-1)
+    : null;
   const isExtremeEventCase = typeof c.metric_id === "string" && c.metric_id.startsWith("extreme_event_");
   // customer_predictions.build_second_order_decline_finding uses a FIXED
   // metric_id ("second_order_conversion_rate_30d", same convention as
@@ -863,9 +872,10 @@ export default function CaseDetail() {
   // "order_customer" domain is shared with customer_retention_rate/
   // cancellation_rate/order_volume, which correctly keep using the generic
   // trend fallback below, not this panel.
-  const isSecondOrderConversionCase = c.metric_id === "second_order_conversion_rate_30d";
   const isControlsCase = c.domain === "controls";
   const isSupplierCase = c.domain === "supplier";
+  const findingTemplate = resolveFindingTemplate({ ...c, ...latest, metric: latest?.metric });
+  const hasDedicatedResult = Boolean(findingTemplate.result && !["inventory_case", "trend"].includes(findingTemplate.result));
   const hasTrendResults = ["monthly", "weekly"].includes(c.horizon) && latest && (latest.confirm?.baseline != null || latest.trend?.length || latest.breakdowns?.length || latest.how?.stages?.length);
   // Business Controls cases (a data-control gap, not a trend anomaly) read
   // as generic through the default sentence chain -- see plainLanguage.js's
@@ -890,7 +900,16 @@ export default function CaseDetail() {
   // a controls case (its own panel already has this row -- see below).
   const primaryMetrics = primaryMetricsFor({ c, latest, statusLabel: statusMeta.label });
 
-  const isInventoryCase = c.domain === "inventory";
+  const isInventoryCase = c.domain === "inventory" && findingTemplate.result !== "stock_reconciliation" && findingTemplate.result !== "fresh_production";
+  const inventoryFamily = isInventoryCase ? inventoryFamilyFor({
+    ...c, metric_id: c.metric_id, domain: c.domain, category: latest?.category ?? c.category,
+  }) : null;
+  const inventoryDomain = inventoryDomainMeta(inventoryFamily?.domainKey);
+  const inventoryType = isInventoryCase ? findingTypeFor({ ...c, ...latest, metric_id: c.metric_id }) : null;
+  const findingAgeDays = isInventoryCase ? ageInDays(c.opened_at) : null;
+  const observationWindow = isInventoryCase
+    ? observationWindowLabel({ ...c, ...latest, metric_id: c.metric_id, impact: latest?.impact, confirm: latest?.confirm })
+    : null;
   const followUpBlock = (
           <Section title="Management follow-up">
             {actions?.length > 0 ? (
@@ -955,6 +974,7 @@ export default function CaseDetail() {
         <ArrowLeft className="h-3.5 w-3.5" strokeWidth={2} /> Back to Investigate
       </Link>
 
+      <DataSyncBar sync={detailQuery.data?.sync} />
 
       {retryNotice && (
         <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm text-foreground">
@@ -993,6 +1013,24 @@ export default function CaseDetail() {
           }
         />
       </div>
+      {isInventoryCase ? (
+        <>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+            {inventoryDomain && <span className="rounded-md border border-border bg-surface px-2.5 py-1 text-foreground-subtle">{inventoryDomain.label}</span>}
+            {inventoryFamily && <span className="rounded-md border border-border bg-surface px-2.5 py-1 text-foreground-subtle">Family: <strong className="font-medium text-foreground">{inventoryFamily.label}</strong></span>}
+            {inventoryType && <span className="rounded-md border border-border bg-surface px-2.5 py-1 text-foreground-subtle">Finding: <strong className="font-medium text-foreground">{inventoryType}</strong></span>}
+            <span className="rounded-md border border-border bg-surface px-2.5 py-1 text-foreground-subtle">Evidence: <strong className="font-medium text-foreground">{findingTemplate.label}</strong></span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-foreground-subtle">
+            <span><strong className="font-medium text-foreground">Observation window</strong> · {observationWindow}</span>
+            <span><strong className="font-medium text-foreground">First seen</strong> · {fmtDateTime(c.opened_at)}</span>
+            {findingAgeDays != null && <span><strong className="font-medium text-foreground">Age</strong> · {findingAgeDays} days</span>}
+            {latestTransferSourceRecord && <span><strong className="font-medium text-foreground">Latest shortage record</strong> · {fmtDateTime(latestTransferSourceRecord)}</span>}
+          </div>
+        </>
+      ) : (
+        <p className="mt-2 text-xs text-foreground-subtle">Evidence class: <span className="font-medium text-foreground">{findingTemplate.label}</span>{findingTemplate.interpretation !== "neutral" && <> · Interpretation: <span className="font-medium text-foreground">{findingTemplate.interpretation.replaceAll("_", " ")}</span></>}</p>
+      )}
 
       {!isInventoryCase && (
 <>
@@ -1057,6 +1095,7 @@ export default function CaseDetail() {
           of same-width cards. */}
       {isInventoryCase ? (
         <InventoryCaseView
+          caseId={caseId}
           latest={latest}
           primaryMetrics={primaryMetrics}
           nextDecision={transferDiscrepancyDecision ?? extremeEventDecision ?? nextDecision}
@@ -1065,6 +1104,8 @@ export default function CaseDetail() {
           measurement={detailQuery.data.measurement}
           verificationText={detailQuery.data.verification_explanation || "Awaiting a successful measurement of this case scope."}
           accountabilityNode={isAccountabilityEligible && accountabilityQuery.data ? <TransferAccountabilityPanel data={accountabilityQuery.data} /> : null}
+          relationships={relationships ?? []}
+          relatedSignals={relatedSignals ?? []}
           transferView={isAccountabilityEligible && accountabilityQuery.data?.options ? {
             filters: accountabilityFilters,
             options: accountabilityQuery.data.options,
@@ -1079,42 +1120,21 @@ export default function CaseDetail() {
               dedicated panel or a real multi-point trend renders anything
               at all; a metric with neither renders nothing here rather
               than an empty labeled box. */}
-          {(isStuckStockCount || isInventoryStockOut || isRevenueCase || isCompletedVarianceCase || isIncidentCase
-            || isTransferDiscrepancyCase || isExtremeEventCase || isControlsCase || isSupplierCase
-            || isSecondOrderConversionCase || (!hasTrendResults && trendPoints.length > 1)) && (
-            <Section title={isControlsCase ? "Control investigation" : "Investigation"}>
-              {isStuckStockCount ? (
-                <StockCountInvestigationPanel latest={latest} trendPoints={trendPoints} onRetry={refresh} />
-              ) : isInventoryStockOut ? (
-                <InventoryInvestigationPanel latest={latest} asOfDate={latest?.confirm?.period} />
-              ) : isRevenueCase ? (
-                <RevenueInvestigationPanel latest={latest} casePeriod={latest?.confirm?.period} />
-              ) : isCompletedVarianceCase ? (
-                <CompletedVarianceInvestigationPanel latest={latest} />
-              ) : isIncidentCase ? (
-                <IncidentInvestigationPanel latest={latest} />
-              ) : isTransferDiscrepancyCase ? (
-                <TransferDiscrepancyInvestigationPanel latest={latest} />
-              ) : isExtremeEventCase ? (
-                <ExtremeEventInvestigationPanel latest={latest} />
-              ) : isControlsCase ? (
-                <ControlsInvestigationPanel latest={latest} statusLabel={statusMeta.label} />
-              ) : isSupplierCase ? (
-                <SupplierInvestigationPanel latest={latest} />
-              ) : isSecondOrderConversionCase ? (
-                <SecondOrderConversionInvestigationPanel latest={latest} />
-              ) : (
-                <div>
-                  <p className="mb-2 text-xs text-foreground-subtle">Recorded observations over time (real scan history, never interpolated).</p>
-                  <TrendChart data={trendPoints} formatValue={(v) => formatByUnit(v, latest?.confirm?.unit)} stroke="var(--accent)" gridStroke="var(--border)" axisStroke="var(--text-subtle)" />
-                </div>
-              )}
+          {(hasDedicatedResult || (!hasTrendResults && trendPoints.length > 1 && findingTemplate.result === "trend")) && (
+            <Section title={isControlsCase ? "Control investigation" : `Investigation · ${findingTemplate.label}`}>
+              <FindingResult
+                result={findingTemplate.result}
+                latest={latest}
+                trendPoints={trendPoints}
+                onRetry={refresh}
+                statusLabel={statusMeta.label}
+              />
             </Section>
           )}
 
           {hasTrendResults && (
             <Section title="Comparison and affected segments">
-              <InvestigationResults latest={latest} showTrend={!isRevenueCase && !isSupplierCase} />
+              <InvestigationResults latest={latest} showTrend={!isRevenueCase && !isSupplierCase} currentPeriodItem={currentPeriodItem} />
             </Section>
           )}
 
@@ -1218,6 +1238,33 @@ export default function CaseDetail() {
                           recurred from this one.
                         </>
                       )}
+                      {r.relationship_type === "duplicate_of" && isSource && (
+                        <>
+                          This case records the same evidence as{" "}
+                          <Link to={`/investigate/${encodeURIComponent(otherId)}`} className="font-medium text-accent hover:underline">
+                            the linked case
+                          </Link>
+                          ; do not add their amounts together.
+                        </>
+                      )}
+                      {r.relationship_type === "duplicate_of" && !isSource && (
+                        <>
+                          Duplicate evidence is recorded in{" "}
+                          <Link to={`/investigate/${encodeURIComponent(otherId)}`} className="font-medium text-accent hover:underline">
+                            another case
+                          </Link>
+                          ; do not add their amounts together.
+                        </>
+                      )}
+                      {r.relationship_type === "overlaps" && (
+                        <>
+                          Some evidence overlaps with{" "}
+                          <Link to={`/investigate/${encodeURIComponent(otherId)}`} className="font-medium text-accent hover:underline">
+                            another case
+                          </Link>
+                          ; the amounts may not be additive.
+                        </>
+                      )}
                     </li>
                   );
                 })}
@@ -1267,7 +1314,7 @@ export default function CaseDetail() {
           <TechnicalDetails summary="Where and when">
             <dl className="mt-2 space-y-2">
               <div className="flex justify-between gap-3">
-                <dt className="text-foreground-subtle">Reporting scope</dt>
+                <dt className="text-foreground-subtle">Case lifecycle horizon</dt>
                 <dd className="text-foreground-strong">{HORIZON_LABEL[c.horizon] ?? c.horizon}</dd>
               </div>
               <div className="flex justify-between gap-3">
