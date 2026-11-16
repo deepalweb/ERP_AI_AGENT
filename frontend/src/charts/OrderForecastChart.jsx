@@ -1,9 +1,18 @@
 import { CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
-/** Actual order count transitioning into the predicted order count — solid
- * through today, dashed for the forecast. A "Today" reference line marks
- * the boundary. */
-export default function OrderForecastChart({ data, asOfDate, formatOrders = String, formatX = String }) {
+/** Actual value transitioning into the predicted value — solid through
+ * today, dashed for the forecast. A "Today" reference line marks the
+ * boundary. actualLabel/predictedLabel default to order-count wording
+ * (every existing caller forecasts orders); pass them explicitly for a
+ * non-order series (e.g. revenue) so the legend/tooltip don't mislabel it. */
+export default function OrderForecastChart({
+  data,
+  asOfDate,
+  formatOrders = String,
+  formatX = String,
+  actualLabel = "Current order count",
+  predictedLabel = "Predicted order count",
+}) {
   return (
     <ResponsiveContainer width="100%" height={260}>
       <ComposedChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
@@ -22,7 +31,7 @@ export default function OrderForecastChart({ data, asOfDate, formatOrders = Stri
         <Line
           type="monotone"
           dataKey="actual_orders"
-          name="Current order count"
+          name={actualLabel}
           stroke="var(--series-1)"
           strokeWidth={2}
           dot={false}
@@ -31,7 +40,7 @@ export default function OrderForecastChart({ data, asOfDate, formatOrders = Stri
         <Line
           type="monotone"
           dataKey="predicted_orders"
-          name="Predicted order count"
+          name={predictedLabel}
           stroke="var(--series-1)"
           strokeWidth={2}
           strokeDasharray="6 4"

@@ -117,6 +117,7 @@ def _stub_sources(monkeypatch):
     monkeypatch.setattr(brain.forecast, "get_outlet_order_forecast", lambda: None)
     monkeypatch.setattr(brain.forecast_outcomes, "record_predictions", lambda _: None)
     monkeypatch.setattr(brain.forecast_outcomes, "record_actuals", lambda: None)
+    monkeypatch.setattr(brain.fresh_production, "sync_weight_bands", lambda: None)
     return sources
 
 

@@ -292,12 +292,13 @@ async def operations_pickers(month: str | None = None):
 
 
 @app.get("/operations/fresh-production/average-weight")
-async def fresh_production_average_weight():
+async def fresh_production_average_weight(month: str | None = None):
     """Average scanned pack weight per product, from the production team's
-    scale/barcode scan log. See mcp_server/tools/fresh_production.py's
-    get_average_weight_by_product()."""
+    scale/barcode scan log. month ("2026-09") reports on that calendar
+    month instead of the default rolling last-30-days. See
+    mcp_server/tools/fresh_production.py's get_average_weight_by_product()."""
     try:
-        result = await anyio.to_thread.run_sync(fresh_production.get_average_weight_by_product)
+        result = await anyio.to_thread.run_sync(fresh_production.get_average_weight_by_product, month)
         return {"status": "ok", **result}
     except Exception:
         logger.exception("fresh production average weight failed")
@@ -762,6 +763,65 @@ async def outlet_order_forecast():
     except Exception:
         logger.exception("outlet order forecast failed")
         return {"status": "error", "detail": "Could not load the outlet order forecast."}
+
+
+@app.get("/forecast/outlet-revenue")
+async def outlet_revenue_forecast():
+    """TimesFM 2.5 revenue-per-outlet forecast -- same pipeline as
+    /forecast/outlet-orders, not yet run through the formal evaluation
+    protocol, so no accuracy figure is returned. See
+    backend/app/services/forecast.py's get_outlet_revenue_forecast()."""
+    try:
+        result = await anyio.to_thread.run_sync(forecast.get_outlet_revenue_forecast)
+        if result is None:
+            return {"status": "unavailable", "detail": "No outlet revenue forecast has been generated yet."}
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("outlet revenue forecast failed")
+        return {"status": "error", "detail": "Could not load the outlet revenue forecast."}
+
+
+@app.get("/forecast/delivery-partner-orders")
+async def delivery_partner_order_forecast():
+    """TimesFM 2.5 Uber+PickMe combined order-volume forecast per outlet --
+    the delivery-workload proxy. See
+    backend/app/services/forecast.py's get_delivery_partner_order_forecast()."""
+    try:
+        result = await anyio.to_thread.run_sync(forecast.get_delivery_partner_order_forecast)
+        if result is None:
+            return {"status": "unavailable", "detail": "No delivery-partner order forecast has been generated yet."}
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("delivery partner order forecast failed")
+        return {"status": "error", "detail": "Could not load the delivery-partner order forecast."}
+
+
+@app.get("/forecast/outlet-hourly-orders")
+async def outlet_hourly_order_forecast():
+    """TimesFM 2.5 next-24-hours order-count forecast per outlet, hourly.
+    See backend/app/services/forecast.py's get_outlet_hourly_order_forecast()."""
+    try:
+        result = await anyio.to_thread.run_sync(forecast.get_outlet_hourly_order_forecast)
+        if result is None:
+            return {"status": "unavailable", "detail": "No hourly order forecast has been generated yet."}
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("outlet hourly order forecast failed")
+        return {"status": "error", "detail": "Could not load the hourly order forecast."}
+
+
+@app.get("/forecast/sku-demand")
+async def sku_demand_forecast():
+    """TimesFM 2.5 next-7-days demand forecast per product, company-wide.
+    See backend/app/services/forecast.py's get_sku_demand_forecast()."""
+    try:
+        result = await anyio.to_thread.run_sync(forecast.get_sku_demand_forecast)
+        if result is None:
+            return {"status": "unavailable", "detail": "No SKU demand forecast has been generated yet."}
+        return {"status": "ok", **result}
+    except Exception:
+        logger.exception("sku demand forecast failed")
+        return {"status": "error", "detail": "Could not load the SKU demand forecast."}
 
 
 @app.get("/operations/loss-and-damage")

@@ -416,6 +416,12 @@ def _compute_daily_brief():
     forecast_outcomes.record_predictions(forecast.get_outlet_order_forecast())
     forecast_outcomes.record_actuals()
 
+    # Fresh-production weight-band reference, 2026-11-05: refreshes the
+    # fixed per-product promised-weight band Operations asked for, so
+    # fresh_production.get_average_weight_by_product() reads a stored
+    # table instead of re-parsing product names on every request.
+    fresh_production.sync_weight_bands()
+
     generated_at = datetime.utcnow().isoformat()
     appdb.run_query(
         """

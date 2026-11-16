@@ -183,3 +183,117 @@ def get_outlet_order_forecast():
             for outlet_id, f in raw["outlets"].items()
         ],
     }
+
+
+OUTLET_REVENUE_FORECAST_PATH = Path("artifacts/forecasting/outlet_revenue_forecast.json")
+DELIVERY_PARTNER_ORDERS_FORECAST_PATH = Path("artifacts/forecasting/delivery_partner_orders_forecast.json")
+
+
+def _read_series_forecast(path: Path) -> dict | None:
+    """Shared reader for any analytics/forecast_series.py artifact (outlet
+    revenue, delivery-partner order volume, ...) -- same shape as
+    get_outlet_order_forecast's own artifact, just under "groups" rather
+    than "outlets" since forecast_series.py is generic over the metric.
+
+    Unlike get_outlet_order_forecast, these series have NOT been through
+    the formal validation/holdout evaluation protocol (analytics/
+    outlet_orders.py's evaluate()/promotion_decision()) -- only the outlet
+    order-count series has a measured accuracy figure from that process, so
+    these honestly carry none yet rather than borrowing that one number."""
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "metric": raw["metric"],
+        "generated_at": raw["generated_at"],
+        "horizon_days": raw["horizon_days"],
+        "horizon_points": raw.get("horizon_points", raw["horizon_days"]),
+        "step_hours": raw.get("step_hours", 24.0),
+        "source": raw["source"],
+        "model": raw["model"],
+        "outlets": [
+            {
+                "store_id": int(store_id),
+                "outlet": _OUTLET_NAMES.get(store_id, f"Store {store_id}"),
+                "history_tail": f["history_tail"],
+                "forecast_dates": f["forecast_dates"],
+                "point": f["point"],
+                "q10": f["q10"],
+                "q90": f["q90"],
+            }
+            for store_id, f in raw["groups"].items()
+        ],
+    }
+
+
+def get_outlet_revenue_forecast():
+    """TimesFM revenue-per-outlet forecast -- same model/pipeline as
+    get_outlet_order_forecast(). See analytics/forecast_series.py and
+    scripts/export_outlet_revenue.py for how the artifact is produced, and
+    _read_series_forecast's docstring for why it carries no accuracy figure."""
+    return _read_series_forecast(OUTLET_REVENUE_FORECAST_PATH)
+
+
+def get_delivery_partner_order_forecast():
+    """TimesFM Uber+PickMe combined order-volume forecast per outlet -- the
+    delivery-workload proxy (D. Logistics forecasting). Same pipeline/
+    caveats as get_outlet_revenue_forecast(). See
+    scripts/export_delivery_partner_orders.py for how the source series is
+    built, including why every order state counts toward "workload"."""
+    return _read_series_forecast(DELIVERY_PARTNER_ORDERS_FORECAST_PATH)
+
+
+OUTLET_HOURLY_ORDERS_FORECAST_PATH = Path("artifacts/forecasting/outlet_hourly_orders_forecast.json")
+
+
+def get_outlet_hourly_order_forecast():
+    """TimesFM next-24-hours order-count forecast per outlet, at hourly
+    granularity -- a genuinely different series shape from every other
+    forecast here (hour-of-day cyclicality over a 45-day window, not a
+    week-over-week daily trend), so `forecast_dates` are full timestamps,
+    not dates; see _read_series_forecast's step_hours field. Same
+    pipeline/caveats as get_outlet_revenue_forecast(). See
+    scripts/export_outlet_hourly_orders.py for why every hour is
+    zero-filled rather than excluded."""
+    return _read_series_forecast(OUTLET_HOURLY_ORDERS_FORECAST_PATH)
+
+
+SKU_DEMAND_FORECAST_PATH = Path("artifacts/forecasting/sku_demand_forecast.json")
+
+
+def get_sku_demand_forecast():
+    """TimesFM next-7-days demand forecast per product, company-wide (all 4
+    outlets combined, not per-outlet) -- see scripts/export_sku_demand.py
+    for the eligibility/zero-fill rules (only the genuinely dense, recently
+    active products qualify; thin/discontinued ones are left out, never
+    forecast as zero). Keyed by product, not outlet, so this doesn't reuse
+    _read_series_forecast's outlet-name mapping -- product/sku labels are
+    already carried through from the source series by
+    analytics/forecast_series.py. Same no-accuracy-yet caveat as
+    get_outlet_revenue_forecast()."""
+    if not SKU_DEMAND_FORECAST_PATH.exists():
+        return None
+    raw = json.loads(SKU_DEMAND_FORECAST_PATH.read_text(encoding="utf-8"))
+    products = []
+    for product_id, f in raw["groups"].items():
+        history_values = f["history_tail"]["values"]
+        products.append({
+            "product_id": int(product_id),
+            "product": f["product"],
+            "sku": f["sku"],
+            "history_tail": f["history_tail"],
+            "forecast_dates": f["forecast_dates"],
+            "point": f["point"],
+            "q10": f["q10"],
+            "q90": f["q90"],
+            "next_7_day_total": round(sum(f["point"]), 1),
+            "recent_avg_daily": round(sum(history_values) / len(history_values), 2) if history_values else None,
+        })
+    return {
+        "metric": raw["metric"],
+        "generated_at": raw["generated_at"],
+        "horizon_days": raw["horizon_days"],
+        "source": raw["source"],
+        "model": raw["model"],
+        "products": products,
+    }

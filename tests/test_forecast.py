@@ -76,3 +76,114 @@ def test_history_tail_keeps_only_complete_months_and_the_last_n():
     result = forecast._history_tail(trend, months=6)
     assert [row["month"] for row in result] == ["2026-03", "2026-04", "2026-05", "2026-06", "2026-07", "2026-08"]
     assert result[-1]["value"] == 80
+
+
+_SERIES_FORECAST_ARTIFACT = {
+    "metric": "revenue",
+    "generated_at": "2026-11-05T11:19:01+00:00",
+    "horizon_days": 7,
+    "source": {"latest_source_local": "2026-10-31T17:34:52", "end_exclusive": "2026-10-31",
+               "source_age_days": 5, "is_stale": True},
+    "model": {"checkpoint": "google/timesfm-2.5-200m-pytorch"},
+    "groups": {
+        "1": {"history_tail": {"dates": ["2026-10-30"], "values": [48000.0]},
+              "forecast_dates": ["2026-10-31"], "point": [49500.2], "q10": [44000.0], "q90": [55000.0]},
+        "999": {"history_tail": {"dates": [], "values": []},
+                "forecast_dates": [], "point": [], "q10": [], "q90": []},
+    },
+}
+
+
+def test_get_outlet_revenue_forecast_returns_none_when_no_artifact_exists(monkeypatch, tmp_path):
+    monkeypatch.setattr(forecast, "OUTLET_REVENUE_FORECAST_PATH", tmp_path / "missing.json")
+    assert forecast.get_outlet_revenue_forecast() is None
+
+
+def test_get_outlet_revenue_forecast_reads_the_artifact_and_carries_no_accuracy(monkeypatch, tmp_path):
+    path = tmp_path / "outlet_revenue_forecast.json"
+    path.write_text(json.dumps(_SERIES_FORECAST_ARTIFACT), encoding="utf-8")
+    monkeypatch.setattr(forecast, "OUTLET_REVENUE_FORECAST_PATH", path)
+
+    result = forecast.get_outlet_revenue_forecast()
+
+    assert result["metric"] == "revenue"
+    assert "accuracy" not in result  # not run through the formal evaluation protocol -- never borrowed
+    by_store = {o["store_id"]: o for o in result["outlets"]}
+    assert by_store[1]["outlet"] == "Celeste Daily Colombo 6"
+    assert by_store[1]["point"] == [49500.2]
+    assert by_store[999]["outlet"] == "Store 999"  # unlabeled, never dropped
+
+
+def test_get_delivery_partner_order_forecast_reads_the_artifact(monkeypatch, tmp_path):
+    artifact = {**_SERIES_FORECAST_ARTIFACT, "metric": "delivery_partner_orders"}
+    path = tmp_path / "delivery_partner_orders_forecast.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    monkeypatch.setattr(forecast, "DELIVERY_PARTNER_ORDERS_FORECAST_PATH", path)
+
+    result = forecast.get_delivery_partner_order_forecast()
+
+    assert result["metric"] == "delivery_partner_orders"
+    assert result["outlets"][0]["store_id"] == 1
+
+
+def test_get_outlet_hourly_order_forecast_reads_the_artifact_with_hourly_shape(monkeypatch, tmp_path):
+    artifact = {
+        "metric": "hourly_orders",
+        "generated_at": "2026-11-05T11:33:47+00:00",
+        "horizon_days": None,
+        "horizon_points": 24,
+        "step_hours": 1.0,
+        "source": {"latest_source_local": "2026-10-31T17:34:52", "end_exclusive": "2026-10-31",
+                   "source_age_days": 5, "is_stale": True},
+        "model": {"checkpoint": "google/timesfm-2.5-200m-pytorch"},
+        "groups": {
+            "1": {"history_tail": {"dates": ["2026-10-30T23:00:00"], "values": [12]},
+                  "forecast_dates": ["2026-10-31T00:00:00"], "point": [29.6], "q10": [20.0], "q90": [40.0]},
+        },
+    }
+    path = tmp_path / "outlet_hourly_orders_forecast.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    monkeypatch.setattr(forecast, "OUTLET_HOURLY_ORDERS_FORECAST_PATH", path)
+
+    result = forecast.get_outlet_hourly_order_forecast()
+
+    assert result["horizon_days"] is None
+    assert result["horizon_points"] == 24
+    assert result["step_hours"] == 1.0
+    assert result["outlets"][0]["forecast_dates"] == ["2026-10-31T00:00:00"]
+
+
+def test_get_sku_demand_forecast_returns_none_when_no_artifact_exists(monkeypatch, tmp_path):
+    monkeypatch.setattr(forecast, "SKU_DEMAND_FORECAST_PATH", tmp_path / "missing.json")
+    assert forecast.get_sku_demand_forecast() is None
+
+
+def test_get_sku_demand_forecast_computes_the_7_day_total_and_recent_average(monkeypatch, tmp_path):
+    artifact = {
+        "metric": "sku_demand",
+        "generated_at": "2026-11-05T11:43:13+00:00",
+        "horizon_days": 7,
+        "source": {"latest_source_local": "2026-10-31T17:34:52", "end_exclusive": "2026-10-31",
+                   "source_age_days": 5, "is_stale": True},
+        "model": {"checkpoint": "google/timesfm-2.5-200m-pytorch"},
+        "groups": {
+            "5729": {
+                "product": "Common Tomatoes 150G - 200G", "sku": "004918",
+                "history_tail": {"dates": ["2026-10-29", "2026-10-30"], "values": [10.0, 20.0]},
+                "forecast_dates": [f"2026-11-{d:02d}" for d in range(1, 8)],
+                "point": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+                "q10": [3.0] * 7, "q90": [7.0] * 7,
+            },
+        },
+    }
+    path = tmp_path / "sku_demand_forecast.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    monkeypatch.setattr(forecast, "SKU_DEMAND_FORECAST_PATH", path)
+
+    result = forecast.get_sku_demand_forecast()
+
+    product = result["products"][0]
+    assert product["product_id"] == 5729
+    assert product["product"] == "Common Tomatoes 150G - 200G"
+    assert product["next_7_day_total"] == 35.0
+    assert product["recent_avg_daily"] == 15.0

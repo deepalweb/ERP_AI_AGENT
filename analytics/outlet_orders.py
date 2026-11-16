@@ -28,17 +28,22 @@ MIN_HISTORY_DAYS = PROTOCOL["min_train_days"] + PROTOCOL["horizon"] * (
 )
 
 
-def prepare_series(rows, end_exclusive: date):
+def prepare_series(rows, end_exclusive: date, value_key: str = "orders", group_key: str = "store_id"):
     """Drop first observed (potentially partial) day and unknown gaps.
 
-    Retain only the final uninterrupted run per outlet. No claim that missing
-    orders represent closure, stockout or ingestion failure can be made here.
-    """
+    Retain only the final uninterrupted run per group. No claim that missing
+    rows represent closure, stockout or ingestion failure can be made here.
+
+    value_key/group_key let this same prep logic serve any daily count-like
+    series grouped by an integer id (outlet order counts originally; outlet
+    revenue and delivery-partner order counts reuse it unchanged, 2026-11-07)
+    -- the eligibility/gap-handling rules are the data-shape concern, not the
+    specific metric, so there is no reason to fork this logic per metric."""
     grouped = {}
     for row in rows:
         day = date.fromisoformat(str(row["day"])[:10])
         if day < end_exclusive:
-            grouped.setdefault(int(row["store_id"]), {})[day] = int(row["orders"])
+            grouped.setdefault(int(row[group_key]), {})[day] = float(row[value_key])
     series, quality = {}, {}
     for outlet, values in sorted(grouped.items()):
         first = min(values) + timedelta(days=1)

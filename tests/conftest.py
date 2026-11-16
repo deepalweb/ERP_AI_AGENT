@@ -16,6 +16,7 @@ from backend.app.services import (
     tracking,
     weekly_streaks,
 )
+from mcp_server.tools import fresh_production
 
 _SCHEMA_FLAG_MODULES = [
     brain,
@@ -27,6 +28,7 @@ _SCHEMA_FLAG_MODULES = [
     customer_predictions,
     inventory_kpi_history,
     notifications,
+    fresh_production,
 ]
 
 

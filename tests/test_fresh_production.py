@@ -7,6 +7,7 @@ from datetime import datetime
 
 import pytest
 
+from backend.app.db import appdb
 from mcp_server.tools import fresh_production as fp
 
 
@@ -136,11 +137,50 @@ def test_cycle_time_finding_carries_each_rounds_own_cutoff():
 
 def _router(average_rows, compliance_rows):
     def run_query(sql):
-        return compliance_rows if "bandtbl" in sql else average_rows
+        if "MAX(scan_time)" in sql:
+            return [{"as_of": datetime(2026, 11, 4, 12, 0, 0)}]
+        return compliance_rows if "windowtbl" in sql else average_rows
     return run_query
 
 
-def test_get_average_weight_by_product_rounds_and_shapes_the_result(monkeypatch):
+def test_sync_weight_bands_stores_parsed_bands_and_skips_unparseable_names(appdb_reset, monkeypatch):
+    monkeypatch.setattr(fp, "_SCHEMA_READY", False)
+    monkeypatch.setattr(fp.reporting, "run_query", lambda sql: [
+        {"product_tmpl_id": 1, "sku": "004917", "product": "Common Beans 200G - 250G"},
+        {"product_tmpl_id": 2, "sku": "002032", "product": "Rambutan (10 Fruits)"},
+    ])
+
+    fp.sync_weight_bands()
+
+    bands = fp.get_weight_bands()
+    assert bands[1]["min_g"] == 200.0 and bands[1]["max_g"] == 250.0 and bands[1]["mid_g"] == 225.0
+    assert 2 not in bands  # no parsable weight -- never an invented band
+
+
+def test_sync_weight_bands_updates_an_existing_row_on_a_changed_name(appdb_reset, monkeypatch):
+    monkeypatch.setattr(fp, "_SCHEMA_READY", False)
+    monkeypatch.setattr(fp.reporting, "run_query", lambda sql: [
+        {"product_tmpl_id": 1, "sku": "004917", "product": "Common Beans 200G - 250G"},
+    ])
+    fp.sync_weight_bands()
+
+    monkeypatch.setattr(fp.reporting, "run_query", lambda sql: [
+        {"product_tmpl_id": 1, "sku": "004917", "product": "Common Beans 220G - 260G"},
+    ])
+    fp.sync_weight_bands()
+
+    bands = fp.get_weight_bands()
+    assert len(bands) == 1
+    assert bands[1]["min_g"] == 220.0 and bands[1]["max_g"] == 260.0
+
+
+def test_get_average_weight_by_product_rounds_and_shapes_the_result(appdb_reset, monkeypatch):
+    monkeypatch.setattr(fp, "_SCHEMA_READY", False)
+    fp._ensure_weight_band_schema()
+    appdb.run_query(
+        "INSERT INTO fresh_product_weight_bands (product_tmpl_id, sku, product, min_g, max_g, mid_g, updated_at) "
+        "VALUES (1, '004917', 'Common Beans 200G - 250G', 200.0, 250.0, 225.0, 'x')"
+    )
     monkeypatch.setattr(fp.reporting, "run_query", _router(
         average_rows=[{"product_tmpl_id": 1, "product": "Common Beans 200G - 250G", "sku": "004917",
                         "scan_count": 10, "avg_weight_g": 231.456, "min_weight_g": 198.0, "max_weight_g": 261.0}],
@@ -153,11 +193,54 @@ def test_get_average_weight_by_product_rounds_and_shapes_the_result(monkeypatch)
     assert result["products"] == [
         {"product": "Common Beans 200G - 250G", "sku": "004917", "scan_count": 10,
          "avg_weight_g": 231.5, "min_weight_g": 198.0, "max_weight_g": 261.0,
-         "band_g": (200.0, 250.0), "correct_pct": 80.0, "below_pct": 10.0, "above_pct": 10.0},
+         "band_g": (200.0, 250.0), "band_mid_g": 225.0, "correct_pct": 80.0, "below_pct": 10.0, "above_pct": 10.0},
     ]
 
 
-def test_get_average_weight_by_product_handles_no_scans(monkeypatch):
+def test_get_average_weight_by_product_centers_the_window_on_actual_average_not_target(appdb_reset, monkeypatch):
+    # Band 200-250g -> half-width 25g; CORRECT_WINDOW_FRACTION_OF_BAND=0.75 ->
+    # window half-width 18.75g. Target (band midpoint) is 225g, but the
+    # ACTUAL average is 231.5g -- the window must be centered on 231.5, not
+    # 225, giving [212.8, 250.2] (float-rounding artifact, see the other
+    # test's comment), not [206.2, 243.8] (Target-centered, the old/rejected
+    # behavior).
+    fp._ensure_weight_band_schema()
+    appdb.run_query(
+        "INSERT INTO fresh_product_weight_bands (product_tmpl_id, sku, product, min_g, max_g, mid_g, updated_at) "
+        "VALUES (1, '004917', 'Common Beans 200G - 250G', 200.0, 250.0, 225.0, 'x')"
+    )
+    captured_sql = {}
+
+    def run_query(sql):
+        if "MAX(scan_time)" in sql:
+            return [{"as_of": datetime(2026, 11, 4, 12, 0, 0)}]
+        if "windowtbl" in sql:
+            captured_sql["sql"] = sql
+            return [{"product_tmpl_id": 1, "below": 0, "above": 0, "correct": 1}]
+        return [{"product_tmpl_id": 1, "product": "Common Beans 200G - 250G", "sku": "004917",
+                  "scan_count": 1, "avg_weight_g": 231.5, "min_weight_g": 225.0, "max_weight_g": 240.0}]
+
+    monkeypatch.setattr(fp.reporting, "run_query", run_query)
+
+    fp.get_average_weight_by_product()
+
+    assert "(1, 212.8, 250.2)" in captured_sql["sql"]
+    assert "(1, 206.2" not in captured_sql["sql"]  # not centered on Target
+
+
+def test_correct_window_is_always_tighter_than_the_products_own_band():
+    # The whole point of scaling by a fraction of each product's own band,
+    # rather than a flat percentage of target -- verify the property holds
+    # for a product whose band is unusually narrow relative to its target
+    # (Carrot: 250-300g, target 275g, band half-width only +/-9.1%).
+    min_g, max_g, mid_g = 250.0, 300.0, 275.0
+    half_width = (max_g - min_g) / 2 * fp.CORRECT_WINDOW_FRACTION_OF_BAND
+    lo, hi = mid_g - half_width, mid_g + half_width
+    assert min_g < lo < mid_g < hi < max_g  # strictly inside the original band on both sides
+
+
+def test_get_average_weight_by_product_handles_no_scans(appdb_reset, monkeypatch):
+    monkeypatch.setattr(fp, "_SCHEMA_READY", False)
     monkeypatch.setattr(fp.reporting, "run_query", _router(average_rows=[], compliance_rows=[]))
 
     result = fp.get_average_weight_by_product()
@@ -165,12 +248,16 @@ def test_get_average_weight_by_product_handles_no_scans(monkeypatch):
     assert result["products"] == []
 
 
-def test_get_average_weight_by_product_leaves_unparseable_names_without_a_band(monkeypatch):
-    # No weight at all in the name -- never a compliance query, never an invented band.
+def test_get_average_weight_by_product_leaves_products_without_a_stored_band_alone(appdb_reset, monkeypatch):
+    # No row in fresh_product_weight_bands for this product (e.g. its name never
+    # parsed) -- never a compliance query, never an invented band.
+    monkeypatch.setattr(fp, "_SCHEMA_READY", False)
     calls = []
 
     def run_query(sql):
         calls.append(sql)
+        if "MAX(scan_time)" in sql:
+            return [{"as_of": datetime(2026, 11, 4, 12, 0, 0)}]
         return [{"product_tmpl_id": 1, "product": "Rambutan (10 Fruits)", "sku": "002032",
                   "scan_count": 5, "avg_weight_g": 1200.0, "min_weight_g": 1100.0, "max_weight_g": 1300.0}]
 
@@ -179,8 +266,10 @@ def test_get_average_weight_by_product_leaves_unparseable_names_without_a_band(m
     result = fp.get_average_weight_by_product()
 
     assert result["products"][0]["band_g"] is None
+    assert result["products"][0]["band_mid_g"] is None
     assert result["products"][0]["correct_pct"] is None
-    assert len(calls) == 1  # only the average query -- no products had a band, so no compliance query ran
+    # window-resolution + the average query -- no products had a band, so no compliance query ran
+    assert len(calls) == 2
 
 
 def test_parse_weight_band_g_handles_the_real_name_format_variations():
@@ -192,3 +281,41 @@ def test_parse_weight_band_g_handles_the_real_name_format_variations():
     assert fp._parse_weight_band_g("Green Grapes 250G - Celeste Daily - Sku 001507") is None  # single value, no range
     assert fp._parse_weight_band_g("Rambutan (10 Fruits) - Celeste Daily - SKU 002032") is None
     assert fp._parse_weight_band_g("") is None
+
+
+def test_resolve_weight_window_for_an_explicit_month_uses_real_calendar_boundaries(monkeypatch):
+    def fail(*_a, **_kw):
+        raise AssertionError("an explicit month must not query the DB for the rolling window's anchor")
+    monkeypatch.setattr(fp.reporting, "run_query", fail)
+
+    start, end_exclusive, window_days = fp._resolve_weight_window("2026-09")
+
+    assert (start, end_exclusive, window_days) == ("2026-09-01", "2026-10-01", None)
+
+
+def test_resolve_weight_window_handles_december_rolling_into_next_year():
+    start, end_exclusive, window_days = fp._resolve_weight_window("2026-12")
+    assert (start, end_exclusive, window_days) == ("2026-12-01", "2027-01-01", None)
+
+
+def test_resolve_weight_window_defaults_to_rolling_window_anchored_on_latest_scan(monkeypatch):
+    monkeypatch.setattr(fp.reporting, "run_query", lambda sql: [{"as_of": datetime(2026, 10, 31, 17, 34, 52)}])
+
+    start, end_exclusive, window_days = fp._resolve_weight_window(None)
+
+    assert window_days == fp.WINDOW_DAYS
+    assert start == "2026-10-01"
+    assert end_exclusive == "2026-11-01"  # the day AFTER the latest scan's date, so that day is included
+
+
+def test_get_average_weight_by_product_reports_the_month_and_period_requested(appdb_reset, monkeypatch):
+    fp._ensure_weight_band_schema()
+    monkeypatch.setattr(fp.reporting, "run_query", lambda sql: [])
+
+    result = fp.get_average_weight_by_product(month="2026-09")
+
+    assert result["month"] == "2026-09"
+    assert result["period_start"] == "2026-09-01"
+    assert result["period_end_exclusive"] == "2026-10-01"
+    assert result["window_days"] is None
+    assert result["products"] == []

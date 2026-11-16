@@ -29,6 +29,20 @@ def test_missing_days_are_unknown_and_partial_edges_removed():
     assert set(series["1"]["values"]) == {10}
 
 
+def test_prepare_series_value_key_and_group_key_generalize_to_other_metrics():
+    # 2026-11-07: prepare_series is reused for outlet revenue and
+    # delivery-partner order volume, neither of which is keyed "store_id"/
+    # "orders" the way the original outlet order-count export is.
+    start = date(2026, 1, 1)
+    rows = [
+        {"outlet_id": 1, "day": start + timedelta(days=i), "revenue": 1000.5 + i}
+        for i in range(140)
+    ]
+    series, quality = prepare_series(rows, start + timedelta(days=139), value_key="revenue", group_key="outlet_id")
+    assert quality["1"]["eligible"] is True
+    assert series["1"]["values"][0] == 1001.5  # first observed day is dropped as potentially partial
+
+
 def test_weekday_baselines_align_to_next_day():
     assert baseline(list(range(28)), "seasonal_naive") == list(range(21, 28))
     assert baseline(list(range(28)), "weekday_mean_4w") == [10.5 + i for i in range(7)]

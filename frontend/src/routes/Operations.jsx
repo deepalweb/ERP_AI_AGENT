@@ -178,7 +178,13 @@ export default function Operations() {
     queryKey: ["operationsPickers", pickerMonth],
     queryFn: () => fetchOperationsPickers(pickerMonth),
   });
-  const freshWeight = useQuery({ queryKey: ["freshProductionAverageWeight"], queryFn: fetchFreshProductionAverageWeight });
+  // null = the default rolling last-30-days window; a "YYYY-MM" value reports
+  // on that specific calendar month instead.
+  const [freshWeightMonth, setFreshWeightMonth] = useState(null);
+  const freshWeight = useQuery({
+    queryKey: ["freshProductionAverageWeight", freshWeightMonth],
+    queryFn: () => fetchFreshProductionAverageWeight(freshWeightMonth),
+  });
   const cases = useQuery({
     queryKey: ["operationsCases"],
     queryFn: async () => {
@@ -291,13 +297,34 @@ export default function Operations() {
       )}
     </Card>
 
-    <Card title="Fresh production — pack weight compliance" note={freshWeight.data?.window_days ? `Last ${freshWeight.data.window_days} days` : undefined}>
-      <p className="mb-3 text-sm text-foreground/60">
-        From the production team's scale/barcode scan log — the real weight scanned into each pack. "Band"
-        is the promised range parsed from the product's own name (e.g. "200G–250G") — there's no stored target
-        field anywhere, so this is an estimate, not an authoritative spec. A product whose name states no range
-        (just "250G", or no weight at all) shows "—" rather than a guessed band.
-      </p>
+    <Card
+      title="Fresh production — pack weight compliance"
+      note={freshWeight.data?.window_days ? `Last ${freshWeight.data.window_days} days` : freshWeight.data?.month}
+    >
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+        <p className="text-sm text-foreground/60">
+          From the production team's scale/barcode scan log — the real weight scanned into each pack. "Band" and
+          "Target" come from a fixed per-product reference (refreshed daily, not re-parsed on every page load) —
+          the band is the promised range read from the product's own name (e.g. "200G–250G"), and Target is its
+          midpoint. There's no stored spec field in Odoo itself, so this reference is still an estimate, not an
+          authoritative source. A product whose name states no range (just "250G", or no weight at all) has no
+          stored band and shows "—".
+        </p>
+        <label className="flex shrink-0 items-center gap-2 text-xs text-foreground/60">
+          Month
+          <input
+            type="month"
+            className="rounded-lg border border-border bg-background px-2 py-1 text-sm text-foreground-strong"
+            value={freshWeightMonth ?? ""}
+            onChange={(e) => setFreshWeightMonth(e.target.value || null)}
+          />
+          {freshWeightMonth && (
+            <button type="button" onClick={() => setFreshWeightMonth(null)} className="text-accent underline">
+              Reset to last 30 days
+            </button>
+          )}
+        </label>
+      </div>
       {freshWeight.isLoading && <p className="text-sm text-foreground/60">Loading…</p>}
       {freshWeight.isError && <p className="text-sm text-critical">Could not load average weight data.</p>}
       {freshWeight.data?.products?.length > 0 && (
@@ -308,6 +335,7 @@ export default function Operations() {
                 <th className="pb-1 pr-2 font-normal">Product</th>
                 <th className="pb-1 pr-2 text-right font-normal">Scans</th>
                 <th className="pb-1 pr-2 text-right font-normal">Band (g)</th>
+                <th className="pb-1 pr-2 text-right font-normal">Target (g)</th>
                 <th className="pb-1 pr-2 text-right font-normal">Avg (g)</th>
                 <th className="pb-1 pr-2 text-right font-normal">Correct</th>
                 <th className="pb-1 pr-2 text-right font-normal">Below</th>
@@ -322,6 +350,7 @@ export default function Operations() {
                   <td className="py-1.5 pr-2 text-right tabular-nums text-foreground/60">
                     {p.band_g ? `${p.band_g[0]}–${p.band_g[1]}` : "—"}
                   </td>
+                  <td className="py-1.5 pr-2 text-right tabular-nums text-foreground/60">{p.band_mid_g ?? "—"}</td>
                   <td className="py-1.5 pr-2 text-right tabular-nums font-medium text-foreground-strong">{p.avg_weight_g}</td>
                   <td className="py-1.5 pr-2 text-right tabular-nums text-good">{p.correct_pct == null ? "—" : `${p.correct_pct}%`}</td>
                   <td className="py-1.5 pr-2 text-right tabular-nums text-critical">{p.below_pct == null ? "—" : `${p.below_pct}%`}</td>
@@ -337,8 +366,12 @@ export default function Operations() {
       )}
       {freshWeight.data?.products?.length > 0 && (
         <p className="mt-3 text-xs text-foreground/50">
-          "Below" and "above" are both real deviations from the promised range, not just "below is bad" — packing
-          consistently above the stated range is giving away product at cost, not a quality win.
+          Correct/Below/Above are judged against a window sized at 75% of each product's own promised band width,
+          centered on its Actual Average (not Target) — this measures how CONSISTENT packing is around what the
+          line is really producing, not whether that average itself is on-spec. A product can show high "Correct"
+          here while still averaging off-target — compare the Avg column against Target separately for that. "Below"
+          and "above" are both real deviations, not just "below is bad" — packing above average is giving away
+          product at cost, not a quality win.
         </p>
       )}
     </Card>

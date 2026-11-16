@@ -31,8 +31,9 @@ export async function fetchOperationsPickers(month) {
   return readResponse(response);
 }
 
-export async function fetchFreshProductionAverageWeight() {
-  const response = await apiFetch(`${API_BASE_URL}/operations/fresh-production/average-weight`);
+export async function fetchFreshProductionAverageWeight(month) {
+  const query = month ? `?month=${encodeURIComponent(month)}` : "";
+  const response = await apiFetch(`${API_BASE_URL}/operations/fresh-production/average-weight${query}`);
 
   return readResponse(response);
 }
@@ -78,6 +79,30 @@ export async function fetchForwardLook() {
 
 export async function fetchTimesFmOutletForecast() {
   const response = await apiFetch(`${API_BASE_URL}/forecast/outlet-orders`);
+
+  return readResponse(response);
+}
+
+export async function fetchOutletRevenueForecast() {
+  const response = await apiFetch(`${API_BASE_URL}/forecast/outlet-revenue`);
+
+  return readResponse(response);
+}
+
+export async function fetchDeliveryPartnerOrderForecast() {
+  const response = await apiFetch(`${API_BASE_URL}/forecast/delivery-partner-orders`);
+
+  return readResponse(response);
+}
+
+export async function fetchOutletHourlyOrderForecast() {
+  const response = await apiFetch(`${API_BASE_URL}/forecast/outlet-hourly-orders`);
+
+  return readResponse(response);
+}
+
+export async function fetchSkuDemandForecast() {
+  const response = await apiFetch(`${API_BASE_URL}/forecast/sku-demand`);
 
   return readResponse(response);
 }

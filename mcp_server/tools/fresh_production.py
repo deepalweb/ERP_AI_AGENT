@@ -62,9 +62,9 @@ outlet breakdown here, only product and round (morning/evening).
 
 import re
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, timedelta
 
-from backend.app.db import reporting
+from backend.app.db import appdb, reporting
 from mcp_server.tools import evidence_engine, impact_engine, measurement
 
 WINDOW_DAYS = 30
@@ -457,22 +457,47 @@ def _cycle_time_snapshot():
     return _cycle_time_finding(rows)
 
 
-AVERAGE_WEIGHT_SQL = f"""
-    WITH bounds AS (SELECT MAX(scan_time) AS as_of FROM fresh_scan_log)
-    SELECT pt.id AS product_tmpl_id, pt.name->>'en_US' AS product, pt.default_code AS sku,
-           COUNT(*) AS scan_count,
-           AVG(fsl.scanned_weight_g) AS avg_weight_g,
-           MIN(fsl.scanned_weight_g) AS min_weight_g,
-           MAX(fsl.scanned_weight_g) AS max_weight_g
-    FROM fresh_scan_log fsl
-    JOIN bounds b ON true
-    JOIN product_product pp ON pp.id = fsl.product_id
-    JOIN product_template pt ON pt.id = pp.product_tmpl_id
-    WHERE fsl.scanned_weight_g > 0
-      AND fsl.scan_time >= b.as_of - INTERVAL '{WINDOW_DAYS} days'
-    GROUP BY pt.id, pt.name, pt.default_code
-    ORDER BY scan_count DESC
-"""
+def _resolve_weight_window(month: str | None) -> tuple[str, str, int | None]:
+    """Returns (start_inclusive, end_exclusive, window_days) as ISO date
+    strings -- a specific calendar month ("2026-09") resolves to that
+    month's own boundaries (window_days None, since it isn't a rolling
+    window); omitted, it resolves to the rolling last WINDOW_DAYS days,
+    anchored to the latest scan actually in the table (not wall-clock
+    today, since the reporting mirror can lag real time -- same convention
+    as every other trailing-window query in this app)."""
+    if month:
+        year, mo = (int(x) for x in month.split("-"))
+        start = date(year, mo, 1)
+        end = date(year + 1, 1, 1) if mo == 12 else date(year, mo + 1, 1)
+        return start.isoformat(), end.isoformat(), None
+    rows = reporting.run_query("SELECT MAX(scan_time) AS as_of FROM fresh_scan_log")
+    as_of = rows[0]["as_of"] if rows else None
+    if as_of is None:
+        today = date.today().isoformat()
+        return today, today, WINDOW_DAYS
+    as_of_date = as_of.date() if hasattr(as_of, "date") else date.fromisoformat(as_of)
+    return (as_of_date - timedelta(days=WINDOW_DAYS)).isoformat(), (as_of_date + timedelta(days=1)).isoformat(), WINDOW_DAYS
+
+
+def _average_weight_sql(start: str, end_exclusive: str) -> str:
+    # start/end_exclusive are our own resolved ISO date strings (either a
+    # calendar month's real boundaries or a DB-derived rolling window),
+    # never user input -- safe to inline, same posture as this module's
+    # other SQL constants embedding fixed internal values via f-string.
+    return f"""
+        SELECT pt.id AS product_tmpl_id, pt.name->>'en_US' AS product, pt.default_code AS sku,
+               COUNT(*) AS scan_count,
+               AVG(fsl.scanned_weight_g) AS avg_weight_g,
+               MIN(fsl.scanned_weight_g) AS min_weight_g,
+               MAX(fsl.scanned_weight_g) AS max_weight_g
+        FROM fresh_scan_log fsl
+        JOIN product_product pp ON pp.id = fsl.product_id
+        JOIN product_template pt ON pt.id = pp.product_tmpl_id
+        WHERE fsl.scanned_weight_g > 0
+          AND fsl.scan_time >= '{start}' AND fsl.scan_time < '{end_exclusive}'
+        GROUP BY pt.id, pt.name, pt.default_code
+        ORDER BY scan_count DESC
+    """
 
 # The promised weight range ("Common Beans 200G - 250G") exists nowhere as a
 # structured field -- product_template.fresh_min/max_weight_g is populated
@@ -500,31 +525,112 @@ def _parse_weight_band_g(name: str) -> tuple[float, float] | None:
     return (min(g1, g2), max(g1, g2))
 
 
-def _band_compliance_sql(bands: list[tuple[int, float, float]]) -> str:
-    # Values here are our own parsed (int id, float, float) tuples, never
+_SCHEMA_READY = False
+
+
+def _ensure_weight_band_schema():
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    appdb.run_query("""
+        CREATE TABLE IF NOT EXISTS fresh_product_weight_bands (
+            product_tmpl_id INTEGER PRIMARY KEY,
+            sku TEXT,
+            product TEXT NOT NULL,
+            min_g REAL NOT NULL,
+            max_g REAL NOT NULL,
+            mid_g REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    _SCHEMA_READY = True
+
+
+def sync_weight_bands():
+    """Refreshes the fixed per-product weight-band reference (Operations
+    request, 2026-11-05: a pre-defined band/target per product, not
+    re-derived from text on every read). Still sourced from the product's
+    own name -- that's the only place the promised range exists -- but
+    parsed here once and stored, so the compliance calculation below reads
+    a fixed table instead of re-running regex on every request. Upserts by
+    product_tmpl_id, so a later name edit updates the stored band rather
+    than leaving a stale one; a product with no parsable band is simply
+    left out, never given an invented one."""
+    _ensure_weight_band_schema()
+    rows = reporting.run_query("""
+        SELECT DISTINCT pt.id AS product_tmpl_id, pt.default_code AS sku, pt.name->>'en_US' AS product
+        FROM fresh_scan_log fsl
+        JOIN product_product pp ON pp.id = fsl.product_id
+        JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    """)
+    now = datetime.utcnow().isoformat()
+    for r in rows:
+        band = _parse_weight_band_g(r["product"])
+        if not band:
+            continue
+        min_g, max_g = band
+        appdb.run_query(
+            """
+                INSERT INTO fresh_product_weight_bands
+                    (product_tmpl_id, sku, product, min_g, max_g, mid_g, updated_at)
+                VALUES (:id, :sku, :product, :min_g, :max_g, :mid_g, :now)
+                ON CONFLICT (product_tmpl_id) DO UPDATE SET
+                    sku = excluded.sku, product = excluded.product, min_g = excluded.min_g,
+                    max_g = excluded.max_g, mid_g = excluded.mid_g, updated_at = excluded.updated_at
+            """,
+            {"id": r["product_tmpl_id"], "sku": r["sku"], "product": r["product"],
+             "min_g": min_g, "max_g": max_g, "mid_g": round((min_g + max_g) / 2, 1), "now": now},
+        )
+
+
+def get_weight_bands() -> dict[int, dict]:
+    _ensure_weight_band_schema()
+    return {r["product_tmpl_id"]: r for r in appdb.run_query("SELECT * FROM fresh_product_weight_bands")}
+
+
+# Correct/Below/Above is judged against a window centered on each
+# product's own ACTUAL average scanned weight (avg_weight_g) -- not Target
+# (the band midpoint) -- sized as a FRACTION of that product's OWN promised
+# band half-width. Operations request, 2026-11-06: deliberately measures
+# consistency around what the line is actually producing, not accuracy
+# against the promised weight -- centering on Target would also show
+# whether the average itself is drifting off-spec (e.g. Common Tomatoes
+# averaging 177.8g against a 175g target); centering on Avg does not, by
+# construction, since Avg is always the center of its own distribution.
+# A flat +/-10% of Target was tried first and rejected before this: checked
+# live against all 101 banded products, 2026-11-06, and it was stricter
+# than the product's own band for only 48 of them -- the other 53 (anything
+# whose own band is narrower than +/-10%, e.g. every 250-300g/500-600g
+# product at exactly +/-9.1%) came out LOOSER than their own promised spec.
+# Scaling the window width by a fixed fraction of each product's own band
+# half-width avoids that -- it's narrower than the original band for every
+# product, by the same relative amount.
+CORRECT_WINDOW_FRACTION_OF_BAND = 0.75
+
+
+def _band_compliance_sql(windows: list[tuple[int, float, float]], start: str, end_exclusive: str) -> str:
+    # Values here are our own computed (int id, float, float) tuples, never
     # user input, so inlining them as a literal VALUES list is safe and
     # avoids array-parameter binding -- same posture as this module's other
     # SQL constants embedding fixed internal constants via f-string.
-    values_sql = ", ".join(f"({pid}, {lo}, {hi})" for pid, lo, hi in bands)
+    values_sql = ", ".join(f"({pid}, {lo}, {hi})" for pid, lo, hi in windows)
     return f"""
-        WITH bounds AS (SELECT MAX(scan_time) AS as_of FROM fresh_scan_log),
-        bandtbl(product_tmpl_id, min_g, max_g) AS (VALUES {values_sql})
+        WITH windowtbl(product_tmpl_id, lo_g, hi_g) AS (VALUES {values_sql})
         SELECT pt.id AS product_tmpl_id,
-               COUNT(*) FILTER (WHERE fsl.scanned_weight_g < b.min_g) AS below,
-               COUNT(*) FILTER (WHERE fsl.scanned_weight_g > b.max_g) AS above,
-               COUNT(*) FILTER (WHERE fsl.scanned_weight_g BETWEEN b.min_g AND b.max_g) AS correct
+               COUNT(*) FILTER (WHERE fsl.scanned_weight_g < w.lo_g) AS below,
+               COUNT(*) FILTER (WHERE fsl.scanned_weight_g > w.hi_g) AS above,
+               COUNT(*) FILTER (WHERE fsl.scanned_weight_g BETWEEN w.lo_g AND w.hi_g) AS correct
         FROM fresh_scan_log fsl
-        JOIN bounds bd ON true
         JOIN product_product pp ON pp.id = fsl.product_id
         JOIN product_template pt ON pt.id = pp.product_tmpl_id
-        JOIN bandtbl b ON b.product_tmpl_id = pt.id
+        JOIN windowtbl w ON w.product_tmpl_id = pt.id
         WHERE fsl.scanned_weight_g > 0
-          AND fsl.scan_time >= bd.as_of - INTERVAL '{WINDOW_DAYS} days'
+          AND fsl.scan_time >= '{start}' AND fsl.scan_time < '{end_exclusive}'
         GROUP BY pt.id
     """
 
 
-def get_average_weight_by_product() -> dict:
+def get_average_weight_by_product(month: str | None = None) -> dict:
     """Average scanned pack weight per product, straight from the scale/
     barcode scan log (fresh_scan_log) -- requested by Operations, 2026-11-05.
     This is the real per-pack weight the production team's scale captures at
@@ -533,11 +639,23 @@ def get_average_weight_by_product() -> dict:
     have a nonzero value), and mrp_production itself tracks quantity in
     "Units", never kg -- verified live the same day.
 
-    Also classifies each product's scans against its own promised weight
-    band (correct_pct/below_pct/above_pct), parsed from the product name --
-    see _parse_weight_band_g's comment for why that's the only source. A
-    product with no parsable band gets `band_g: None` and no percentages,
-    never an invented 0%. Pushed into SQL as a second query (not pulled into
+    month: an explicit calendar month ("2026-09") to report on instead of
+    the default rolling last WINDOW_DAYS days -- see
+    _resolve_weight_window's docstring. Added 2026-11-06 on request to
+    check a specific past month rather than only "the last 30 days."
+
+    Also classifies each product's scans as correct_pct/below_pct/above_pct
+    against a window CENTERED ON avg_weight_g (this product's own actual
+    average, not its Target/band midpoint), sized at
+    CORRECT_WINDOW_FRACTION_OF_BAND of that same product's own band
+    half-width -- see CORRECT_WINDOW_FRACTION_OF_BAND's comment for why
+    Avg, not Target, and why a fraction of the band rather than a flat
+    percentage. band_g/band_mid_g (Target, still reported for reference)
+    are read from the fresh_product_weight_bands table (see
+    sync_weight_bands's docstring), not re-parsed from the name on every
+    request. A product with no stored band gets `band_g: None`/
+    `band_mid_g: None` and no percentages, never an invented 0%. The
+    compliance count is pushed into SQL as a second query (not pulled into
     Python row-by-row) because a raw per-scan pull of this window measured
     ~6s live, 2026-11-05 -- too slow for an on-demand page load; the
     aggregated query runs in under a second.
@@ -545,7 +663,9 @@ def get_average_weight_by_product() -> dict:
     A live read, not a finding -- there's no threshold or anomaly here, just
     the plain average/compliance rate the scan log already has full history
     for."""
-    rows = reporting.run_query(AVERAGE_WEIGHT_SQL)
+    start, end_exclusive, window_days = _resolve_weight_window(month)
+    rows = reporting.run_query(_average_weight_sql(start, end_exclusive))
+    band_by_id = get_weight_bands()
     products = [
         {
             "product_tmpl_id": r["product_tmpl_id"],
@@ -555,7 +675,9 @@ def get_average_weight_by_product() -> dict:
             "avg_weight_g": round(float(r["avg_weight_g"]), 1),
             "min_weight_g": round(float(r["min_weight_g"]), 1),
             "max_weight_g": round(float(r["max_weight_g"]), 1),
-            "band_g": _parse_weight_band_g(r["product"]),
+            "band_g": (band_by_id[r["product_tmpl_id"]]["min_g"], band_by_id[r["product_tmpl_id"]]["max_g"])
+            if r["product_tmpl_id"] in band_by_id else None,
+            "band_mid_g": band_by_id[r["product_tmpl_id"]]["mid_g"] if r["product_tmpl_id"] in band_by_id else None,
             "correct_pct": None,
             "below_pct": None,
             "above_pct": None,
@@ -563,9 +685,19 @@ def get_average_weight_by_product() -> dict:
         for r in rows
     ]
 
-    bands = [(p["product_tmpl_id"], *p["band_g"]) for p in products if p["band_g"]]
-    if bands:
-        compliance = {r["product_tmpl_id"]: r for r in reporting.run_query(_band_compliance_sql(bands))}
+    windows = []
+    for p in products:
+        if p["band_g"] is None:
+            continue
+        min_g, max_g = p["band_g"]
+        half_width = (max_g - min_g) / 2 * CORRECT_WINDOW_FRACTION_OF_BAND
+        center = p["avg_weight_g"]  # actual average, not Target -- see CORRECT_WINDOW_FRACTION_OF_BAND's comment
+        windows.append((p["product_tmpl_id"], round(center - half_width, 1), round(center + half_width, 1)))
+    if windows:
+        compliance = {
+            r["product_tmpl_id"]: r
+            for r in reporting.run_query(_band_compliance_sql(windows, start, end_exclusive))
+        }
         for p in products:
             c = compliance.get(p["product_tmpl_id"])
             if not c:
@@ -578,7 +710,13 @@ def get_average_weight_by_product() -> dict:
 
     for p in products:
         del p["product_tmpl_id"]
-    return {"window_days": WINDOW_DAYS, "products": products}
+    return {
+        "window_days": window_days,
+        "month": month,
+        "period_start": start,
+        "period_end_exclusive": end_exclusive,
+        "products": products,
+    }
 
 
 def build_fresh_production_findings() -> measurement.FindingBatch:

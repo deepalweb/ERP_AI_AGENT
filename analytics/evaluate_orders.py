@@ -15,7 +15,15 @@ from pathlib import Path
 from analytics.outlet_orders import evaluate, promotion_decision
 
 
-def load_timesfm():
+def load_timesfm(horizon: int = 7):
+    """horizon defaults to 7 (every existing caller: the gated daily-order
+    evaluation protocol, which hardcodes 7-day scoring in outlet_orders.py's
+    evaluate(), and forecast_outlet_orders.py/forecast_series.py's daily
+    series). A caller may request a different horizon (e.g. 24, for an
+    hourly series) -- max_horizon=128 is compiled once into the model
+    below and is just the model's own ceiling, not tied to any particular
+    caller's horizon; any horizon up to that ceiling can be requested per
+    call without recompiling."""
     import numpy as np
     import timesfm
     import torch
@@ -44,9 +52,9 @@ def load_timesfm():
     def predict(history):
         with torch.inference_mode():
             point, quantiles = model.forecast(
-                horizon=7, inputs=[np.array(history[-256:], dtype=np.float32)]
+                horizon=horizon, inputs=[np.array(history[-256:], dtype=np.float32)]
             )
-        if point.shape != (1, 7) or quantiles.shape != (1, 7, 10):
+        if point.shape != (1, horizon) or quantiles.shape != (1, horizon, 10):
             raise ValueError("Unexpected TimesFM output shape")
         # Counts cannot be negative. This explicit clipping is part of the method.
         return np.maximum(point[0], 0).tolist(), np.maximum(quantiles[0][:, [1, 9]], 0).tolist()
@@ -57,6 +65,7 @@ def load_timesfm():
         "torch": torch.__version__,
         "timesfm_package": version("timesfm"),
         "context": 256,
+        "horizon": horizon,
         "batch_size": 1,
         "device": "cpu",
         "threads": 2,
